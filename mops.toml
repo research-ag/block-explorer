@@ -1,0 +1,13 @@
+[toolchain]
+moc = "1.7.0"
+wasmtime = "36.0.9"
+
+[dependencies]
+core = "2.5.0"
+sha2 = "0.1.14"
+promtracker = "1.0.1"
+stable-trie = "0.0.7"
+
+[dev-dependencies]
+test = "2.1.2"
+bench-helper = "0.0.3"

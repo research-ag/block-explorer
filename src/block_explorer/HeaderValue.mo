@@ -1,0 +1,155 @@
+// 76-byte value blob stored in HeaderDb (the stable hash → header trie).
+//
+// Layout (all integers little-endian):
+//
+//   off | bytes | field
+//  -----+-------+-----------------------------------------------
+//     0 |     4 | version          (Nat32)
+//     4 |     4 | parent dbidx     (Nat32)
+//     8 |    32 | merkle root      (raw, internal LE order)
+//    40 |     4 | time             (Nat32)
+//    44 |     4 | bits             (Nat32)
+//    48 |     4 | nonce            (Nat32)
+//    52 |     4 | height           (Nat32)
+//    56 |    16 | cumWork          (Nat128, LE)
+//    72 |     4 | first seen       (Nat32, unix seconds; wraps in 2106)
+//  -----+-------+
+//    76 total
+//
+// Genesis has parentDbidx == 0 (its own dbidx) and is the only block
+// where parentDbidx points to itself.
+
+import Blob "mo:core/Blob";
+import Nat8 "mo:core/Nat8";
+import Nat32 "mo:core/Nat32";
+import VarArray "mo:core/VarArray";
+
+module {
+
+  public let SIZE : Nat = 76;
+
+  public type Fields = {
+    version : Nat32;
+    parentDbidx : Nat;
+    merkle : Blob; // 32 bytes, internal LE order
+    time : Nat32;
+    bits : Nat32;
+    nonce : Nat32;
+    height : Nat;
+    cumWork : Nat; // fits in 128 bits
+    firstSeen : Nat32; // unix seconds when first added to DB
+  };
+
+  // ---------------------------------------------------------------------
+  // Blob writers (used only at encode time; reads use direct b[i]).
+  // ---------------------------------------------------------------------
+
+  func writeLE32(buf : [var Nat8], off : Nat, v : Nat32) {
+    buf[off] := Nat8.fromNat((v & 0xff).toNat());
+    buf[off + 1] := Nat8.fromNat(((v >> 8) & 0xff).toNat());
+    buf[off + 2] := Nat8.fromNat(((v >> 16) & 0xff).toNat());
+    buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
+  };
+
+  func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
+    var x = v;
+    var i = 0;
+    while (i < 16) {
+      buf[off + i] := Nat8.fromNat(x % 256);
+      x /= 256;
+      i += 1;
+    };
+  };
+
+  func writeBlob32(buf : [var Nat8], off : Nat, b : Blob) {
+    var i = 0;
+    while (i < 32) {
+      buf[off + i] := b[i];
+      i += 1;
+    };
+  };
+
+  // ---------------------------------------------------------------------
+  // Blob readers (direct, no toArray).
+  // ---------------------------------------------------------------------
+
+  func readLE32(b : Blob, off : Nat) : Nat32 {
+    let b0 = Nat32.fromNat(b[off].toNat());
+    let b1 = Nat32.fromNat(b[off + 1].toNat());
+    let b2 = Nat32.fromNat(b[off + 2].toNat());
+    let b3 = Nat32.fromNat(b[off + 3].toNat());
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+  };
+
+  func readLE128(b : Blob, off : Nat) : Nat {
+    var acc : Nat = 0;
+    var i : Nat = 16;
+    while (i > 0) {
+      i -= 1;
+      acc := acc * 256 + b[off + i].toNat();
+    };
+    acc;
+  };
+
+  // ---------------------------------------------------------------------
+  // Encode / decode.
+  // ---------------------------------------------------------------------
+
+  public func encode(f : Fields) : Blob {
+    let mut = VarArray.repeat<Nat8>(0, SIZE);
+    writeLE32(mut, 0, f.version);
+    writeLE32(mut, 4, Nat32.fromNat(f.parentDbidx));
+    writeBlob32(mut, 8, f.merkle);
+    writeLE32(mut, 40, f.time);
+    writeLE32(mut, 44, f.bits);
+    writeLE32(mut, 48, f.nonce);
+    writeLE32(mut, 52, Nat32.fromNat(f.height));
+    writeLE128(mut, 56, f.cumWork);
+    writeLE32(mut, 72, f.firstSeen);
+    Blob.fromVarArray(mut);
+  };
+
+  // Slice 32 bytes out of a Blob into a fresh Blob without going via [Nat8].
+  func sliceBlob32(b : Blob, off : Nat) : Blob {
+    let mut = VarArray.repeat<Nat8>(0, 32);
+    var i = 0;
+    while (i < 32) {
+      mut[i] := b[off + i];
+      i += 1;
+    };
+    Blob.fromVarArray(mut);
+  };
+
+  public func decode(b : Blob) : Fields {
+    {
+      version = readLE32(b, 0);
+      parentDbidx = readLE32(b, 4).toNat();
+      merkle = sliceBlob32(b, 8);
+      time = readLE32(b, 40);
+      bits = readLE32(b, 44);
+      nonce = readLE32(b, 48);
+      height = readLE32(b, 52).toNat();
+      cumWork = readLE128(b, 56);
+      firstSeen = readLE32(b, 72);
+    };
+  };
+
+  // ---------------------------------------------------------------------
+  // Narrow accessors — read a single field straight from the value Blob
+  // without allocating. Caller must pass a 76-byte blob (SIZE).
+  // ---------------------------------------------------------------------
+
+  public func versionOf(b : Blob) : Nat32 = readLE32(b, 0);
+  public func parentDbidxOf(b : Blob) : Nat = readLE32(b, 4).toNat();
+  public func timeOf(b : Blob) : Nat32 = readLE32(b, 40);
+  public func bitsOf(b : Blob) : Nat32 = readLE32(b, 44);
+  public func nonceOf(b : Blob) : Nat32 = readLE32(b, 48);
+  public func heightOf(b : Blob) : Nat = readLE32(b, 52).toNat();
+  public func cumWorkOf(b : Blob) : Nat = readLE128(b, 56);
+  public func firstSeenOf(b : Blob) : Nat32 = readLE32(b, 72);
+
+  // 32-byte merkle root copy (small allocation, only used by /metrics
+  // and BlockInfo construction).
+  public func merkleOf(b : Blob) : Blob = sliceBlob32(b, 8);
+
+};

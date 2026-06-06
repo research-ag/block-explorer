@@ -1,0 +1,286 @@
+:root {
+  --bg: #0d1117;
+  --fg: #e6edf3;
+  --muted: #8b949e;
+  --accent: #f7931a; /* bitcoin orange */
+  --card: #161b22;
+  --border: #30363d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 2rem;
+  max-width: 1100px;
+  margin-inline: auto;
+}
+
+header h1 {
+  margin: 0 0 1rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tip-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.tip-row > div {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+}
+
+.label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.value {
+  font-size: 1.1rem;
+}
+
+.hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  align-items: center;
+}
+
+button {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input[type="number"] {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  width: 110px;
+  font: inherit;
+}
+
+input[type="text"] {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 280px;
+}
+
+.status {
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  min-height: 1.2em;
+}
+.status.error {
+  color: #ff7b72;
+}
+.status.ok {
+  color: #3fb950;
+}
+
+.block-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+.block-table th,
+.block-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.block-table th {
+  color: var(--muted);
+  font-weight: 500;
+  width: 130px;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+#bi-canonical.ok {
+  color: #3fb950;
+}
+#bi-canonical.warn {
+  color: #d29922;
+}
+
+.block-table tbody tr.selected {
+  background: rgba(247, 147, 26, 0.12);
+}
+
+.tip-refresh {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  background: transparent !important;
+  border: none !important;
+  padding: 0.75rem 0 !important;
+}
+.tip-refresh .status {
+  margin-top: 0;
+}
+
+/* Clickable rows / hash cells. */
+.block-table tbody tr.clickable {
+  cursor: pointer;
+}
+.block-table tbody tr.clickable:hover {
+  background: rgba(247, 147, 26, 0.08);
+}
+.linkish {
+  cursor: pointer;
+  color: var(--accent);
+}
+.linkish:hover {
+  text-decoration: underline;
+}
+
+/* Collapsible <details> sections inside cards (forks, leaderboard). */
+.card > details > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.card > details > summary::-webkit-details-marker {
+  display: none;
+}
+.card > details > summary::before {
+  content: "▶ ";
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.card > details[open] > summary::before {
+  content: "▼ ";
+}
+.card > details > summary h2 {
+  margin: 0;
+}
+
+#forks-filter {
+  flex: 1;
+  min-width: 240px;
+}
+#forks-sort {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  font: inherit;
+}
+
+/* Inline expansion panel under a leaderboard row. */
+.uploader-panel-row > .uploader-panel {
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0.75rem 1rem;
+}
+.uploader-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+.uploader-pager button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  font: inherit;
+  cursor: pointer;
+}
+.uploader-pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Inline copy-to-clipboard button. */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85em;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+.copy-btn:hover {
+  color: var(--fg);
+  background: rgba(247, 147, 26, 0.1);
+}
+.copy-btn.copied {
+  color: var(--ok, #3fb950);
+  border-color: var(--ok, #3fb950);
+}

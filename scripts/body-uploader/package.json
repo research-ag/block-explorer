@@ -1,0 +1,22 @@
+{
+  "name": "body-uploader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pulls full blocks from a Bitcoin Core node, extracts the txid list of each, and uploads it to the block_bodies canister.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "codegen": "didc bind -t ts block_bodies.did | sed 's#@dfinity/#@icp-sdk/core/#g' > block_bodies.did.d.ts && didc bind -t js block_bodies.did > block_bodies.did.js"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@icp-sdk/core": "^5.4.0"
+  }
+}

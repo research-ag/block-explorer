@@ -1,0 +1,24 @@
+canisters:
+  - name: block_explorer
+    recipe:
+      type: "https://raw.githubusercontent.com/research-ag/icp-cli-recipes/idl-option/recipes/motoko/recipe.hbs"
+      configuration:
+        main: src/block_explorer/main.mo
+        idl: .icp/cache/artifacts/block_explorer.did
+  - name: header_fetcher
+    recipe:
+      type: "https://raw.githubusercontent.com/research-ag/icp-cli-recipes/idl-option/recipes/motoko/recipe.hbs"
+      configuration:
+        main: src/header_fetcher/header_fetcher.mo
+        idl: .icp/cache/artifacts/header_fetcher.did
+  - name: block_bodies
+    recipe:
+      type: "@dfinity/motoko@v4.1.0"
+      configuration:
+        main: src/block_bodies/block_bodies.mo
+        idl: .icp/cache/artifacts/block_bodies.did
+  - name: frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: frontend

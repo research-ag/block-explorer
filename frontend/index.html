@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BTC Block Explorer</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Bitcoin Block-Header Explorer</h1>
+      <div class="tip-row">
+        <div>
+          <span class="label">Tip height</span>
+          <span id="tip-height" class="value">…</span>
+        </div>
+        <div>
+          <span class="label">Tip hash</span>
+          <span id="tip-hash" class="hash">…</span>
+          <button class="copy-btn" data-copy-target="tip-hash" title="Copy">⎘</button>
+        </div>
+        <div>
+          <span class="label">Tip time</span>
+          <span id="tip-time" class="value">…</span>
+        </div>
+        <div>
+          <span class="label">Difficulty</span>
+          <span id="tip-difficulty" class="value">…</span>
+        </div>
+        <div>
+          <span class="label">Blocks stored</span>
+          <span id="tip-stored" class="value">…</span>
+        </div>
+        <div class="tip-refresh">
+          <button id="btn-refresh" title="Refresh tip + current view">
+            ↻ Refresh
+          </button>
+          <span id="refresh-status" class="status"></span>
+        </div>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Browse chain</h2>
+      <div class="button-row">
+        <button id="btn-prev">◀ prev</button>
+        <button id="btn-next">next ▶</button>
+        <button id="btn-tip">jump to tip</button>
+        <button id="btn-genesis">jump to genesis</button>
+        <input id="goto-input" type="number" min="0" placeholder="height" />
+        <button id="btn-goto">go</button>
+      </div>
+      <div class="button-row">
+        <input
+          id="hash-input"
+          type="text"
+          placeholder="block hash (64 hex chars, big-endian)"
+        />
+        <button id="btn-find-hash">find by hash</button>
+        <span id="hash-status" class="status"></span>
+      </div>
+
+      <table class="block-table">
+        <tbody>
+          <tr>
+            <th>Height</th>
+            <td id="bi-height"></td>
+          </tr>
+          <tr>
+            <th>Hash</th>
+            <td><span id="bi-hash" class="hash"></span><button class="copy-btn" data-copy-target="bi-hash" title="Copy">⎘</button></td>
+          </tr>
+          <tr>
+            <th>Prev hash</th>
+            <td
+              id="bi-prev"
+              class="hash linkish"
+              title="Click to view parent block"
+            ></td>
+          </tr>
+          <tr>
+            <th>Merkle root</th>
+            <td id="bi-merkle" class="hash"></td>
+          </tr>
+          <tr>
+            <th>Time (UTC)</th>
+            <td id="bi-time"></td>
+          </tr>
+          <tr>
+            <th>Time (unix)</th>
+            <td id="bi-time-unix"></td>
+          </tr>
+          <tr>
+            <th>Version</th>
+            <td id="bi-version"></td>
+          </tr>
+          <tr>
+            <th>nBits</th>
+            <td id="bi-bits"></td>
+          </tr>
+          <tr>
+            <th>Difficulty</th>
+            <td id="bi-difficulty"></td>
+          </tr>
+          <tr>
+            <th>Nonce</th>
+            <td id="bi-nonce"></td>
+          </tr>
+          <tr>
+            <th>Cumulative work</th>
+            <td id="bi-cum-work"></td>
+          </tr>
+          <tr>
+            <th>First seen (UTC)</th>
+            <td id="bi-first-seen"></td>
+          </tr>
+          <tr>
+            <th>Uploader</th>
+            <td><span id="bi-uploader" class="hash"></span><button class="copy-btn" data-copy-target="bi-uploader" title="Copy">⎘</button></td>
+          </tr>
+          <tr>
+            <th>Canonical?</th>
+            <td id="bi-canonical"></td>
+          </tr>
+          <tr>
+            <th>Tx count</th>
+            <td id="bi-tx-count" class="muted"></td>
+          </tr>
+        </tbody>
+      </table>
+      <div id="browse-status" class="status"></div>
+    </section>
+
+    <section class="card" id="siblings-card" style="display: none">
+      <h2>Other blocks at this height</h2>
+      <p class="muted">
+        Same height, different hashes — i.e. fork siblings. ★ marks the
+        canonical block. Click a row to view that block.
+      </p>
+      <table class="block-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Hash</th>
+            <th>Time (UTC)</th>
+          </tr>
+        </thead>
+        <tbody id="siblings-body"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <details id="forks-details">
+        <summary>
+          <h2 style="display: inline">
+            Forks (<span id="forks-count">0</span>)
+          </h2>
+        </summary>
+        <p class="muted">
+          Non-canonical chain tips currently tracked. Each row is a tip; the
+          branch point is where it diverged from the canonical chain. Click a
+          row to view that fork tip.
+        </p>
+        <div class="button-row">
+          <input
+            id="forks-filter"
+            type="text"
+            placeholder="filter by tip hash (substring)"
+          />
+          <label class="muted"
+            >sort:
+            <select id="forks-sort">
+              <option value="length-desc">length ↓</option>
+              <option value="tipheight-desc">tip height ↓</option>
+              <option value="branchheight-desc">branch height ↓</option>
+              <option value="branchheight-asc">
+                branch height ↑ (deepest)
+              </option>
+            </select>
+          </label>
+          <label class="muted"
+            >per page:
+            <select id="forks-page-size">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <span id="forks-shown" class="muted"></span>
+        </div>
+        <p id="forks-empty" class="muted">No forks observed.</p>
+        <table class="block-table">
+          <thead>
+            <tr>
+              <th>Tip height</th>
+              <th>Length</th>
+              <th>Branch height</th>
+              <th>Tip hash</th>
+            </tr>
+          </thead>
+          <tbody id="forks-body"></tbody>
+        </table>
+        <div id="forks-pager" class="button-row" style="display: none">
+          <button id="forks-first" type="button">« first</button>
+          <button id="forks-prev" type="button">‹ prev</button>
+          <span id="forks-page-info" class="muted"></span>
+          <button id="forks-next" type="button">next ›</button>
+          <button id="forks-last" type="button">last »</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="card">
+      <details id="leaderboard-details" open>
+        <summary>
+          <h2 style="display: inline">
+            Uploader leaderboard
+            <span class="muted" style="font-weight: normal; font-size: 0.85em">
+              (top <span id="leaderboard-shown">0</span>)
+            </span>
+          </h2>
+        </summary>
+        <p class="muted">
+          Top 10 principals by number of distinct block headers stored.
+          A header counts toward the principal who first pushed it (later
+          duplicates are rejected). Click a principal to list its blocks
+          (newest first); the anonymous principal is shown but its
+          individual blocks are not tracked.
+        </p>
+        <table class="block-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Principal</th>
+              <th>Headers</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-body"></tbody>
+        </table>
+        <p id="leaderboard-empty" class="muted" style="display: none">
+          No uploads yet.
+        </p>
+      </details>
+    </section>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
