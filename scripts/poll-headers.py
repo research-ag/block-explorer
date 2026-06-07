@@ -73,7 +73,6 @@ from ic.principal import Principal
 
 BlockInfoType = Types.Record({
     "height": Types.Nat,
-    "dbidx": Types.Nat,
     "version": Types.Nat32,
     "prev_hash_be_hex": Types.Text,
     "merkle_root_be_hex": Types.Text,
