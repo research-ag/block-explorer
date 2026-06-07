@@ -257,8 +257,17 @@ persistent actor BlockExplorer {
   };
 
   // tx_count of the canonical block at `height`, or null if its body
-  // is not yet indexed.
+  // is not yet known.
   public query func tx_count_of(height : Nat) : async ?Nat = async chain.txCountAt(height);
+
+  // tx_count of any block (canonical or fork) by big-endian display hash,
+  // or null if unknown / no body. Works for fork blocks whose bodies were
+  // uploaded into the heap fork-body store.
+  public query func tx_count_of_hash(hash_be_hex : Text) : async ?Nat {
+    let bytes = Header.hexToBlob(hash_be_hex);
+    if (bytes.size() != 32) return null;
+    chain.txCountOfHash(Header.reverse32(bytes));
+  };
 
   // Body summary (tx_count + first_tx_index) for a canonical block.
   public query func get_body(height : Nat) : async ?Chain.BodyInfo = async chain.bodyAt(height);
@@ -317,6 +326,7 @@ persistent actor BlockExplorer {
       #set_cycles_per_call : () -> (n : Nat);
       #total_indexed_txids : () -> ();
       #tx_count_of : () -> (height : Nat);
+      #tx_count_of_hash : () -> (hash_be_hex : Text);
       #uploader_leaderboard : () -> (top : Nat)
     };
   }) : Bool {
