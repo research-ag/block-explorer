@@ -106,6 +106,8 @@ persistent actor BlockExplorer {
   renderer.addValue(PT.newValue("tip_height", [], func() = chain.tipHeight()));
   renderer.addValue(PT.newValue("fork_count", [], func() = chain.forks().size()));
   renderer.addValue(PT.newValue("reorg_count", [], func() = chain.reorgs().size()));
+  renderer.addValue(PT.newValue("bodies_height", [], func() = chain.bodiesHeight()));
+  renderer.addValue(PT.newValue("indexed_txids", [], func() = chain.totalIndexedTxids()));
   renderer.addValue(PT.newValue("uploader_count", [], func() = chain.uploaderStats().size()));
   renderer.addValue(PT.newValue("header_db_byte_size", [], func() = chain.memoryStats().byte_size));
   renderer.addValue(PT.newValue("header_db_leaf_count", [], func() = chain.memoryStats().used_leaf_count));
@@ -215,6 +217,59 @@ persistent actor BlockExplorer {
   };
 
   // ---------------------------------------------------------------------
+  // Block bodies (canonical transaction index).
+  //
+  // Index a canonical block's transaction ids, verified against the
+  // header's merkle root. Bodies must be uploaded in strict height order
+  // (genesis first); the txid trie stores every canonical transaction
+  // consecutively in chain order, and each block records the index of
+  // its first transaction (firstTxIndex) in the header value.
+  // ---------------------------------------------------------------------
+
+  public type BodyBatchResult = {
+    accepted : Nat; // bodies newly indexed in this call
+    duplicate : Nat; // bodies already indexed; no-op'd
+    last_error : ?Text; // first failure that halted the batch
+  };
+
+  public func push_body(block_hash_internal : Blob, tx_count : Nat, hashes : Blob) : async Result.Result<Chain.PushBodyOk, Text> {
+    chain.pushBody(block_hash_internal, tx_count, hashes);
+  };
+
+  // Batched upload; processes entries in order, stopping at the first
+  // real failure (returned in last_error). Already-indexed bodies are
+  // counted as duplicates and don't halt the batch.
+  public func push_bodies(batch : [(Blob, Nat, Blob)]) : async Result.Result<BodyBatchResult, Text> {
+    if (batch.size() == 0) return #err("empty batch");
+    var accepted = 0;
+    var duplicate = 0;
+    var lastErr : ?Text = null;
+    label loopB for ((block_hash, tx_count, hashes) in batch.vals()) {
+      switch (chain.pushBody(block_hash, tx_count, hashes)) {
+        case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
+        case (#err msg) { lastErr := ?msg; break loopB };
+      };
+    };
+    #ok({ accepted; duplicate; last_error = lastErr });
+  };
+
+  // tx_count of the canonical block at `height`, or null if its body
+  // is not yet indexed.
+  public query func tx_count_of(height : Nat) : async ?Nat = async chain.txCountAt(height);
+
+  // Body summary (tx_count + first_tx_index) for a canonical block.
+  public query func get_body(height : Nat) : async ?Chain.BodyInfo = async chain.bodyAt(height);
+
+  // Which canonical block height contains `txid` (32 bytes, internal LE).
+  public query func lookup_txid(txid : Blob) : async ?Nat = async chain.lookupTxid(txid);
+
+  // The next height whose body may be uploaded (= count of indexed bodies).
+  public query func bodies_next_height() : async Nat = async chain.bodiesHeight();
+
+  // Total transactions indexed across the canonical chain.
+  public query func total_indexed_txids() : async Nat = async chain.totalIndexedTxids();
+
+  // ---------------------------------------------------------------------
   // Ingress inspection.
   //
   // inspect_message runs at the boundary node before an ingress call
@@ -239,7 +294,9 @@ persistent actor BlockExplorer {
     arg : Blob;
     msg : {
       #blocks_by_uploader : () -> (p : Principal, offset : Nat, limit : Nat);
+      #bodies_next_height : () -> ();
       #cycles_balance : () -> ();
+      #get_body : () -> (height : Nat);
       #get_by_hash : () -> (hash_be_hex : Text);
       #get_cycles_per_call : () -> ();
       #get_view : () -> (height : ?Nat);
@@ -247,11 +304,16 @@ persistent actor BlockExplorer {
       #header_db_memory_stats : () -> ();
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
+      #lookup_txid : () -> (txid : Blob);
+      #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob);
+      #push_bodies : () -> (batch : [(Blob, Nat, Blob)]);
       #push_header : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
       #push_headers_hex : () -> (headers_hex : [Text]);
       #reorg_log : () -> (offset : Nat, limit : Nat);
       #set_cycles_per_call : () -> (n : Nat);
+      #total_indexed_txids : () -> ();
+      #tx_count_of : () -> (height : Nat);
       #uploader_leaderboard : () -> (top : Nat)
     };
   }) : Bool {

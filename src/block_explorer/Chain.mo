@@ -47,10 +47,12 @@ import Runtime "mo:core/Runtime";
 import Set "mo:core/Set";
 
 import Enum "mo:enumeration";
+import StableTrie "mo:stable-trie/Enumeration";
 
 import Header "Header";
 import HeaderDb "HeaderDb";
 import HeaderValue "HeaderValue";
+import Merkle "Merkle";
 
 module {
 
@@ -113,6 +115,20 @@ module {
 
   type BlobEnum = Enum.BlobEnumeration.BlobEnumeration;
 
+  // Body summary for a canonical block whose transactions are indexed.
+  public type BodyInfo = {
+    height : Nat;
+    tx_count : Nat;
+    first_tx_index : Nat; // F: this block's first tx in the canonical tx order
+  };
+
+  public type PushBodyOk = {
+    height : Nat;
+    tx_count : Nat;
+    first_tx_index : Nat;
+    duplicate : Bool; // body for this height was already indexed
+  };
+
   public type StableData = {
     headerDb : HeaderDb.StableData;
     tipWork : Nat;
@@ -122,6 +138,10 @@ module {
     uploaderBlocks : List.List<List.List<Blob>>;
     anonymousCount : Nat;
     reorgLog : List.List<ReorgEvent>;
+    // Block-body index (canonical transactions, in chain order).
+    txTrie : StableTrie.Enumeration;
+    bodiesNextHeight : Nat; // next height whose body may be uploaded
+    txCountOverride : Map.Map<Nat, Nat>; // blocks with duplicate txids (BIP30)
   };
 
   // ---------------------------------------------------------------------
@@ -151,6 +171,24 @@ module {
     Nat8.fromNat(Nat32.toNat((v >> (Nat32.fromNat(i) * 8)) & 0xff));
   };
 
+  // Encode a block height as a 4-byte little-endian blob (txid-trie value).
+  func encodeHeight(h : Nat) : Blob {
+    if (h > 0xFFFF_FFFF) Runtime.trap("Chain: height overflow for txid trie value");
+    let v = Nat32.fromNat(h);
+    Blob.fromArray([le32Byte(v, 0), le32Byte(v, 1), le32Byte(v, 2), le32Byte(v, 3)]);
+  };
+
+  func decodeHeight(b : Blob) : Nat {
+    Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000 + Nat8.toNat(b[3]) * 0x100_0000;
+  };
+
+  // Slice the 32-byte txid at index `i` out of a flat hashes blob.
+  func txidAt(hashes : Blob, i : Nat) : Blob {
+    let arr = Blob.toArray(hashes);
+    let off = i * 32;
+    Blob.fromArray(Array.tabulate<Nat8>(32, func(j) = arr[off + j]));
+  };
+
   // ---------------------------------------------------------------------
   // Chain class.
   // ---------------------------------------------------------------------
@@ -177,6 +215,26 @@ module {
 
     // Reorg log.
     var reorgLog : List.List<ReorgEvent> = List.empty<ReorgEvent>();
+
+    // Block-body index: txid -> height, in canonical chain order. The
+    // enumeration index of each txid is its position in the chain-wide
+    // transaction ordering (genesis coinbase = 0). Value is the 4-byte
+    // little-endian height of the block the tx belongs to.
+    var txTrie : StableTrie.Enumeration = StableTrie.empty({
+      pointer_size = 6;
+      aridity = 4;
+      root_aridity = ?262144;
+      key_size = 32;
+      value_size = 4;
+    });
+    // The next height whose body may be uploaded; bodies are uploaded in
+    // strict height order so the txid trie stays a contiguous prefix.
+    var bodiesNextHeight : Nat = 0;
+    // Heights whose stored txid count is less than their real tx_count
+    // because a txid was a cross-block duplicate (the historical BIP30
+    // coinbase reuse at heights 91842 / 91880). Keyed by height -> real
+    // tx_count. Tiny (<=2 entries on mainnet).
+    var txCountOverride : Map.Map<Nat, Nat> = Map.empty<Nat, Nat>();
 
     var initialized : Bool = false;
 
@@ -273,6 +331,9 @@ module {
       uploaderBlocks;
       anonymousCount;
       reorgLog;
+      txTrie;
+      bodiesNextHeight;
+      txCountOverride;
     };
 
     public func unshare(d : StableData) {
@@ -284,6 +345,9 @@ module {
       uploaderBlocks := d.uploaderBlocks;
       anonymousCount := d.anonymousCount;
       reorgLog := d.reorgLog;
+      txTrie := d.txTrie;
+      bodiesNextHeight := d.bodiesNextHeight;
+      txCountOverride := d.txCountOverride;
       rebuildUploaderOfHash();
       initialized := true;
     };
@@ -491,6 +555,18 @@ module {
       };
       let displaced : Nat = oldTipHeight - commonHeight;
 
+      // If any displaced block had its body indexed, capture where its
+      // transactions begin in the txid trie so we can truncate them out
+      // (read now, before the header is removed). Bodies are sequential,
+      // so the first displaced height with a body is commonHeight+1.
+      let bodyTruncPoint : ?Nat =
+        if (bodiesNextHeight > commonHeight + 1) {
+          switch (headerDb.get(commonHeight + 1)) {
+            case (?(_, v)) ?HeaderValue.firstTxIndexOf(v);
+            case null Runtime.trap("maybeReorg: missing first displaced block");
+          };
+        } else null;
+
       // 2. Roll back the canonical tip into the fork store, one block at
       //    a time, until the common ancestor is the last entry.
       while (tipHeight() > commonHeight) {
@@ -538,6 +614,22 @@ module {
           firstSeen = fb.firstSeen;
         });
         ignore headerDb.add(fb.hash, value);
+      };
+
+      // Truncate the txid trie for any displaced bodies and roll the
+      // body cursor back to the common ancestor. The promoted blocks
+      // start with F = 0 (no body) and must have their bodies re-uploaded.
+      switch (bodyTruncPoint) {
+        case (?p) {
+          StableTrie.truncate(txTrie, p);
+          var h = bodiesNextHeight;
+          while (h > commonHeight + 1) {
+            h -= 1;
+            Map.remove<Nat, Nat>(txCountOverride, Nat.compare, h);
+          };
+          bodiesNextHeight := commonHeight + 1;
+        };
+        case null {};
       };
 
       tipWork := newWork;
@@ -863,6 +955,126 @@ module {
           };
         },
       );
+    };
+
+    // -----------------------------------------------------------------
+    // Block bodies (canonical transaction index).
+    // -----------------------------------------------------------------
+
+    // The next height whose body may be uploaded (== count of blocks
+    // whose bodies are already indexed).
+    public func bodiesHeight() : Nat = bodiesNextHeight;
+
+    // Total transactions indexed across the canonical chain.
+    public func totalIndexedTxids() : Nat = StableTrie.size(txTrie);
+
+    // Index the body (transaction id list) of the canonical block at the
+    // body cursor. `hashes` is `tx_count` * 32 bytes of txids in block
+    // order (internal LE). Bodies must be uploaded in strict height order
+    // starting at genesis. Verifies the merkle root against the stored
+    // header before indexing.
+    public func pushBody(blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
+      if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
+      if (txCount == 0) return #err("tx_count must be >= 1");
+      if (hashes.size() != txCount * 32) {
+        return #err("hashes length " # debug_show hashes.size() # " != tx_count*32");
+      };
+      let b = switch (byHashInternal(blockHashInternal)) {
+        case (?b) b;
+        case null return #err("unknown block header hash");
+      };
+      if (not b.isCanonical) return #err("block is not on the canonical chain");
+
+      // Already indexed (re-upload of an earlier body): no-op.
+      if (b.height < bodiesNextHeight) {
+        let f = HeaderValue.firstTxIndexOf(b.value);
+        let tc = switch (txCountAt(b.height)) { case (?n) n; case null 0 };
+        return #ok({ height = b.height; tx_count = tc; first_tx_index = f; duplicate = true });
+      };
+      if (b.height != bodiesNextHeight) {
+        return #err("out of order body: expected height " # debug_show bodiesNextHeight # ", got " # debug_show b.height);
+      };
+
+      // Verify the merkle root against the canonical header.
+      let computed = Merkle.root(hashes, txCount);
+      if (computed != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
+
+      // F = current txid-trie size (where this block's txs begin).
+      let firstTxIndex = StableTrie.size(txTrie);
+      let value = HeaderValue.encode({
+        version = HeaderValue.versionOf(b.value);
+        firstTxIndex;
+        merkle = HeaderValue.merkleOf(b.value);
+        time = HeaderValue.timeOf(b.value);
+        bits = HeaderValue.bitsOf(b.value);
+        nonce = HeaderValue.nonceOf(b.value);
+        height = b.height;
+        cumWork = b.cumWork;
+        firstSeen = HeaderValue.firstSeenOf(b.value);
+      });
+      headerDb.put(b.height, value);
+
+      let hv = encodeHeight(b.height);
+      var i = 0;
+      while (i < txCount) {
+        ignore StableTrie.add(txTrie, txidAt(hashes, i), hv);
+        i += 1;
+      };
+      // If the trie didn't grow by the full tx_count, a txid was a
+      // cross-block duplicate (BIP30). Record the real count so queries
+      // stay correct.
+      let grew : Nat = StableTrie.size(txTrie) - firstTxIndex;
+      if (grew < txCount) {
+        Map.add<Nat, Nat>(txCountOverride, Nat.compare, b.height, txCount);
+      };
+
+      bodiesNextHeight += 1;
+      #ok({ height = b.height; tx_count = txCount; first_tx_index = firstTxIndex; duplicate = false });
+    };
+
+    // tx_count of the canonical block at `height`, or null if its body is
+    // not yet indexed.
+    public func txCountAt(height : Nat) : ?Nat {
+      if (height >= bodiesNextHeight) return null;
+      switch (Map.get<Nat, Nat>(txCountOverride, Nat.compare, height)) {
+        case (?n) return ?n;
+        case null {};
+      };
+      let f = switch (headerDb.get(height)) {
+        case (?(_, v)) HeaderValue.firstTxIndexOf(v);
+        case null return null;
+      };
+      let next = if (height + 1 < bodiesNextHeight) {
+        switch (headerDb.get(height + 1)) {
+          case (?(_, v)) HeaderValue.firstTxIndexOf(v);
+          case null return null;
+        };
+      } else {
+        StableTrie.size(txTrie);
+      };
+      ?(next - f : Nat);
+    };
+
+    public func bodyAt(height : Nat) : ?BodyInfo {
+      switch (txCountAt(height)) {
+        case null null;
+        case (?tc) {
+          let f = switch (headerDb.get(height)) {
+            case (?(_, v)) HeaderValue.firstTxIndexOf(v);
+            case null return null;
+          };
+          ?{ height; tx_count = tc; first_tx_index = f };
+        };
+      };
+    };
+
+    // Which canonical block contains `txid` (internal LE), or null.
+    public func lookupTxid(txid : Blob) : ?Nat {
+      if (txid.size() != 32) return null;
+      switch (StableTrie.lookup(txTrie, txid)) {
+        case (?(v, _)) ?decodeHeight(v);
+        case null null;
+      };
     };
   };
 

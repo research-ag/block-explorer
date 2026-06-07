@@ -11,12 +11,6 @@ canisters:
       configuration:
         main: src/header_fetcher/header_fetcher.mo
         idl: .icp/cache/artifacts/header_fetcher.did
-  - name: block_bodies
-    recipe:
-      type: "@dfinity/motoko@v4.1.0"
-      configuration:
-        main: src/block_bodies/block_bodies.mo
-        idl: .icp/cache/artifacts/block_bodies.did
   - name: frontend
     recipe:
       type: "@dfinity/asset-canister@v2.1.0"

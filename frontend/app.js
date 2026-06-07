@@ -95,6 +95,7 @@ const idlFactory = ({ IDL }) => {
   return IDL.Service({
     get_view: IDL.Func([IDL.Opt(IDL.Nat)], [ChainView], ["query"]),
     get_by_hash: IDL.Func([IDL.Text], [IDL.Opt(BlockInfo)], ["query"]),
+    tx_count_of: IDL.Func([IDL.Nat], [IDL.Opt(IDL.Nat)], ["query"]),
     import_next: IDL.Func([IDL.Nat], [ImportResult], []),
     push_header: IDL.Func([IDL.Text], [PushResult], []),
     cycles_balance: IDL.Func([], [IDL.Nat], ["query"]),
@@ -126,16 +127,6 @@ if (!canisterId) {
   throw new Error("missing canister id");
 }
 
-// Optional second canister: block_bodies. If not deployed yet, the
-// page still works — the tx-count column simply stays blank.
-const bodiesCanisterId = env["PUBLIC_CANISTER_ID:block_bodies"] || null;
-
-const bodiesIdlFactory = ({ IDL }) => {
-  return IDL.Service({
-    tx_count_of: IDL.Func([IDL.Nat], [IDL.Opt(IDL.Nat)], ["query"]),
-  });
-};
-
 const host = deriveHost();
 const isLocal = /localhost|127\.0\.0\.1/.test(host);
 
@@ -145,13 +136,6 @@ const agent = await HttpAgent.create({
 });
 
 const actor = Actor.createActor(idlFactory, { agent, canisterId });
-
-const bodiesActor = bodiesCanisterId
-  ? Actor.createActor(bodiesIdlFactory, {
-      agent,
-      canisterId: bodiesCanisterId,
-    })
-  : null;
 
 // ---------------------------------------------------------------------------
 // UI helpers.
@@ -296,11 +280,11 @@ function renderBlock(bi) {
 
   // Placeholder; the actual value is wired up by attachTxCount() below,
   // which is fired in parallel with get_view by loadBlock.
-  // tx-count is temporarily unavailable: it depended on the explorer's
-  // per-block dbidx (removed in the canonical-trie rewrite). It will be
-  // restored when block bodies are merged into the explorer (step 2).
+  // Placeholder; the actual value is wired up by attachTxCount() below,
+  // fired in parallel with get_view by loadBlock. Only canonical blocks
+  // have an indexed body.
   const tcEl = $("bi-tx-count");
-  tcEl.textContent = "—";
+  tcEl.textContent = bi.is_canonical ? "…" : "—";
   tcEl.className = "muted";
 }
 
@@ -682,8 +666,8 @@ async function loadBlock(opts) {
     }
     block = opt[0];
     height = block.height;
-    // tx-count disabled until block bodies are merged into the explorer
-    // (the per-block dbidx it used was removed in the trie rewrite).
+    // Fire tx_count in parallel with the get_view call below.
+    if (block.is_canonical) txCountPromise = actor.tx_count_of(block.height);
   }
   const view = await actor.get_view(height === null ? [] : [height]);
 
@@ -700,7 +684,7 @@ async function loadBlock(opts) {
       return;
     }
     block = view.block[0];
-    // tx-count disabled until block bodies are merged (see above).
+    if (block.is_canonical) txCountPromise = actor.tx_count_of(block.height);
   }
 
   currentHeight = block.height;

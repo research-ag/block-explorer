@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Parse a raw Bitcoin block from disk and submit its transaction-id list
-to the `block_bodies` canister via `put_body`.
+to the `block_explorer` canister via `push_body`.
+
+Bodies must be submitted in canonical height order (genesis first); the
+canister rejects out-of-order uploads. Query `bodies_next_height` to see
+which height it expects next.
 
 Usage:
     scripts/push-block-body.py PATH [--canister NAME] [--env ENV]
@@ -18,7 +22,7 @@ The script does, locally:
      (double-SHA256 of the *non-witness* serialization — i.e. with
      marker/flag and witness fields stripped, per BIP141).
   5. Submit (header_hash, tx_count, concatenated_txids) to
-     `block_bodies.put_body`.
+     `block_explorer.push_body`.
 
 No network access; segwit-aware.
 """
@@ -144,7 +148,7 @@ def call_put_body(canister: str, env: str | None,
         f.write(arg)
         args_file = f.name
     try:
-        args = ["icp", "canister", "call", canister, "put_body",
+        args = ["icp", "canister", "call", canister, "push_body",
                 "--args-file", args_file]
         if env:
             args += ["-e", env]
@@ -164,8 +168,8 @@ def call_put_body(canister: str, env: str | None,
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path", help="Path to raw block file (header + txs).")
-    ap.add_argument("--canister", default="block_bodies",
-                    help="Canister name or id (default: block_bodies)")
+    ap.add_argument("--canister", default="block_explorer",
+                    help="Canister name or id (default: block_explorer)")
     ap.add_argument("--env", default=None,
                     help="icp environment (e.g. local, ic). Defaults to icp's current env.")
     ap.add_argument("--dry-run", action="store_true",

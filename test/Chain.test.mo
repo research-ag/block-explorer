@@ -18,10 +18,13 @@ import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
+import Runtime "mo:core/Runtime";
 import VarArray "mo:core/VarArray";
 
 import Header "../src/block_explorer/Header";
 import Chain "../src/block_explorer/Chain";
+import Merkle "../src/block_explorer/Merkle";
+import HeaderValue "../src/block_explorer/HeaderValue";
 
 // --- Test harness ---------------------------------------------------------
 
@@ -69,7 +72,40 @@ func mkHeader(prevHash : Blob, bits : Nat32, time : Nat32, nonce : Nat32) : Blob
   Blob.fromVarArray(buf);
 };
 
+// Like mkHeader but with an explicit merkle root (offset 36), so we can
+// craft blocks whose body (txid list) verifies.
+func mkHeaderM(prevHash : Blob, bits : Nat32, time : Nat32, nonce : Nat32, merkle : Blob) : Blob {
+  let buf = VarArray.repeat<Nat8>(0, 80);
+  writeLE32(buf, 0, 1);
+  writeBlob(buf, 4, prevHash);
+  writeBlob(buf, 36, merkle);
+  writeLE32(buf, 68, time);
+  writeLE32(buf, 72, bits);
+  writeLE32(buf, 76, nonce);
+  Blob.fromVarArray(buf);
+};
+
 func hashOf(raw : Blob) : Blob = Header.headerHashBlob(raw);
+
+// A 32-byte txid that is all `b` bytes.
+func txid(b : Nat8) : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = b));
+
+// Concatenate 32-byte txids into a flat hashes blob.
+func txids(bs : [Nat8]) : Blob {
+  Blob.fromArray(
+    Array.tabulate<Nat8>(
+      bs.size() * 32,
+      func(i) = bs[i / 32],
+    )
+  );
+};
+
+func canon0(c : Chain.Chain) : Chain.StoredBlock {
+  switch (c.canonicalAt(0)) {
+    case (?b) b;
+    case null Runtime.trap("no genesis");
+  };
+};
 
 let GENESIS_HASH : Blob =
   Header.headerHashBlob(Header.hexToBlob(Header.GENESIS_HEADER_HEX));
@@ -480,6 +516,112 @@ suite(
         assert log[0].new_tip_height == 2;
         assert log[0].old_tip_hash_be_hex == Header.bytesToHex(Header.reverse32(hashOf(bRaw)));
         assert log[0].new_tip_hash_be_hex == Header.bytesToHex(Header.reverse32(hashOf(a2Raw)));
+      },
+    );
+  },
+);
+
+// =========================================================================
+// Block bodies (canonical transaction index)
+// =========================================================================
+
+suite(
+  "Chain: block bodies",
+  func() {
+    test(
+      "sequential upload, tx_count, and txid -> height lookup",
+      func() {
+        let c = newChain(); // 32-byte keys, real genesis
+        let g = canon0(c);
+        let genMerkle = HeaderValue.merkleOf(g.value); // genesis coinbase txid
+
+        // Genesis body: a single coinbase tx (root of [coinbase] == coinbase).
+        switch (c.pushBody(g.hash, 1, genMerkle)) {
+          case (#ok ok) assert ok.height == 0 and ok.tx_count == 1 and ok.first_tx_index == 0 and not ok.duplicate;
+          case (#err _) assert false;
+        };
+        assert c.bodiesHeight() == 1;
+        assert c.totalIndexedTxids() == 1;
+        assert c.txCountAt(0) == ?1;
+        assert c.lookupTxid(genMerkle) == ?0;
+
+        // Block 1 with three distinct txs; header merkle crafted to match.
+        let t = txids([1, 2, 3]);
+        let m1 = Merkle.root(t, 3);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, m1);
+        switch (push(c, h1)) { case (#ok ok) assert ok.is_canonical; case _ assert false };
+        switch (c.pushBody(hashOf(h1), 3, t)) {
+          case (#ok ok) assert ok.height == 1 and ok.tx_count == 3 and ok.first_tx_index == 1 and not ok.duplicate;
+          case (#err _) assert false;
+        };
+        assert c.bodiesHeight() == 2;
+        assert c.totalIndexedTxids() == 4;
+        assert c.txCountAt(1) == ?3;
+        assert c.lookupTxid(txid(2)) == ?1;
+        assert c.lookupTxid(txid(9)) == null;
+        switch (c.bodyAt(1)) {
+          case (?b) assert b.tx_count == 3 and b.first_tx_index == 1;
+          case null assert false;
+        };
+      },
+    );
+
+    test(
+      "rejects out-of-order / merkle mismatch; duplicate no-ops",
+      func() {
+        let c = newChain();
+        let g = canon0(c);
+        let genMerkle = HeaderValue.merkleOf(g.value);
+
+        let t = txids([1, 2]);
+        let m1 = Merkle.root(t, 2);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, m1);
+        ignore push(c, h1);
+
+        // Block 1 body before genesis -> out of order.
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#err _) {}; case _ assert false };
+        // Genesis body first.
+        ignore c.pushBody(g.hash, 1, genMerkle);
+        // Re-upload genesis -> duplicate no-op.
+        switch (c.pushBody(g.hash, 1, genMerkle)) { case (#ok ok) assert ok.duplicate; case _ assert false };
+        // Wrong txids for block 1 -> merkle mismatch.
+        switch (c.pushBody(hashOf(h1), 2, txids([5, 6]))) { case (#err _) {}; case _ assert false };
+        // Correct block 1 body.
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert not ok.duplicate; case _ assert false };
+        assert c.bodiesHeight() == 2;
+      },
+    );
+
+    test(
+      "reorg truncates indexed bodies back to the common ancestor",
+      func() {
+        let c = newChain();
+        let g = canon0(c);
+        let genMerkle = HeaderValue.merkleOf(g.value);
+        ignore c.pushBody(g.hash, 1, genMerkle);
+
+        // A1 canonical, body of 2 txs.
+        let tA = txids([10, 11]);
+        let a1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(tA, 2));
+        ignore push(c, a1);
+        ignore c.pushBody(hashOf(a1), 2, tA);
+        assert c.bodiesHeight() == 2;
+        assert c.totalIndexedTxids() == 3;
+        assert c.txCountAt(1) == ?2;
+
+        // Heavier branch off genesis displaces A1.
+        let b1 = mkHeader(g.hash, EASY_BITS, 1_700_000_010, 101);
+        ignore push(c, b1);
+        let b2 = mkHeader(hashOf(b1), EASY_BITS, 1_700_000_011, 102);
+        switch (push(c, b2)) { case (#ok ok) assert ok.is_canonical and ok.reorg_depth == 1; case _ assert false };
+
+        // A1's body is truncated; cursor rolled back; genesis body intact.
+        assert c.bodiesHeight() == 1;
+        assert c.totalIndexedTxids() == 1;
+        assert c.txCountAt(1) == null;
+        assert c.txCountAt(0) == ?1;
+        assert c.lookupTxid(genMerkle) == ?0;
+        assert c.lookupTxid(txid(10)) == null;
       },
     );
   },
