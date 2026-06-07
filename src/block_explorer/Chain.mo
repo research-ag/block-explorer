@@ -1,25 +1,37 @@
 // Bitcoin block-header chain with full reorg support.
 //
-// Layered storage
-// ---------------
-//   Layer 1 (stable):  HeaderDb         hash -> 76-byte value
-//                      via mo:stable-trie Enumeration (assigns dbidx).
-//   Layer 2 (stable):  CanonChain       height -> dbidx of canonical
-//                      block at that height (Region of Nat32 slots).
-//   Layer 3 (heap, EOP-stable):
-//     siblings      : Map<Nat,[Nat]> height -> non-canonical dbidxs
-//                                   (canonical block at that height
-//                                   is excluded).
-//     forkTips      : Set<Nat>      non-canonical leaf dbidxs.
+// Storage model
+// -------------
+//   Canonical chain (stable):  HeaderDb — a mo:stable-trie Enumeration
+//     that holds ONLY the canonical chain, in height order. The
+//     enumeration index equals the canonical height (genesis = 0,
+//     tip = size-1). Append with `add`; retract the tip with
+//     `removeLast`/`truncate` on a reorg. Values are compressed: no
+//     prev_hash/parent pointer is stored because the parent of index i
+//     is index i-1 (its key is the prev_hash).
 //
-// The class itself is `transient` in the actor (it owns a HeaderDb
-// instance which holds heap-side bookkeeping for the trie); persistence
-// goes through `share()`/`unshare()`.
+//   Fork store (heap, EOP-stable): all NON-canonical blocks, stored in
+//     full (including prev_hash). Two cooperating maps:
+//       forkByHash   : Map<hash, ForkBlock>     — lookup / attach / dedup
+//       forkByHeight : Map<height, [hash]>      — siblings at a height
+//     Fork tips are derived on demand (a fork block is a tip iff no
+//     other fork block names it as parent).
+//
+//   Uploader registry (heap, EOP-stable): a mo:enumeration BlobEnumeration
+//     mapping uploader principal <-> id, plus per-id push-ordered block
+//     hash lists. The anonymous principal is registered but its blocks
+//     are not individually stored (only counted).
+//
+//   Reorg log (heap, EOP-stable): one record per reorg event.
+//
+// The class is `transient` in the actor; persistence goes through
+// `share()`/`unshare()`.
 //
 // Hash convention
 // ---------------
-// Internally everything is in Bitcoin "internal" little-endian order.
-// Big-endian (display) hex is only used at API boundaries.
+// Internally everything is in Bitcoin "internal" little-endian order
+// (natural sha-256d output order). Big-endian (display) hex is only used
+// at API boundaries.
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
@@ -34,7 +46,8 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Set "mo:core/Set";
 
-import CanonChain "CanonChain";
+import Enum "mo:enumeration";
+
 import Header "Header";
 import HeaderDb "HeaderDb";
 import HeaderValue "HeaderValue";
@@ -46,14 +59,14 @@ module {
   // ---------------------------------------------------------------------
 
   // A "stored block" view returned by queries. Built on demand from the
-  // HeaderDb entry; not persisted in this shape.
+  // canonical trie or the fork store; not persisted in this shape.
   public type StoredBlock = {
-    dbidx : Nat;
     hash : Blob; // internal LE order, 32 bytes
-    value : Blob; // 72-byte HeaderValue blob
     height : Nat;
-    parentDbidx : Nat; // 0 == "no parent" (only genesis)
     cumWork : Nat;
+    value : Blob; // 76-byte HeaderValue blob
+    prevHash : Blob; // internal LE order, 32 bytes (zero for genesis)
+    isCanonical : Bool;
   };
 
   public type PushOk = {
@@ -71,14 +84,44 @@ module {
     branch_hash_be_hex : Text;
   };
 
+  // A non-canonical block, stored in full in the heap-side fork store.
+  public type ForkBlock = {
+    hash : Blob; // internal LE order, 32 bytes
+    prevHash : Blob; // internal LE order, 32 bytes
+    version : Nat32;
+    merkle : Blob; // internal LE order, 32 bytes
+    time : Nat32;
+    bits : Nat32;
+    nonce : Nat32;
+    height : Nat;
+    cumWork : Nat;
+    firstSeen : Nat32;
+  };
+
+  // One reorg event, appended to the reorg log whenever the canonical
+  // chain is switched to a heavier branch.
+  public type ReorgEvent = {
+    time : Int; // timestamp threaded into push (seconds, as firstSeen)
+    common_height : Nat; // height of the last shared canonical block
+    fork_length : Nat; // # new-branch blocks promoted above the common ancestor
+    displaced : Nat; // # old-canonical blocks rolled back
+    old_tip_hash_be_hex : Text;
+    old_tip_height : Nat;
+    new_tip_hash_be_hex : Text;
+    new_tip_height : Nat;
+  };
+
+  type BlobEnum = Enum.BlobEnumeration.BlobEnumeration;
+
   public type StableData = {
     headerDb : HeaderDb.StableData;
-    canonChain : CanonChain.StableData;
     tipWork : Nat;
-    siblings : Map.Map<Nat, [Nat]>;
-    forkTips : Set.Set<Nat>;
-    uploaderPrincipals : List.List<Principal>;
-    uploaderOfDbidx : List.List<Nat>;
+    forkByHash : Map.Map<Blob, ForkBlock>;
+    forkByHeight : Map.Map<Nat, [Blob]>;
+    uploaderEnum : BlobEnum;
+    uploaderBlocks : List.List<List.List<Blob>>;
+    anonymousCount : Nat;
+    reorgLog : List.List<ReorgEvent>;
   };
 
   // ---------------------------------------------------------------------
@@ -89,20 +132,18 @@ module {
     Header.bytesToHex(Header.reverse32(b));
   };
 
-  // 32-byte all-zero blob (genesis prev_hash).  Literal form so it
-  // qualifies as a static module-level constant.
+  // 32-byte all-zero blob (genesis prev_hash).
   let ZERO_HASH_BLOB : Blob = "\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00";
 
-  // Clamp an Int seconds-since-epoch into a Nat32 for storage as the
-  // `firstSeen` field. Negative values become 0 (only matters in tests
-  // where Time.now() can be 0); values past 2106 wrap, but the canister
-  // won't be running by then.
+  // The IC anonymous principal, used as the default uploader for blocks
+  // whose hash isn't individually attributed (see uploader registry).
+  func anonymousPrincipal() : Principal = Principal.fromText("2vxsx-fae");
+
   func nat32OfNowSecs(s : Int) : Nat32 {
     if (s <= 0) 0 else Nat32.fromNat(Int.abs(s) % 0x1_0000_0000);
   };
 
-  // One year in seconds (365 days = 31_536_000). Used for the freshness
-  // check on newly pushed headers.
+  // One year in seconds (365 days). Freshness check on pushed headers.
   let ONE_YEAR_SECS : Nat = 31_536_000;
 
   // Extract the byte at little-endian position `i` (0..3) from a Nat32.
@@ -114,57 +155,72 @@ module {
   // Chain class.
   // ---------------------------------------------------------------------
 
-  public class Chain() {
+  // `keySize` is the canonical-trie key width. Production passes
+  // HeaderDb.KEY_SIZE (28); tests may pass HeaderDb.HASH_SIZE (32) to
+  // store synthetic non-PoW headers (see HeaderDb).
+  public class Chain(keySize : Nat) {
 
-    let headerDb : HeaderDb.HeaderDb = HeaderDb.HeaderDb();
-    let canonChain : CanonChain.CanonChain = CanonChain.CanonChain();
+    let headerDb : HeaderDb.HeaderDb = HeaderDb.HeaderDb(keySize);
     var tipWork : Nat = 0;
-    var siblings : Map.Map<Nat, [Nat]> = Map.empty<Nat, [Nat]>();
-    var forkTips : Set.Set<Nat> = Set.empty<Nat>();
-    // Uploader bookkeeping: each principal that has ever pushed a header
-    // is recorded once in `uploaderPrincipals`. Its position in that list
-    // is the uploader index. `uploaderOfDbidx` is parallel to the
-    // HeaderDb: position `dbidx` holds the uploader index for the block
-    // stored at that dbidx.
-    var uploaderPrincipals : List.List<Principal> = List.empty<Principal>();
-    var uploaderOfDbidx : List.List<Nat> = List.empty<Nat>();
-    // Heap-only, parallel to `uploaderPrincipals`: position `i` holds
-    // a record `{principal; blocks}` where `blocks` is the list of
-    // dbidxs uploaded by that principal in chronological (push) order.
-    // For the anonymous principal we deliberately keep `blocks` empty
-    // (its block list would dominate storage) and count its pushes in
-    // `anonymousCount` instead. Both are rebuilt in `unshare` from
-    // `uploaderPrincipals` + `uploaderOfDbidx`.
-    var uploaders : List.List<{ principal : Principal; blocks : List.List<Nat> }> =
-      List.empty<{ principal : Principal; blocks : List.List<Nat> }>();
+
+    // Fork store.
+    var forkByHash : Map.Map<Blob, ForkBlock> = Map.empty<Blob, ForkBlock>();
+    var forkByHeight : Map.Map<Nat, [Blob]> = Map.empty<Nat, [Blob]>();
+
+    // Uploader registry.
+    var uploaderEnum : BlobEnum = Enum.BlobEnumeration.empty();
+    var uploaderBlocks : List.List<List.List<Blob>> = List.empty<List.List<Blob>>();
     var anonymousCount : Nat = 0;
+    // Heap-only reverse index hash -> uploader id (non-anonymous only),
+    // rebuilt in `unshare`.
+    var uploaderOfHash : Map.Map<Blob, Nat> = Map.empty<Blob, Nat>();
+
+    // Reorg log.
+    var reorgLog : List.List<ReorgEvent> = List.empty<ReorgEvent>();
+
     var initialized : Bool = false;
 
-    // Rebuild `uploaders` and `anonymousCount` from
-    // `uploaderPrincipals` + `uploaderOfDbidx`. O(n) on the header-DB
-    // size; called from `unshare` so the heap-only views are restored
-    // after every upgrade.
-    func rebuildUploaders() {
-      uploaders := List.empty<{ principal : Principal; blocks : List.List<Nat> }>();
-      anonymousCount := 0;
-      for (p in List.values<Principal>(uploaderPrincipals)) {
-        List.add(uploaders, { principal = p; blocks = List.empty<Nat>() });
+    // -----------------------------------------------------------------
+    // Uploader bookkeeping.
+    // -----------------------------------------------------------------
+
+    // Register `p` and return its id, growing `uploaderBlocks` to match.
+    func findOrAddUploader(p : Principal) : Nat {
+      let id = Enum.BlobEnumeration.add(uploaderEnum, Principal.toBlob(p));
+      while (List.size(uploaderBlocks) <= id) {
+        List.add(uploaderBlocks, List.empty<Blob>());
       };
-      var dbidx : Nat = 0;
-      for (uIdx in List.values<Nat>(uploaderOfDbidx)) {
-        let e = switch (List.get(uploaders, uIdx)) {
-          case (?e) e;
-          case null Runtime.trap(
-            "rebuildUploaders: dbidx " # debug_show dbidx #
-            " references missing uploader index " # debug_show uIdx
-          );
+      id;
+    };
+
+    // Record that block `hash` was pushed by `uploader`. Called once,
+    // at the block's first insertion (canonical or fork).
+    func recordUploader(hash : Blob, uploader : Principal) {
+      let id = findOrAddUploader(uploader);
+      if (Principal.isAnonymous(uploader)) {
+        anonymousCount += 1;
+      } else {
+        switch (List.get(uploaderBlocks, id)) {
+          case (?lst) List.add(lst, hash);
+          case null Runtime.trap("recordUploader: missing block list for id " # debug_show id);
         };
-        if (Principal.isAnonymous(e.principal)) {
-          anonymousCount += 1;
-        } else {
-          List.add(e.blocks, dbidx);
+        Map.add<Blob, Nat>(uploaderOfHash, Blob.compare, hash, id);
+      };
+    };
+
+    func rebuildUploaderOfHash() {
+      uploaderOfHash := Map.empty<Blob, Nat>();
+      let n = Enum.BlobEnumeration.size(uploaderEnum);
+      var id = 0;
+      while (id < n) {
+        let p = Principal.fromBlob(Enum.BlobEnumeration.at(uploaderEnum, id));
+        if (not Principal.isAnonymous(p)) {
+          switch (List.get(uploaderBlocks, id)) {
+            case (?lst) for (h in List.values(lst)) Map.add<Blob, Nat>(uploaderOfHash, Blob.compare, h, id);
+            case null {};
+          };
         };
-        dbidx += 1;
+        id += 1;
       };
     };
 
@@ -172,22 +228,27 @@ module {
     // Initialization / persistence.
     // -----------------------------------------------------------------
 
-    // Insert the Bitcoin mainnet genesis header at dbidx 0.
-    // Idempotent: no-op if already initialized. `firstSeenSecs` is the
-    // canister's wall-clock time when genesis was inserted (used as the
-    // genesis block's `firstSeen`).
     public func initGenesis(firstSeenSecs : Nat32, uploader : Principal) {
+      initRoot(Header.hexToBlob(Header.GENESIS_HEADER_HEX), firstSeenSecs, uploader);
+    };
+
+    // Seed the chain's index-0 root from an arbitrary 80-byte header.
+    // Production uses this with the Bitcoin genesis (via initGenesis);
+    // tests use it to anchor at a checkpoint block so a short fork can
+    // be exercised without replaying the whole chain. The root is height
+    // 0 with cumWork = its own block work; its real prev_hash is ignored
+    // (height-0 blocks report a zero prev_hash).
+    public func initRoot(raw : Blob, firstSeenSecs : Nat32, uploader : Principal) {
       if (initialized) return;
-      let raw = Header.hexToBlob(Header.GENESIS_HEADER_HEX);
       let parsed = switch (Header.parseHeader(raw)) {
         case (?p) p;
-        case null Runtime.trap("genesis header invalid");
+        case null Runtime.trap("root header invalid");
       };
       let hash = Header.headerHashBlob(raw);
       let work = Header.chainWork(parsed.bits);
       let value = HeaderValue.encode({
         version = parsed.version;
-        parentDbidx = 0; // genesis is its own "parent"
+        firstTxIndex = 0;
         merkle = parsed.merkle;
         time = parsed.time;
         bits = parsed.bits;
@@ -196,169 +257,193 @@ module {
         cumWork = work;
         firstSeen = firstSeenSecs;
       });
-      let dbidx = headerDb.add(hash, value);
-      assert dbidx == 0;
-      recordUploader(dbidx, uploader);
-      canonChain.add(0);
+      let idx = headerDb.add(hash, value);
+      assert idx == 0;
+      recordUploader(hash, uploader);
       tipWork := work;
       initialized := true;
     };
 
     public func share() : StableData = {
       headerDb = headerDb.share();
-      canonChain = canonChain.share();
       tipWork;
-      siblings;
-      forkTips;
-      uploaderPrincipals;
-      uploaderOfDbidx;
+      forkByHash;
+      forkByHeight;
+      uploaderEnum;
+      uploaderBlocks;
+      anonymousCount;
+      reorgLog;
     };
 
     public func unshare(d : StableData) {
       headerDb.unshare(d.headerDb);
-      canonChain.unshare(d.canonChain);
       tipWork := d.tipWork;
-      siblings := d.siblings;
-      forkTips := d.forkTips;
-      uploaderPrincipals := d.uploaderPrincipals;
-      uploaderOfDbidx := d.uploaderOfDbidx;
-      rebuildUploaders();
+      forkByHash := d.forkByHash;
+      forkByHeight := d.forkByHeight;
+      uploaderEnum := d.uploaderEnum;
+      uploaderBlocks := d.uploaderBlocks;
+      anonymousCount := d.anonymousCount;
+      reorgLog := d.reorgLog;
+      rebuildUploaderOfHash();
       initialized := true;
     };
 
     // -----------------------------------------------------------------
-    // Internal helpers.
+    // Internal: building StoredBlock views.
     // -----------------------------------------------------------------
 
-    // canonHeight = highest populated slot.
-    func canonHeight() : Nat = canonChain.size() - 1 : Nat;
-
-    func readCanonSlot(h : Nat) : Nat = canonChain.at(h);
-
-    // Append the canonical dbidx for the next height (canonHeight+1).
-    func appendCanon(dbidx : Nat) = canonChain.add(dbidx);
-
-    // Truncate canonChain to a new top height (inclusive).
-    func truncCanon(newTop : Nat) {
-      while (canonChain.size() > newTop + 1) {
-        canonChain.removeLast();
+    func canonPrevHash(idx : Nat) : Blob {
+      if (idx == 0) return ZERO_HASH_BLOB;
+      switch (headerDb.get(idx - 1)) {
+        case (?(h, _)) h;
+        case null Runtime.trap("canonPrevHash: missing index " # debug_show(idx - 1 : Nat));
       };
     };
 
-    func storedAt(dbidx : Nat) : StoredBlock {
-      switch (headerDb.get(dbidx)) {
+    func storedCanonAt(idx : Nat) : StoredBlock {
+      switch (headerDb.get(idx)) {
         case (?(hash, value)) {
           {
-            dbidx;
             hash;
-            value;
-            height = HeaderValue.heightOf(value);
-            parentDbidx = HeaderValue.parentDbidxOf(value);
+            height = idx;
             cumWork = HeaderValue.cumWorkOf(value);
+            value;
+            prevHash = canonPrevHash(idx);
+            isCanonical = true;
           };
         };
-        case null Runtime.trap("HeaderDb missing dbidx " # debug_show dbidx);
+        case null Runtime.trap("storedCanonAt: missing index " # debug_show idx);
       };
     };
 
-    // Look up the uploader index for `p`, walking the principals list
-    // from the start. Append `p` if not yet present and return its new
-    // index. O(n) on the number of distinct uploaders, as requested.
-    func findOrAddUploaderIndex(p : Principal) : Nat {
-      switch (List.indexOf<Principal>(uploaderPrincipals, Principal.equal, p)) {
-        case (?i) i;
-        case null {
-          let i = List.size(uploaderPrincipals);
-          List.add(uploaderPrincipals, p);
-          List.add(uploaders, { principal = p; blocks = List.empty<Nat>() });
-          i;
+    func storedFork(fb : ForkBlock) : StoredBlock {
+      let value = HeaderValue.encode({
+        version = fb.version;
+        firstTxIndex = 0;
+        merkle = fb.merkle;
+        time = fb.time;
+        bits = fb.bits;
+        nonce = fb.nonce;
+        height = fb.height;
+        cumWork = fb.cumWork;
+        firstSeen = fb.firstSeen;
+      });
+      {
+        hash = fb.hash;
+        height = fb.height;
+        cumWork = fb.cumWork;
+        value;
+        prevHash = fb.prevHash;
+        isCanonical = false;
+      };
+    };
+
+    // -----------------------------------------------------------------
+    // Internal: fork-store maintenance.
+    // -----------------------------------------------------------------
+
+    func forkAt(height : Nat) : [Blob] {
+      switch (Map.get<Nat, [Blob]>(forkByHeight, Nat.compare, height)) {
+        case (?xs) xs;
+        case null [];
+      };
+    };
+
+    func addFork(fb : ForkBlock) {
+      Map.add<Blob, ForkBlock>(forkByHash, Blob.compare, fb.hash, fb);
+      let cur = forkAt(fb.height);
+      let next = Array.tabulate<Blob>(
+        cur.size() + 1,
+        func(i) = if (i < cur.size()) cur[i] else fb.hash,
+      );
+      Map.add<Nat, [Blob]>(forkByHeight, Nat.compare, fb.height, next);
+    };
+
+    func removeFork(hash : Blob, height : Nat) {
+      Map.remove<Blob, ForkBlock>(forkByHash, Blob.compare, hash);
+      switch (Map.get<Nat, [Blob]>(forkByHeight, Nat.compare, height)) {
+        case null {};
+        case (?xs) {
+          let kept = Array.filter<Blob>(xs, func(x) = x != hash);
+          if (kept.size() == 0) {
+            Map.remove<Nat, [Blob]>(forkByHeight, Nat.compare, height);
+          } else {
+            Map.add<Nat, [Blob]>(forkByHeight, Nat.compare, height, kept);
+          };
         };
       };
     };
 
-    // Record a header push at `dbidx` by `uploader`. Updates the
-    // heap-only `uploaders` / `anonymousCount` views in lock-step with
-    // the stable `uploaderOfDbidx` so a follow-up `share`/`unshare`
-    // cycle reproduces the same state.
-    //
-    // Invariant: `uploaderOfDbidx` is parallel to the HeaderDb, so the
-    // next slot to fill is always at position `List.size(uploaderOfDbidx)`
-    // and must equal `dbidx`. Trap if that ever drifts.
-    func recordUploader(dbidx : Nat, uploader : Principal) {
-      if (List.size(uploaderOfDbidx) != dbidx) {
-        Runtime.trap(
-          "recordUploader: uploaderOfDbidx size " #
-          debug_show List.size(uploaderOfDbidx) #
-          " != dbidx " # debug_show dbidx
-        );
-      };
-      let uIdx = findOrAddUploaderIndex(uploader);
-      List.add(uploaderOfDbidx, uIdx);
-      appendBlockToUploader(uIdx, dbidx);
-    };
+    // -----------------------------------------------------------------
+    // Internal: ancestor walking (canonical or fork).
+    // -----------------------------------------------------------------
 
-    // Bump the heap-side bookkeeping for uploader index `uIdx` after
-    // it pushed the header at `dbidx`. Anonymous principals only
-    // increment `anonymousCount`; everyone else gets `dbidx` appended
-    // to their per-uploader block list.
-    func appendBlockToUploader(uIdx : Nat, dbidx : Nat) {
-      let e = switch (List.get(uploaders, uIdx)) {
-        case (?e) e;
-        case null Runtime.trap(
-          "appendBlockToUploader: missing uploader index " # debug_show uIdx
-        );
-      };
-      if (Principal.isAnonymous(e.principal)) {
-        anonymousCount += 1;
-      } else {
-        List.add(e.blocks, dbidx);
+    public func byHashInternal(hash : Blob) : ?StoredBlock {
+      if (hash.size() != 32) return null;
+      switch (Map.get<Blob, ForkBlock>(forkByHash, Blob.compare, hash)) {
+        case (?fb) ?storedFork(fb);
+        case null {
+          switch (headerDb.lookup(hash)) {
+            case (?(value, idx)) ?{
+              hash;
+              height = idx;
+              cumWork = HeaderValue.cumWorkOf(value);
+              value;
+              prevHash = canonPrevHash(idx);
+              isCanonical = true;
+            };
+            case null null;
+          };
+        };
       };
     };
 
-    func ancestorAt(startDbidx : Nat, targetHeight : Nat) : ?Nat {
-      var idx = startDbidx;
+    func parentOf(b : StoredBlock) : ?StoredBlock {
+      if (b.height == 0) return null;
+      if (b.isCanonical) return ?storedCanonAt(b.height - 1);
+      byHashInternal(b.prevHash);
+    };
+
+    // Ancestor of `start` at `targetHeight` (<= start.height).
+    func ancestorAt(start : StoredBlock, targetHeight : Nat) : ?StoredBlock {
+      if (targetHeight > start.height) return null;
+      var cur = start;
       loop {
-        let value = switch (headerDb.get(idx)) {
-          case (?(_, v)) v;
+        if (cur.height == targetHeight) return ?cur;
+        if (cur.isCanonical) return ?storedCanonAt(targetHeight);
+        switch (parentOf(cur)) {
+          case (?p) cur := p;
           case null return null;
         };
-        let h = HeaderValue.heightOf(value);
-        if (h == targetHeight) return ?idx;
-        if (h < targetHeight) return null;
-        if (h == 0) return null;
-        idx := HeaderValue.parentDbidxOf(value);
       };
     };
 
-    func lastNTimestamps(startDbidx : Nat, n : Nat) : [Nat32] {
+    func lastNTimestamps(start : StoredBlock, n : Nat) : [Nat32] {
       let buf = List.empty<Nat32>();
-      var idx = startDbidx;
+      var cur : ?StoredBlock = ?start;
       var i = 0;
       label loop_ loop {
         if (i >= n) break loop_;
-        let value = switch (headerDb.get(idx)) {
-          case (?(_, v)) v;
+        switch (cur) {
           case null break loop_;
+          case (?b) {
+            List.add(buf, HeaderValue.timeOf(b.value));
+            i += 1;
+            cur := parentOf(b);
+          };
         };
-        buf.add(HeaderValue.timeOf(value));
-        i += 1;
-        let h = HeaderValue.heightOf(value);
-        if (h == 0) break loop_;
-        idx := HeaderValue.parentDbidxOf(value);
       };
-      buf.toArray();
+      List.toArray(buf);
     };
 
-    func expectedBitsFor(parentDbidx : Nat, newHeight : Nat) : Nat32 {
-      let parent = storedAt(parentDbidx);
+    func expectedBitsFor(parent : StoredBlock, newHeight : Nat) : Nat32 {
       let parentBits = HeaderValue.bitsOf(parent.value);
       if (
         newHeight % Header.RETARGET_INTERVAL == 0 and newHeight >= Header.RETARGET_INTERVAL
       ) {
         let firstHeight = newHeight - Header.RETARGET_INTERVAL : Nat;
-        switch (ancestorAt(parentDbidx, firstHeight)) {
-          case (?firstIdx) {
-            let first = storedAt(firstIdx);
+        switch (ancestorAt(parent, firstHeight)) {
+          case (?first) {
             Header.computeRetargetNBits(
               HeaderValue.timeOf(parent.value),
               parentBits,
@@ -372,126 +457,155 @@ module {
       };
     };
 
-    func addSibling(h : Nat, dbidx : Nat) {
-      let cur : [Nat] = switch (Map.get<Nat, [Nat]>(siblings, Nat.compare, h)) {
-        case (?xs) xs;
-        case null [];
-      };
-      let next = Array.tabulate<Nat>(
-        cur.size() + 1,
-        func(i) = if (i < cur.size()) cur[i] else dbidx,
-      );
-      Map.add<Nat, [Nat]>(siblings, Nat.compare, h, next);
-    };
+    // -----------------------------------------------------------------
+    // Internal: reorg.
+    // -----------------------------------------------------------------
 
-    func removeSibling(h : Nat, dbidx : Nat) {
-      switch (Map.get<Nat, [Nat]>(siblings, Nat.compare, h)) {
-        case null {};
-        case (?xs) {
-          let kept = Array.filter<Nat>(xs, func(x) = x != dbidx);
-          if (kept.size() == 0) {
-            Map.remove<Nat, [Nat]>(siblings, Nat.compare, h);
-          } else {
-            Map.add<Nat, [Nat]>(siblings, Nat.compare, h, kept);
-          };
-        };
-      };
-    };
-
-    // Switch canonical chain to `newDbidx` if it has more work.
-    // Returns the number of canonical blocks displaced (0 if no reorg).
-    func maybeReorg(newDbidx : Nat, newWork : Nat) : Nat {
+    // Switch the canonical chain to the heavier branch ending at
+    // `newTipHash` if it outweighs the current tip. Returns the number
+    // of canonical blocks displaced (0 if no reorg happened).
+    func maybeReorg(newTipHash : Blob, newWork : Nat, now : Int) : Nat {
       if (newWork <= tipWork) return 0;
 
-      let curTip = canonHeight();
-      var idx = newDbidx;
-      let newBranch = List.empty<Nat>();
+      // 1. Walk the new branch from its tip down to the common ancestor
+      //    (the first canonical block we hit). `branch` is tip-first.
+      let branch = List.empty<ForkBlock>();
+      var curHash = newTipHash;
+      var commonHeight : Nat = 0;
       label findCommon loop {
-        let s = storedAt(idx);
-        if (s.height <= curTip and readCanonSlot(s.height) == idx) {
-          break findCommon;
+        let fb = switch (Map.get<Blob, ForkBlock>(forkByHash, Blob.compare, curHash)) {
+          case (?x) x;
+          case null Runtime.trap("maybeReorg: branch block missing from fork store");
         };
-        newBranch.add(idx);
-        if (s.height == 0) Runtime.trap("reorg: walked past genesis");
-        idx := s.parentDbidx;
+        List.add(branch, fb);
+        switch (headerDb.lookup(fb.prevHash)) {
+          case (?(_, idx)) { commonHeight := idx; break findCommon };
+          case null curHash := fb.prevHash;
+        };
       };
-      let forkHeight = storedAt(idx).height;
-      let oldTipDbidx = readCanonSlot(curTip);
-      let droppedCount : Nat = curTip - forkHeight;
 
-      // Demote displaced canonical blocks to siblings.
-      var h = forkHeight + 1;
-      while (h <= curTip) {
-        let demoted = readCanonSlot(h);
-        addSibling(h, demoted);
-        h += 1;
+      let oldTipHeight = tipHeight();
+      let oldTipHash = switch (headerDb.get(oldTipHeight)) {
+        case (?(h, _)) h;
+        case null Runtime.trap("maybeReorg: missing old tip");
       };
-      truncCanon(forkHeight);
+      let displaced : Nat = oldTipHeight - commonHeight;
 
-      // Promote new-branch blocks (newBranch is tip-first; replay
-      // forwards from common ancestor up to the new tip).
-      var k = newBranch.size();
+      // 2. Roll back the canonical tip into the fork store, one block at
+      //    a time, until the common ancestor is the last entry.
+      while (tipHeight() > commonHeight) {
+        let h = tipHeight();
+        let (rmHash, rmValue) = switch (headerDb.removeLast()) {
+          case (?x) x;
+          case null Runtime.trap("maybeReorg: removeLast on empty trie");
+        };
+        let prevH = switch (headerDb.get(h - 1)) {
+          case (?(ph, _)) ph;
+          case null Runtime.trap("maybeReorg: missing parent of displaced block");
+        };
+        addFork({
+          hash = rmHash;
+          prevHash = prevH;
+          version = HeaderValue.versionOf(rmValue);
+          merkle = HeaderValue.merkleOf(rmValue);
+          time = HeaderValue.timeOf(rmValue);
+          bits = HeaderValue.bitsOf(rmValue);
+          nonce = HeaderValue.nonceOf(rmValue);
+          height = h;
+          cumWork = HeaderValue.cumWorkOf(rmValue);
+          firstSeen = HeaderValue.firstSeenOf(rmValue);
+        });
+      };
+
+      // 3. Append the new branch (ancestor-first) into the canonical trie.
+      var k = List.size(branch);
       while (k > 0) {
         k -= 1;
-        let promoted = newBranch.at(k);
-        appendCanon(promoted);
-        removeSibling(canonHeight(), promoted);
+        let fb = switch (List.get(branch, k)) {
+          case (?x) x;
+          case null Runtime.trap("maybeReorg: branch index out of range");
+        };
+        removeFork(fb.hash, fb.height);
+        let value = HeaderValue.encode({
+          version = fb.version;
+          firstTxIndex = 0;
+          merkle = fb.merkle;
+          time = fb.time;
+          bits = fb.bits;
+          nonce = fb.nonce;
+          height = fb.height;
+          cumWork = fb.cumWork;
+          firstSeen = fb.firstSeen;
+        });
+        ignore headerDb.add(fb.hash, value);
       };
 
       tipWork := newWork;
 
-      Set.add<Nat>(forkTips, Nat.compare, oldTipDbidx);
-      Set.remove<Nat>(forkTips, Nat.compare, newDbidx);
+      List.add(reorgLog, {
+        time = now;
+        common_height = commonHeight;
+        fork_length = List.size(branch);
+        displaced;
+        old_tip_hash_be_hex = bytesToHexBE(oldTipHash);
+        old_tip_height = oldTipHeight;
+        new_tip_hash_be_hex = bytesToHexBE(newTipHash);
+        new_tip_height = tipHeight();
+      });
 
-      droppedCount;
+      displaced;
     };
 
     func storeAndMaybeReorg(
       raw : Blob,
       bits : Nat32,
       hash : Blob,
-      parentDbidx : Nat,
+      parent : StoredBlock,
       firstSeenSecs : Nat32,
       uploader : Principal,
+      now : Int,
     ) : PushOk {
-      let parent = storedAt(parentDbidx);
       let newHeight = parent.height + 1;
       let cumWork = parent.cumWork + Header.chainWork(bits);
-
       let parsed = switch (Header.parseHeader(raw)) {
         case (?p) p;
         case null Runtime.trap("storeAndMaybeReorg: unparseable header");
       };
 
-      let value = HeaderValue.encode({
-        version = parsed.version;
-        parentDbidx;
-        merkle = parsed.merkle;
-        time = parsed.time;
-        bits = parsed.bits;
-        nonce = parsed.nonce;
-        height = newHeight;
-        cumWork;
-        firstSeen = firstSeenSecs;
-      });
-      let dbidx = headerDb.add(hash, value);
-      recordUploader(dbidx, uploader);
+      recordUploader(hash, uploader);
 
       var isCanonical = false;
       var reorgDepth : Nat = 0;
 
-      let curTip = canonHeight();
-      let parentIsCanonTip = parent.height == curTip and readCanonSlot(curTip) == parentDbidx;
-
-      if (parentIsCanonTip) {
-        appendCanon(dbidx);
+      if (parent.isCanonical and parent.height == tipHeight()) {
+        let value = HeaderValue.encode({
+          version = parsed.version;
+          firstTxIndex = 0;
+          merkle = parsed.merkle;
+          time = parsed.time;
+          bits = parsed.bits;
+          nonce = parsed.nonce;
+          height = newHeight;
+          cumWork;
+          firstSeen = firstSeenSecs;
+        });
+        ignore headerDb.add(hash, value);
         tipWork := cumWork;
         isCanonical := true;
       } else {
-        addSibling(newHeight, dbidx);
-        Set.add<Nat>(forkTips, Nat.compare, dbidx);
-        Set.remove<Nat>(forkTips, Nat.compare, parentDbidx);
-        reorgDepth := maybeReorg(dbidx, cumWork);
+        addFork({
+          hash;
+          prevHash = parsed.prev_hash;
+          version = parsed.version;
+          merkle = parsed.merkle;
+          time = parsed.time;
+          bits = parsed.bits;
+          nonce = parsed.nonce;
+          height = newHeight;
+          cumWork;
+          firstSeen = firstSeenSecs;
+        });
+        reorgDepth := maybeReorg(hash, cumWork, now);
         if (reorgDepth > 0) isCanonical := true;
       };
 
@@ -514,18 +628,16 @@ module {
         case null return #err("could not parse header");
       };
       let hash = Header.headerHashBlob(raw);
-      switch (headerDb.lookup(hash)) {
+      switch (byHashInternal(hash)) {
         case (?_) return #err("duplicate: hash already present");
         case null {};
       };
-      let parentDbidx = switch (headerDb.lookup(parsed.prev_hash)) {
-        case (?(_, idx)) idx;
+      let parent = switch (byHashInternal(parsed.prev_hash)) {
+        case (?p) p;
         case null return #err("unknown previous block hash");
       };
-      // Reject headers whose timestamp is more than ONE_YEAR_SECS
-      // before the current canonical tip's timestamp. This blocks
-      // "after-the-fact" forks built off ancient history while still
-      // accepting genuinely fresh forks observed near the chain tip.
+      // Reject headers whose timestamp is more than ONE_YEAR_SECS before
+      // the current canonical tip's timestamp.
       let tipTimeNat = Nat32.toNat(HeaderValue.timeOf(tipBlock().value));
       let parsedTimeNat = Nat32.toNat(parsed.time);
       if (parsedTimeNat + ONE_YEAR_SECS < tipTimeNat) {
@@ -535,30 +647,19 @@ module {
           debug_show tipTimeNat
         );
       };
-      let parent = storedAt(parentDbidx);
       let newHeight = parent.height + 1;
-
-      let expectedBits = expectedBitsFor(parentDbidx, newHeight);
-      let stamps = lastNTimestamps(
-        parentDbidx,
-        if (parent.height + 1 < 11) parent.height + 1 else 11,
-      );
+      let expectedBits = expectedBitsFor(parent, newHeight);
+      let stamps = lastNTimestamps(parent, if (newHeight < 11) newHeight else 11);
       let mtp = Header.medianTimePast(stamps);
 
       switch (
-        Header.validateAgainst(
-          raw,
-          expectedBits,
-          parsed.prev_hash,
-          mtp,
-          nowSecs,
-        )
+        Header.validateAgainst(raw, expectedBits, parsed.prev_hash, mtp, nowSecs)
       ) {
         case (#err msg) return #err(msg);
         case (#ok()) {};
       };
       let firstSeen = nat32OfNowSecs(nowSecs);
-      #ok(storeAndMaybeReorg(raw, parsed.bits, hash, parentDbidx, firstSeen, uploader));
+      #ok(storeAndMaybeReorg(raw, parsed.bits, hash, parent, firstSeen, uploader, nowSecs));
     };
 
     public func pushUnchecked(raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
@@ -568,171 +669,90 @@ module {
         case null return #err("could not parse header");
       };
       let hash = Header.headerHashBlob(raw);
-      switch (headerDb.lookup(hash)) {
+      switch (byHashInternal(hash)) {
         case (?_) return #err("duplicate: hash already present");
         case null {};
       };
-      let parentDbidx = switch (headerDb.lookup(parsed.prev_hash)) {
-        case (?(_, idx)) idx;
+      let parent = switch (byHashInternal(parsed.prev_hash)) {
+        case (?p) p;
         case null return #err("unknown previous block hash");
       };
-      #ok(storeAndMaybeReorg(raw, parsed.bits, hash, parentDbidx, nat32OfNowSecs(nowSecs), uploader));
+      #ok(storeAndMaybeReorg(raw, parsed.bits, hash, parent, nat32OfNowSecs(nowSecs), uploader, nowSecs));
     };
 
     // -----------------------------------------------------------------
     // Public queries.
     // -----------------------------------------------------------------
 
-    public func size() : Nat = headerDb.size();
+    // Total headers ever stored (canonical + fork).
+    public func size() : Nat = headerDb.size() + Map.size(forkByHash);
 
     public func memoryStats() : HeaderDb.MemoryStats = headerDb.memoryStats();
 
-    public func tipHeight() : Nat = canonHeight();
+    public func tipHeight() : Nat = headerDb.size() - 1 : Nat;
 
-    public func tipBlock() : StoredBlock = storedAt(readCanonSlot(canonHeight()));
+    public func tipBlock() : StoredBlock = storedCanonAt(tipHeight());
 
     public func canonicalAt(height : Nat) : ?StoredBlock {
-      if (height > canonHeight()) null else ?storedAt(readCanonSlot(height));
+      if (height > tipHeight()) null else ?storedCanonAt(height);
     };
 
     public func allAt(height : Nat) : [StoredBlock] {
       let out = List.empty<StoredBlock>();
-      if (height <= canonHeight()) {
-        out.add(storedAt(readCanonSlot(height)));
+      if (height <= tipHeight()) {
+        List.add(out, storedCanonAt(height));
       };
-      switch (Map.get<Nat, [Nat]>(siblings, Nat.compare, height)) {
-        case null {};
-        case (?xs) for (i in xs.vals()) out.add(storedAt(i));
+      for (h in forkAt(height).vals()) {
+        switch (Map.get<Blob, ForkBlock>(forkByHash, Blob.compare, h)) {
+          case (?fb) List.add(out, storedFork(fb));
+          case null {};
+        };
       };
-      out.toArray();
+      List.toArray(out);
     };
 
     public func byHashBE(hex : Text) : ?StoredBlock {
       let bytes = Header.hexToBlob(hex);
       if (bytes.size() != 32) return null;
-      let internal = Header.reverse32(bytes);
-      switch (headerDb.lookup(internal)) {
-        case (?(_, idx)) ?storedAt(idx);
-        case null null;
-      };
+      byHashInternal(Header.reverse32(bytes));
     };
 
-    // Cheap membership check: avoids decoding the 76-byte stored value.
+    // Cheap membership check.
     public func hasHashBE(hex : Text) : Bool {
       let bytes = Header.hexToBlob(hex);
       if (bytes.size() != 32) return false;
       let internal = Header.reverse32(bytes);
+      if (Map.containsKey<Blob, ForkBlock>(forkByHash, Blob.compare, internal)) return true;
       switch (headerDb.lookup(internal)) {
         case (?_) true;
         case null false;
       };
     };
 
-    // Resolve the uploader principal for a stored block (via dbidx).
-    // Traps if no entry is recorded for `dbidx` — this should be
-    // unreachable since `uploaderOfDbidx` is grown in lockstep with
-    // `headerDb.add` (see recordUploader).
-    public func uploaderOf(dbidx : Nat) : Principal {
-      let uIdx = switch (List.get<Nat>(uploaderOfDbidx, dbidx)) {
-        case (?i) i;
-        case null Runtime.trap(
-          "uploaderOf: no uploader recorded for dbidx " # debug_show dbidx
-        );
-      };
-      switch (List.get<Principal>(uploaderPrincipals, uIdx)) {
-        case (?p) p;
-        case null Runtime.trap(
-          "uploaderOf: uploader index " # debug_show uIdx #
-          " out of range (dbidx " # debug_show dbidx # ")"
-        );
-      };
+    public func isOnCanonical(b : StoredBlock) : Bool = b.isCanonical;
+
+    public func canonicalChildOf(b : StoredBlock) : ?StoredBlock {
+      canonicalAt(b.height + 1);
     };
 
-    // Snapshot of (uploader, headers-pushed) for every distinct
-    // uploader the chain has ever seen, in registration order. The
-    // caller is responsible for sorting / truncating to a leaderboard.
-    // For anonymous, the count comes from `anonymousCount` since we
-    // intentionally don't store its block list.
-    public func uploaderStats() : [(Principal, Nat)] {
-      let arr = List.toArray(uploaders);
-      Array.tabulate<(Principal, Nat)>(
-        arr.size(),
-        func(i) {
-          let e = arr[i];
-          let count = if (Principal.isAnonymous(e.principal)) {
-            anonymousCount;
-          } else {
-            List.size(e.blocks);
-          };
-          (e.principal, count);
-        },
-      );
-    };
+    public func prevHashOf(b : StoredBlock) : Blob = b.prevHash;
 
-    // Page through the dbidxs uploaded by `p`, newest first. Returns
-    // up to `limit` entries starting at `offset` (0 = newest).
-    // Anonymous returns []: we don't track its blocks individually.
-    public func blocksByUploader(p : Principal, offset : Nat, limit : Nat) : [Nat] {
-      if (Principal.isAnonymous(p) or limit == 0) return [];
-      let uIdx = switch (List.indexOf<Principal>(uploaderPrincipals, Principal.equal, p)) {
-        case (?i) i;
-        case null return [];
-      };
-      let e = switch (List.get(uploaders, uIdx)) {
-        case (?e) e;
-        case null return [];
-      };
-      let n = List.size(e.blocks);
-      if (offset >= n) return [];
-      let remaining : Nat = n - offset;
-      let take = if (limit < remaining) limit else remaining;
-      Array.tabulate<Nat>(
-        take,
-        func(k) {
-          let pos : Nat = n - 1 - offset - k;
-          switch (List.get(e.blocks, pos)) {
-            case (?dbidx) dbidx;
-            case null Runtime.trap("blocksByUploader: index out of range");
-          };
-        },
-      );
-    };
-
-    public func byHashInternal(hash : Blob) : ?StoredBlock {
-      if (hash.size() != 32) return null;
-      switch (headerDb.lookup(hash)) {
-        case (?(_, idx)) ?storedAt(idx);
-        case null null;
-      };
-    };
-
-    public func byDbidx(dbidx : Nat) : ?StoredBlock {
-      switch (headerDb.get(dbidx)) {
-        case (?_) ?storedAt(dbidx);
-        case null null;
-      };
-    };
-
-    // Bitcoin-Core "median time past": median of the timestamps of `b`
-    // and its 10 ancestors (11 values total, fewer near genesis).
+    // Bitcoin-Core "median time past": median of `b` and its 10 ancestors.
     public func mediantimeOf(b : StoredBlock) : Nat32 {
-      let stamps = lastNTimestamps(b.dbidx, 11);
+      let stamps = lastNTimestamps(b, 11);
       let sorted = Array.sort<Nat32>(stamps, Nat32.compare);
       sorted[sorted.size() / 2];
     };
 
     // Reconstruct the canonical 80-byte raw header from stored data.
-    // Layout: version | prev_hash (LE) | merkle (LE) | time | bits | nonce.
     public func rawHeaderOf(b : StoredBlock) : Blob {
       let v = b.value;
       let version = HeaderValue.versionOf(v);
       let time = HeaderValue.timeOf(v);
       let bits = HeaderValue.bitsOf(v);
       let nonce = HeaderValue.nonceOf(v);
-      let prev = prevHashOf(b);
-      let merkle = HeaderValue.merkleOf(v);
-      let prevA = Blob.toArray(prev);
-      let merkleA = Blob.toArray(merkle);
+      let prevA = Blob.toArray(b.prevHash);
+      let merkleA = Blob.toArray(HeaderValue.merkleOf(v));
       let buf = Array.tabulate<Nat8>(
         80,
         func(i) {
@@ -742,53 +762,107 @@ module {
       Blob.fromArray(buf);
     };
 
-    // Canonical block at height `h+1`, if any. Used by the Esplora
-    // `/block/:hash/status` endpoint as `next_best` for canonical
-    // blocks (per spec, this field is only set when in_best_chain).
-    public func canonicalChildOf(b : StoredBlock) : ?StoredBlock {
-      canonicalAt(b.height + 1);
-    };
-
-    public func isOnCanonical(b : StoredBlock) : Bool {
-      if (b.height > canonHeight()) return false;
-      readCanonSlot(b.height) == b.dbidx;
-    };
-
+    // All current forks (non-canonical branches), one entry per tip.
     public func forks() : [Fork] {
-      let out = List.empty<Fork>();
-      for (i in Set.values(forkTips)) {
-        let tip = storedAt(i);
-        var idx = i;
-        var length : Nat = 0;
-        label walk loop {
-          let s = storedAt(idx);
-          if (s.height <= canonHeight() and readCanonSlot(s.height) == idx) {
-            break walk;
-          };
-          length += 1;
-          if (s.height == 0) Runtime.trap("fork: walked past genesis");
-          idx := s.parentDbidx;
+      // A fork block is a tip iff no other fork block names it as parent.
+      let referenced = Set.empty<Blob>();
+      for ((_, fb) in Map.entries(forkByHash)) {
+        if (Map.containsKey<Blob, ForkBlock>(forkByHash, Blob.compare, fb.prevHash)) {
+          Set.add<Blob>(referenced, Blob.compare, fb.prevHash);
         };
-        let bp = storedAt(idx);
-        out.add({
-          tip_height = tip.height;
-          tip_hash_be_hex = bytesToHexBE(tip.hash);
-          length;
-          branch_height = bp.height;
-          branch_hash_be_hex = bytesToHexBE(bp.hash);
-        });
       };
-      out.toArray();
+      let out = List.empty<Fork>();
+      for ((hash, fb) in Map.entries(forkByHash)) {
+        if (not Set.contains<Blob>(referenced, Blob.compare, hash)) {
+          // Walk down from the tip to the canonical branch point.
+          var cur = storedFork(fb);
+          var length : Nat = 0;
+          var branch : StoredBlock = cur;
+          label walk loop {
+            length += 1;
+            switch (parentOf(cur)) {
+              case (?p) {
+                if (p.isCanonical) { branch := p; break walk };
+                cur := p;
+              };
+              case null Runtime.trap("forks: walked past genesis");
+            };
+          };
+          List.add(out, {
+            tip_height = fb.height;
+            tip_hash_be_hex = bytesToHexBE(fb.hash);
+            length;
+            branch_height = branch.height;
+            branch_hash_be_hex = bytesToHexBE(branch.hash);
+          });
+        };
+      };
+      List.toArray(out);
     };
 
-    // Look up the parent's hash (internal LE order). Returns the
-    // 32-byte zero hash for genesis (matching the raw header).
-    public func prevHashOf(b : StoredBlock) : Blob {
-      if (b.height == 0) return ZERO_HASH_BLOB;
-      switch (headerDb.get(b.parentDbidx)) {
-        case (?(h, _)) h;
-        case null Runtime.trap("missing parent for dbidx " # debug_show b.dbidx);
+    public func reorgs() : [ReorgEvent] = List.toArray(reorgLog);
+
+    // -----------------------------------------------------------------
+    // Uploader queries.
+    // -----------------------------------------------------------------
+
+    // Resolve the uploader principal for a block hash. Blocks that were
+    // not individually attributed (anonymous) default to the anonymous
+    // principal.
+    public func uploaderOf(hash : Blob) : Principal {
+      switch (Map.get<Blob, Nat>(uploaderOfHash, Blob.compare, hash)) {
+        case (?id) Principal.fromBlob(Enum.BlobEnumeration.at(uploaderEnum, id));
+        case null anonymousPrincipal();
       };
+    };
+
+    // (uploader, headers-pushed) for every distinct uploader, in
+    // registration order. Caller sorts / truncates for a leaderboard.
+    public func uploaderStats() : [(Principal, Nat)] {
+      let n = Enum.BlobEnumeration.size(uploaderEnum);
+      Array.tabulate<(Principal, Nat)>(
+        n,
+        func(i) {
+          let p = Principal.fromBlob(Enum.BlobEnumeration.at(uploaderEnum, i));
+          let count = if (Principal.isAnonymous(p)) {
+            anonymousCount;
+          } else {
+            switch (List.get(uploaderBlocks, i)) {
+              case (?lst) List.size(lst);
+              case null 0;
+            };
+          };
+          (p, count);
+        },
+      );
+    };
+
+    // Page through the block hashes uploaded by `p`, newest first.
+    // Anonymous returns []: we don't track its blocks individually.
+    public func blocksByUploader(p : Principal, offset : Nat, limit : Nat) : [Blob] {
+      if (Principal.isAnonymous(p) or limit == 0) return [];
+      let id = switch (Enum.BlobEnumeration.lookup(uploaderEnum, Principal.toBlob(p))) {
+        case (?i) i;
+        case null return [];
+      };
+      let lst = switch (List.get(uploaderBlocks, id)) {
+        case (?l) l;
+        case null return [];
+      };
+      let n = List.size(lst);
+      if (offset >= n) return [];
+      let remaining : Nat = n - offset;
+      let take = if (limit < remaining) limit else remaining;
+      Array.tabulate<Blob>(
+        take,
+        func(k) {
+          let pos : Nat = n - 1 - offset - k;
+          switch (List.get(lst, pos)) {
+            case (?h) h;
+            case null Runtime.trap("blocksByUploader: index out of range");
+          };
+        },
+      );
     };
   };
 
@@ -797,8 +871,26 @@ module {
   // ---------------------------------------------------------------------
 
   public func empty() : Chain {
-    let c = Chain();
+    let c = Chain(HeaderDb.KEY_SIZE);
     c.initGenesis(0, Principal.fromText("aaaaa-aa"));
+    c;
+  };
+
+  // Test-only: a chain whose canonical trie uses full 32-byte keys, so
+  // synthetic (non-PoW) headers can be stored without tripping the
+  // trailing-zero truncation invariant.
+  public func emptyForTest() : Chain {
+    let c = Chain(HeaderDb.HASH_SIZE);
+    c.initGenesis(0, Principal.fromText("aaaaa-aa"));
+    c;
+  };
+
+  // Test helper: a chain anchored at an arbitrary checkpoint header
+  // (hex). `keySize` selects the trie key width — pass HeaderDb.KEY_SIZE
+  // (28) to exercise the production truncation path with real PoW headers.
+  public func fromRootHex(rawHex : Text, keySize : Nat) : Chain {
+    let c = Chain(keySize);
+    c.initRoot(Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
     c;
   };
 

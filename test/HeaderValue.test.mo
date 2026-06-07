@@ -16,7 +16,7 @@ suite(
       func() {
         let f : HeaderValue.Fields = {
           version = 1;
-          parentDbidx = 0;
+          firstTxIndex = 0;
           merkle = mkMerkle(0xab);
           time = 1_231_006_505;
           bits = 0x1d00ffff;
@@ -29,7 +29,7 @@ suite(
         assert blob.size() == HeaderValue.SIZE;
         let g = HeaderValue.decode(blob);
         assert g.version == f.version;
-        assert g.parentDbidx == f.parentDbidx;
+        assert g.firstTxIndex == f.firstTxIndex;
         assert g.merkle == f.merkle;
         assert g.time == f.time;
         assert g.bits == f.bits;
@@ -47,7 +47,7 @@ suite(
         let big : Nat = 1329227995784915872903807060280344576 + 12345;
         let f : HeaderValue.Fields = {
           version = 0x20000000;
-          parentDbidx = 4_294_967_294; // near Nat32 max
+          firstTxIndex = 4_294_967_294; // near Nat32 max
           merkle = mkMerkle(0xff);
           time = 0xffff_fffe;
           bits = 0x1d00ffff;
@@ -59,7 +59,7 @@ suite(
         let blob = HeaderValue.encode(f);
         let g = HeaderValue.decode(blob);
         assert g.cumWork == big;
-        assert g.parentDbidx == f.parentDbidx;
+        assert g.firstTxIndex == f.firstTxIndex;
         assert g.height == f.height;
       },
     );
@@ -75,7 +75,7 @@ suite(
       func() {
         let f : HeaderValue.Fields = {
           version = 0xdeadbeef;
-          parentDbidx = 42;
+          firstTxIndex = 42;
           merkle = mkMerkle(0x77);
           time = 1_700_000_000;
           bits = 0x1c0f_ffff;
@@ -86,7 +86,7 @@ suite(
         };
         let blob = HeaderValue.encode(f);
         assert HeaderValue.versionOf(blob) == f.version;
-        assert HeaderValue.parentDbidxOf(blob) == f.parentDbidx;
+        assert HeaderValue.firstTxIndexOf(blob) == f.firstTxIndex;
         assert HeaderValue.timeOf(blob) == f.time;
         assert HeaderValue.bitsOf(blob) == f.bits;
         assert HeaderValue.nonceOf(blob) == f.nonce;

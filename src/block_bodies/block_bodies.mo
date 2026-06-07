@@ -91,35 +91,32 @@ persistent actor BlockBodies {
   // assigned to each new key serves as the persistent `txdbidx`; we
   // recover it via lookup/get on the trie itself.
   // pointer_size = 5 caps the trie at 2^39 leaves (~550 B txids).
-  transient let txidTrie = StableTrie.Enumeration({
+  // stable-trie 0.1.x: the Enumeration record is itself a stable type,
+  // so a plain `var` in this persistent actor persists across upgrades
+  // (no share/unshare needed).
+  let txidTrie = StableTrie.empty({
     pointer_size = 5;
     aridity = 4;
     root_aridity = ?262144;
     key_size = 32;
     value_size = 4;
   });
-  var txidTrieData : ?StableTrie.StableData = null;
 
   switch (bodyData) {
     case (?d) bodies.unshare(d);
     case null {};
   };
-  switch (txidTrieData) {
-    case (?d) txidTrie.unshare(d);
-    case null {};
-  };
 
   system func preupgrade() {
     bodyData := ?bodies.share();
-    txidTrieData := ?txidTrie.share();
   };
 
   // Data-structure Prometheus pull values (registered now that the
   // trie and body region exist).
   renderer.addValue(PT.newValue("indexed_txids", [], func() = txidTrie.size()));
   renderer.addValue(PT.newValue("txid_trie_byte_size", [], func() = txidTrie.memoryStats().byte_size));
-  renderer.addValue(PT.newValue("txid_trie_leaf_count", [], func() = txidTrie.memoryStats().leaf_count));
-  renderer.addValue(PT.newValue("txid_trie_node_count", [], func() = txidTrie.memoryStats().node_count));
+  renderer.addValue(PT.newValue("txid_trie_leaf_count", [], func() = txidTrie.memoryStats().used_leaf_count));
+  renderer.addValue(PT.newValue("txid_trie_node_count", [], func() = txidTrie.memoryStats().used_node_count));
   renderer.addValue(PT.newValue("body_region_byte_size", [], func() = bodies.byteSize()));
   renderer.addValue(PT.newValue("body_capacity_blocks", [], func() = bodies.capacityBlocks()));
 
@@ -435,7 +432,12 @@ persistent actor BlockBodies {
   };
 
   public query func txid_trie_memory_stats() : async StableTrieStats {
-    txidTrie.memoryStats();
+    let m = txidTrie.memoryStats();
+    {
+      byte_size = m.byte_size;
+      leaf_count = m.used_leaf_count;
+      node_count = m.used_node_count;
+    };
   };
 
   // Bytes of stable memory currently allocated to the body region.

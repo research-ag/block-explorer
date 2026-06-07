@@ -1,11 +1,11 @@
-// 76-byte value blob stored in HeaderDb (the stable hash → header trie).
+// 76-byte value blob stored in the canonical header trie.
 //
 // Layout (all integers little-endian):
 //
 //   off | bytes | field
 //  -----+-------+-----------------------------------------------
 //     0 |     4 | version          (Nat32)
-//     4 |     4 | parent dbidx     (Nat32)
+//     4 |     4 | firstTxIndex (F) (Nat32)
 //     8 |    32 | merkle root      (raw, internal LE order)
 //    40 |     4 | time             (Nat32)
 //    44 |     4 | bits             (Nat32)
@@ -16,8 +16,18 @@
 //  -----+-------+
 //    76 total
 //
-// Genesis has parentDbidx == 0 (its own dbidx) and is the only block
-// where parentDbidx points to itself.
+// No prev_hash / parent pointer is stored: the trie holds ONLY the
+// canonical chain, so the parent of the block at trie index `i` is the
+// block at index `i - 1` and prev_hash is that block's key.
+//
+// firstTxIndex (F) is the 0-based index of this block's first transaction
+// in the canonical-chain-wide transaction ordering:
+//   F(0) = 0  (genesis)
+//   F(h) = F(h-1) + N(h-1)   where N is the block's transaction count.
+// It is populated only once the bodies of all preceding blocks are known
+// (a later feature). Until then it is the SENTINEL value 0, meaning
+// "first-transaction number not yet known" — for any block except genesis,
+// whose F is genuinely 0.
 
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
@@ -30,7 +40,7 @@ module {
 
   public type Fields = {
     version : Nat32;
-    parentDbidx : Nat;
+    firstTxIndex : Nat; // F; 0 == sentinel "unknown" (except genesis)
     merkle : Blob; // 32 bytes, internal LE order
     time : Nat32;
     bits : Nat32;
@@ -98,7 +108,7 @@ module {
   public func encode(f : Fields) : Blob {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
     writeLE32(mut, 0, f.version);
-    writeLE32(mut, 4, Nat32.fromNat(f.parentDbidx));
+    writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
     writeBlob32(mut, 8, f.merkle);
     writeLE32(mut, 40, f.time);
     writeLE32(mut, 44, f.bits);
@@ -123,7 +133,7 @@ module {
   public func decode(b : Blob) : Fields {
     {
       version = readLE32(b, 0);
-      parentDbidx = readLE32(b, 4).toNat();
+      firstTxIndex = readLE32(b, 4).toNat();
       merkle = sliceBlob32(b, 8);
       time = readLE32(b, 40);
       bits = readLE32(b, 44);
@@ -140,7 +150,7 @@ module {
   // ---------------------------------------------------------------------
 
   public func versionOf(b : Blob) : Nat32 = readLE32(b, 0);
-  public func parentDbidxOf(b : Blob) : Nat = readLE32(b, 4).toNat();
+  public func firstTxIndexOf(b : Blob) : Nat = readLE32(b, 4).toNat();
   public func timeOf(b : Blob) : Nat32 = readLE32(b, 40);
   public func bitsOf(b : Blob) : Nat32 = readLE32(b, 44);
   public func nonceOf(b : Blob) : Nat32 = readLE32(b, 48);

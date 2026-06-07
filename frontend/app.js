@@ -53,7 +53,6 @@ function deriveHost() {
 const idlFactory = ({ IDL }) => {
   const BlockInfo = IDL.Record({
     height: IDL.Nat,
-    dbidx: IDL.Nat,
     version: IDL.Nat32,
     prev_hash_be_hex: IDL.Text,
     merkle_root_be_hex: IDL.Text,
@@ -297,8 +296,11 @@ function renderBlock(bi) {
 
   // Placeholder; the actual value is wired up by attachTxCount() below,
   // which is fired in parallel with get_view by loadBlock.
+  // tx-count is temporarily unavailable: it depended on the explorer's
+  // per-block dbidx (removed in the canonical-trie rewrite). It will be
+  // restored when block bodies are merged into the explorer (step 2).
   const tcEl = $("bi-tx-count");
-  tcEl.textContent = bodiesActor ? "…" : "—";
+  tcEl.textContent = "—";
   tcEl.className = "muted";
 }
 
@@ -680,8 +682,8 @@ async function loadBlock(opts) {
     }
     block = opt[0];
     height = block.height;
-    // Fire tx_count in parallel with the get_view call below.
-    if (bodiesActor) txCountPromise = bodiesActor.tx_count_of(block.dbidx);
+    // tx-count disabled until block bodies are merged into the explorer
+    // (the per-block dbidx it used was removed in the trie rewrite).
   }
   const view = await actor.get_view(height === null ? [] : [height]);
 
@@ -698,8 +700,7 @@ async function loadBlock(opts) {
       return;
     }
     block = view.block[0];
-    // Height path: dbidx only available after get_view.
-    if (bodiesActor) txCountPromise = bodiesActor.tx_count_of(block.dbidx);
+    // tx-count disabled until block bodies are merged (see above).
   }
 
   currentHeight = block.height;

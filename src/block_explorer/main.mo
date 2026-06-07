@@ -82,7 +82,7 @@ persistent actor BlockExplorer {
   // ---------------------------------------------------------------------
 
   var chainData : ?Chain.StableData = null;
-  transient let chain : Chain.Chain = Chain.Chain();
+  transient let chain : Chain.Chain = Chain.Chain(28);
 
   func nowSecs() : Int { Time.now() / 1_000_000_000 };
   func nowSecsNat32() : Nat32 {
@@ -105,10 +105,11 @@ persistent actor BlockExplorer {
   renderer.addValue(PT.newValue("headers_total", [], func() = chain.size()));
   renderer.addValue(PT.newValue("tip_height", [], func() = chain.tipHeight()));
   renderer.addValue(PT.newValue("fork_count", [], func() = chain.forks().size()));
+  renderer.addValue(PT.newValue("reorg_count", [], func() = chain.reorgs().size()));
   renderer.addValue(PT.newValue("uploader_count", [], func() = chain.uploaderStats().size()));
   renderer.addValue(PT.newValue("header_db_byte_size", [], func() = chain.memoryStats().byte_size));
-  renderer.addValue(PT.newValue("header_db_leaf_count", [], func() = chain.memoryStats().leaf_count));
-  renderer.addValue(PT.newValue("header_db_node_count", [], func() = chain.memoryStats().node_count));
+  renderer.addValue(PT.newValue("header_db_leaf_count", [], func() = chain.memoryStats().used_leaf_count));
+  renderer.addValue(PT.newValue("header_db_node_count", [], func() = chain.memoryStats().used_node_count));
 
   // ---------------------------------------------------------------------
   // Candid-facing types & projections.
@@ -116,7 +117,6 @@ persistent actor BlockExplorer {
 
   public type BlockInfo = {
     height : Nat;
-    dbidx : Nat; // explorer's internal id; pass to block_bodies
     version : Nat32;
     prev_hash_be_hex : Text;
     merkle_root_be_hex : Text;
@@ -140,7 +140,6 @@ persistent actor BlockExplorer {
     let merkleLE = HeaderValue.merkleOf(v);
     {
       height = b.height;
-      dbidx = b.dbidx;
       version = HeaderValue.versionOf(v);
       prev_hash_be_hex = Header.bytesToHex(Header.reverse32(prevHashLE));
       merkle_root_be_hex = Header.bytesToHex(Header.reverse32(merkleLE));
@@ -152,7 +151,7 @@ persistent actor BlockExplorer {
       cum_work = b.cumWork;
       is_canonical = isCanonical_;
       first_seen = HeaderValue.firstSeenOf(v);
-      uploader = chain.uploaderOf(b.dbidx);
+      uploader = chain.uploaderOf(b.hash);
     };
   };
 
@@ -248,10 +247,10 @@ persistent actor BlockExplorer {
       #header_db_memory_stats : () -> ();
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
-      #lookup_header : () -> (hash_internal : Blob);
       #push_header : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
       #push_headers_hex : () -> (headers_hex : [Text]);
+      #reorg_log : () -> (offset : Nat, limit : Nat);
       #set_cycles_per_call : () -> (n : Nat);
       #uploader_leaderboard : () -> (top : Nat)
     };
@@ -380,24 +379,6 @@ persistent actor BlockExplorer {
     };
   };
 
-  // Compact lookup used by the `block_bodies` canister to verify that a
-  // header is known and obtain the canonical merkle root for body
-  // verification. Hash is in internal LE order (raw 32 bytes).
-  public type HeaderRef = {
-    dbidx : Nat;
-    merkle_root : Blob; // internal LE order, 32 bytes
-  };
-
-  public query func lookup_header(hash_internal : Blob) : async ?HeaderRef {
-    switch (chain.byHashInternal(hash_internal)) {
-      case null null;
-      case (?b) ?{
-        dbidx = b.dbidx;
-        merkle_root = HeaderValue.merkleOf(b.value);
-      };
-    };
-  };
-
   // Batched membership check. Used by client-side pre-filters to avoid
   // shipping headers whose hash is already stored or whose parent is
   // unknown. Returns one Bool per input, in the same order.
@@ -421,7 +402,12 @@ persistent actor BlockExplorer {
   };
 
   public query func header_db_memory_stats() : async StableTrieStats {
-    chain.memoryStats();
+    let m = chain.memoryStats();
+    {
+      byte_size = m.byte_size;
+      leaf_count = m.used_leaf_count;
+      node_count = m.used_node_count;
+    };
   };
 
   // ---------------------------------------------------------------------
@@ -452,17 +438,37 @@ persistent actor BlockExplorer {
   // (we don't track its individual blocks; see Chain.uploaders).
   public query func blocks_by_uploader(p : Principal, offset : Nat, limit : Nat) : async [BlockInfo] {
     let cap : Nat = if (limit > 1000) 1000 else limit;
-    let dbidxs = chain.blocksByUploader(p, offset, cap);
+    let hashes = chain.blocksByUploader(p, offset, cap);
     Array.tabulate<BlockInfo>(
-      dbidxs.size(),
+      hashes.size(),
       func(i) {
-        switch (chain.byDbidx(dbidxs[i])) {
+        switch (chain.byHashInternal(hashes[i])) {
           case (?b) toBlockInfo(b, chain.isOnCanonical(b));
           case null Runtime.trap(
-            "blocks_by_uploader: dbidx " # debug_show dbidxs[i] # " missing"
+            "blocks_by_uploader: hash " # debug_show hashes[i] # " missing"
           );
         };
       },
+    );
+  };
+
+  // ---------------------------------------------------------------------
+  // Reorg log.
+  // ---------------------------------------------------------------------
+
+  // Page through recorded reorg events, newest first. `offset` is 0 for
+  // the most recent. `limit` is capped at 1000.
+  public query func reorg_log(offset : Nat, limit : Nat) : async [Chain.ReorgEvent] {
+    let all = chain.reorgs();
+    let n = all.size();
+    if (offset >= n) return [];
+    let cap : Nat = if (limit > 1000) 1000 else limit;
+    if (cap == 0) return [];
+    let remaining : Nat = n - offset;
+    let take = if (cap < remaining) cap else remaining;
+    Array.tabulate<Chain.ReorgEvent>(
+      take,
+      func(k) = all[n - 1 - offset - k],
     );
   };
 
