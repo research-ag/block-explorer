@@ -3,11 +3,11 @@
 Parse a raw Bitcoin block from disk and submit its transaction-id list
 to the `block_explorer` canister via `push_body`.
 
-A body may be submitted for any block whose body the canister doesn't
-already know (canonical or fork, any order); it is verified against the
-block's merkle root. Canonical bodies are indexed in chain order once the
-gap below them is filled. `bodies_next_height` reports the contiguous
-canonical body frontier.
+A body may be submitted only once all of the block's ancestor bodies are
+known (so its first-tx serial number is determined): canonical bodies in
+strict height order (query `bodies_next_height` for the next expected
+height), and a fork block's body only after its parent's body. It is
+verified against the block's merkle root.
 
 Usage:
     scripts/push-block-body.py PATH [--canister NAME] [--env ENV]

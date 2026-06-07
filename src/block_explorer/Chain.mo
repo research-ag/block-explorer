@@ -86,7 +86,17 @@ module {
     branch_hash_be_hex : Text;
   };
 
+  // The body of a fork block: its transaction ids (flat 32-byte blob, in
+  // block order) plus its first-tx serial number F in the would-be
+  // canonical ordering. Present only once all of the block's ancestors'
+  // bodies are known (so F is determined) — see pushBody.
+  public type ForkBody = {
+    txids : Blob;
+    firstTxIndex : Nat;
+  };
+
   // A non-canonical block, stored in full in the heap-side fork store.
+  // `body` is the optional transaction list (see ForkBody).
   public type ForkBlock = {
     hash : Blob; // internal LE order, 32 bytes
     prevHash : Blob; // internal LE order, 32 bytes
@@ -98,6 +108,7 @@ module {
     height : Nat;
     cumWork : Nat;
     firstSeen : Nat32;
+    body : ?ForkBody;
   };
 
   // One reorg event, appended to the reorg log whenever the canonical
@@ -153,10 +164,7 @@ module {
     txTrie : StableTrie.Enumeration;
     bodiesNextHeight : Nat; // canonical bodies known contiguously for [0, this)
     txCountOverride : Map.Map<Nat, Nat>; // blocks with duplicate txids (BIP30)
-    // Heap fork-body store: known bodies (flat txid blobs) for blocks not
-    // (yet) in the canonical txid trie — non-canonical blocks, or canonical
-    // blocks ahead of the body frontier. Keyed by block hash.
-    forkBody : Map.Map<Blob, Blob>;
+    // Fork-block bodies live in the ForkBlock records (forkByHash).
   };
 
   // ---------------------------------------------------------------------
@@ -250,9 +258,6 @@ module {
     // coinbase reuse at heights 91842 / 91880). Keyed by height -> real
     // tx_count. Tiny (<=2 entries on mainnet).
     var txCountOverride : Map.Map<Nat, Nat> = Map.empty<Nat, Nat>();
-    // Heap fork-body store: known bodies for blocks not (yet) in the
-    // canonical txid trie. Keyed by block hash -> flat txid blob.
-    var forkBody : Map.Map<Blob, Blob> = Map.empty<Blob, Blob>();
 
     var initialized : Bool = false;
 
@@ -352,7 +357,6 @@ module {
       txTrie;
       bodiesNextHeight;
       txCountOverride;
-      forkBody;
     };
 
     public func unshare(d : StableData) {
@@ -367,7 +371,6 @@ module {
       txTrie := d.txTrie;
       bodiesNextHeight := d.bodiesNextHeight;
       txCountOverride := d.txCountOverride;
-      forkBody := d.forkBody;
       rebuildUploaderOfHash();
       initialized := true;
     };
@@ -575,12 +578,11 @@ module {
       };
       let displaced : Nat = oldTipHeight - commonHeight;
 
-      // Bodies: before removing any header, move the indexed transactions
-      // of each displaced canonical block from the canonical txid trie into
-      // the heap fork-body store (so they survive and can be re-indexed if
-      // the block becomes canonical again), then truncate the trie back to
-      // the common ancestor. Reads the canonical headers + trie, which are
-      // still in place here.
+      // Bodies: before removing any header, extract each displaced canonical
+      // block's transactions (with its F) from the txid trie so they travel
+      // with the block into the fork store, then truncate the trie back to
+      // the common ancestor. Reads canonical headers + trie, still present.
+      let demotedBodies = Map.empty<Nat, ForkBody>();
       if (bodiesNextHeight > commonHeight + 1) {
         let truncPoint = switch (headerDb.get(commonHeight + 1)) {
           case (?(_, v)) HeaderValue.firstTxIndexOf(v);
@@ -588,8 +590,8 @@ module {
         };
         var h = commonHeight + 1;
         while (h < bodiesNextHeight) {
-          let (hash, value) = switch (headerDb.get(h)) {
-            case (?x) x;
+          let value = switch (headerDb.get(h)) {
+            case (?(_, v)) v;
             case null Runtime.trap("maybeReorg: missing displaced body block");
           };
           let lo = HeaderValue.firstTxIndexOf(value);
@@ -599,7 +601,7 @@ module {
               case null Runtime.trap("maybeReorg: missing displaced body block");
             };
           } else StableTrie.size(txTrie);
-          Map.add<Blob, Blob>(forkBody, Blob.compare, hash, extractTxids(lo, hi));
+          Map.add<Nat, ForkBody>(demotedBodies, Nat.compare, h, { txids = extractTxids(lo, hi); firstTxIndex = lo });
           Map.remove<Nat, Nat>(txCountOverride, Nat.compare, h);
           h += 1;
         };
@@ -630,6 +632,7 @@ module {
           height = h;
           cumWork = HeaderValue.cumWorkOf(rmValue);
           firstSeen = HeaderValue.firstSeenOf(rmValue);
+          body = Map.get<Nat, ForkBody>(demotedBodies, Nat.compare, h);
         });
       };
 
@@ -654,12 +657,17 @@ module {
           firstSeen = fb.firstSeen;
         });
         ignore headerDb.add(fb.hash, value);
+        // If the promoted block's body is known, re-index it in chain order.
+        // The all-ancestors-known invariant keeps fork bodies contiguous from
+        // the common ancestor, so this advances the frontier without gaps.
+        switch (fb.body) {
+          case (?b) if (fb.height == bodiesNextHeight) {
+            appendCanonicalBody(fb.height, value, b.txids);
+            bodiesNextHeight += 1;
+          };
+          case null {};
+        };
       };
-
-      // Re-index any promoted block whose body is already known (was
-      // uploaded while it was a fork): drain from the fork-body store into
-      // the canonical txid trie, in height order, as far as contiguity holds.
-      drainCanonicalBodies();
 
       tipWork := newWork;
 
@@ -725,6 +733,7 @@ module {
           height = newHeight;
           cumWork;
           firstSeen = firstSeenSecs;
+          body = null;
         });
         reorgDepth := maybeReorg(hash, cumWork, now);
         if (reorgDepth > 0) isCanonical := true;
@@ -989,14 +998,19 @@ module {
     // -----------------------------------------------------------------
     // Block bodies.
     //
-    // A block's body (transaction-id list) can be uploaded whenever it is
-    // not already known — for canonical OR fork blocks — verified against
-    // the block's merkle root. Canonical bodies known contiguously from
-    // genesis live in the stable canonical txid trie (in chain order);
-    // everything else (fork blocks, or canonical blocks ahead of the body
-    // frontier) lives in the heap fork-body store. Reorgs move bodies
-    // between the two, so promoting a fork whose body is known re-indexes
-    // it automatically and demoting a canonical block retains its txids.
+    // A block's body (transaction-id list) may be uploaded only once the
+    // bodies of ALL its ancestors are known — i.e. its first-tx serial
+    // number F is determined:
+    //   * canonical block: its height must equal the body frontier
+    //     (bodiesNextHeight), so canonical bodies are filled in strict
+    //     chain order and go straight into the stable txid trie;
+    //   * fork block: its parent's body must be known (a canonical block
+    //     under the frontier, or a fork block that already has a body); the
+    //     body is stored in the ForkBlock record.
+    // A fork body whose ancestor bodies aren't all known is rejected (for
+    // symmetry with the canonical rule). This guarantees that when a fork
+    // is reorged in, its transactions are contiguous and can be appended to
+    // the canonical trie immediately.
     // -----------------------------------------------------------------
 
     // Canonical bodies are known contiguously for heights [0, this).
@@ -1005,8 +1019,14 @@ module {
     // Transactions currently in the canonical txid trie.
     public func totalIndexedTxids() : Nat = StableTrie.size(txTrie);
 
-    // Bodies held in the heap fork-body store.
-    public func forkBodyCount() : Nat = Map.size(forkBody);
+    // Number of fork blocks that currently carry a body.
+    public func forkBodyCount() : Nat {
+      var n = 0;
+      for ((_, fb) in Map.entries(forkByHash)) {
+        switch (fb.body) { case (?_) n += 1; case null {} };
+      };
+      n;
+    };
 
     // Re-encode a header value with a new firstTxIndex (F); other fields kept.
     func withFirstTxIndex(value : Blob, f : Nat) : Blob {
@@ -1051,30 +1071,31 @@ module {
       if (StableTrie.size(txTrie) - f < n) Map.add<Nat, Nat>(txCountOverride, Nat.compare, height, n);
     };
 
-    // Drain known bodies from the fork-body store into the canonical txid
-    // trie, in height order, as far as the contiguous frontier allows.
-    func drainCanonicalBodies() {
-      label drain loop {
-        let h = bodiesNextHeight;
-        if (h > tipHeight()) break drain;
-        let (hash, value) = switch (headerDb.get(h)) {
-          case (?x) x;
-          case null break drain;
-        };
-        switch (Map.get<Blob, Blob>(forkBody, Blob.compare, hash)) {
-          case null break drain; // this block's body isn't known yet
-          case (?body) {
-            appendCanonicalBody(h, value, body);
-            Map.remove<Blob, Blob>(forkBody, Blob.compare, hash);
-            bodiesNextHeight += 1;
-          };
-        };
+    // Body stored in a fork block's record, if any.
+    func forkBodyOf(hash : Blob) : ?ForkBody {
+      switch (Map.get<Blob, ForkBlock>(forkByHash, Blob.compare, hash)) {
+        case (?fb) fb.body;
+        case null null;
       };
     };
 
-    // Is this block's body already known (trie or fork store)?
+    // Is this block's body already known?
     func bodyKnown(b : StoredBlock) : Bool {
-      (b.isCanonical and b.height < bodiesNextHeight) or Map.containsKey<Blob, Blob>(forkBody, Blob.compare, b.hash);
+      (b.isCanonical and b.height < bodiesNextHeight) or (switch (forkBodyOf(b.hash)) { case (?_) true; case null false });
+    };
+
+    // F of the block immediately after `parent` (= F(parent) + N(parent)),
+    // if `parent`'s body is known; else null. Used to determine a fork
+    // block's first-tx serial number at upload time.
+    func firstTxAfter(parent : StoredBlock) : ?Nat {
+      if (parent.isCanonical) {
+        if (parent.height < bodiesNextHeight) {
+          ?(HeaderValue.firstTxIndexOf(parent.value) + trieTxCount(parent.height));
+        } else null;
+      } else switch (forkBodyOf(parent.hash)) {
+        case (?body) ?(body.firstTxIndex + body.txids.size() / 32);
+        case null null;
+      };
     };
 
     // tx_count of a canonical block currently indexed in the trie.
@@ -1091,21 +1112,19 @@ module {
     };
 
     func bodyResult(b : StoredBlock, duplicate : Bool) : PushBodyOk {
-      let indexed = b.isCanonical and b.height < bodiesNextHeight;
-      let f = if (indexed) {
-        switch (headerDb.get(b.height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null 0 };
-      } else 0;
-      let tc = if (indexed) trieTxCount(b.height) else {
-        switch (Map.get<Blob, Blob>(forkBody, Blob.compare, b.hash)) { case (?body) body.size() / 32; case null 0 };
+      if (b.isCanonical and b.height < bodiesNextHeight) {
+        let f = switch (headerDb.get(b.height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null 0 };
+        return { height = b.height; tx_count = trieTxCount(b.height); first_tx_index = f; canonical_indexed = true; duplicate };
       };
-      { height = b.height; tx_count = tc; first_tx_index = f; canonical_indexed = indexed; duplicate };
+      switch (forkBodyOf(b.hash)) {
+        case (?body) ({ height = b.height; tx_count = body.txids.size() / 32; first_tx_index = body.firstTxIndex; canonical_indexed = false; duplicate });
+        case null ({ height = b.height; tx_count = 0; first_tx_index = 0; canonical_indexed = false; duplicate });
+      };
     };
 
-    // Index a block's body. Allowed whenever the body isn't already known,
-    // for canonical or fork blocks. Verifies the merkle root, stores the
-    // body in the fork-body store, then drains as much as possible into the
-    // canonical trie (so a canonical block at/under the frontier is indexed
-    // immediately).
+    // Index a block's body — allowed only when all ancestor bodies are known
+    // (so F is determined). Canonical bodies go to the txid trie in chain
+    // order; fork bodies into the ForkBlock record. Re-upload is a no-op.
     public func pushBody(blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
       if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
       if (txCount == 0) return #err("tx_count must be >= 1");
@@ -1119,9 +1138,32 @@ module {
       if (bodyKnown(b)) return #ok(bodyResult(b, true));
       if (Merkle.root(hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
 
-      Map.add<Blob, Blob>(forkBody, Blob.compare, b.hash, hashes);
-      drainCanonicalBodies();
-      #ok(bodyResult(b, false));
+      if (b.isCanonical) {
+        if (b.height != bodiesNextHeight) {
+          return #err(
+            "ancestor bodies unknown: expected canonical body for height " #
+            debug_show bodiesNextHeight # ", got " # debug_show b.height
+          );
+        };
+        appendCanonicalBody(b.height, b.value, hashes);
+        bodiesNextHeight += 1;
+        #ok(bodyResult(b, false));
+      } else {
+        let parent = switch (parentOf(b)) {
+          case (?p) p;
+          case null return #err("fork block has no parent");
+        };
+        let f = switch (firstTxAfter(parent)) {
+          case (?f) f;
+          case null return #err("ancestor bodies unknown for this fork block");
+        };
+        let fb = switch (Map.get<Blob, ForkBlock>(forkByHash, Blob.compare, b.hash)) {
+          case (?x) x;
+          case null return #err("fork block missing from store");
+        };
+        Map.add<Blob, ForkBlock>(forkByHash, Blob.compare, b.hash, { fb with body = ?{ txids = hashes; firstTxIndex = f } });
+        #ok(bodyResult(b, false));
+      };
     };
 
     // tx_count of any block by internal hash (canonical-indexed or
@@ -1130,40 +1172,23 @@ module {
       switch (byHashInternal(hash)) {
         case null null;
         case (?b) {
-          if (b.isCanonical and b.height < bodiesNextHeight) ?trieTxCount(b.height) else switch (Map.get<Blob, Blob>(forkBody, Blob.compare, b.hash)) {
-            case (?body) ?(body.size() / 32);
+          if (b.isCanonical and b.height < bodiesNextHeight) ?trieTxCount(b.height) else switch (forkBodyOf(b.hash)) {
+            case (?body) ?(body.txids.size() / 32);
             case null null;
           };
         };
       };
     };
 
-    // tx_count of the canonical block at `height`, or null if not known.
+    // tx_count of the canonical block at `height`, or null if not yet indexed.
     public func txCountAt(height : Nat) : ?Nat {
-      if (height > tipHeight()) return null;
-      if (height < bodiesNextHeight) return ?trieTxCount(height);
-      // Canonical but ahead of the frontier: maybe a gap upload (fork store).
-      switch (headerDb.get(height)) {
-        case (?(hash, _)) switch (Map.get<Blob, Blob>(forkBody, Blob.compare, hash)) {
-          case (?body) ?(body.size() / 32);
-          case null null;
-        };
-        case null null;
-      };
+      if (height < bodiesNextHeight) ?trieTxCount(height) else null;
     };
 
     public func bodyAt(height : Nat) : ?BodyInfo {
-      if (height > tipHeight()) return null;
-      let indexed = height < bodiesNextHeight;
-      switch (txCountAt(height)) {
-        case null null;
-        case (?tc) {
-          let f = if (indexed) {
-            switch (headerDb.get(height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null 0 };
-          } else 0;
-          ?{ height; tx_count = tc; first_tx_index = f; canonical_indexed = indexed };
-        };
-      };
+      if (height >= bodiesNextHeight) return null;
+      let f = switch (headerDb.get(height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return null };
+      ?{ height; tx_count = trieTxCount(height); first_tx_index = f; canonical_indexed = true };
     };
 
     // Does the flat txid blob `body` contain `txid`?
@@ -1175,24 +1200,19 @@ module {
     };
 
     // Every known block containing `txid` (internal LE): the canonical
-    // height (from the canonical txid trie or, for an out-of-order canonical
-    // body, the fork-body store) plus all fork blocks holding it. Fork
-    // lookup scans the fork-body store (small: real forks only).
+    // height (from the canonical txid trie) plus all fork blocks whose stored
+    // body holds it. Fork lookup scans the fork store (small: real forks only).
     public func lookupTxid(txid : Blob) : { canonical : ?Nat; forks : [Blob] } {
       if (txid.size() != 32) return { canonical = null; forks = [] };
-      var canonical = switch (StableTrie.lookup(txTrie, txid)) {
+      let canonical = switch (StableTrie.lookup(txTrie, txid)) {
         case (?(v, _)) ?decodeHeight(v);
         case null null;
       };
       let forks = List.empty<Blob>();
-      for ((hash, body) in Map.entries(forkBody)) {
-        if (bodyContains(body, txid)) {
-          switch (byHashInternal(hash)) {
-            // A canonical block whose body is stored ahead of the frontier
-            // is reported as canonical, not as a fork.
-            case (?b) if (b.isCanonical) canonical := ?b.height else List.add(forks, hash);
-            case null List.add(forks, hash);
-          };
+      for ((hash, fb) in Map.entries(forkByHash)) {
+        switch (fb.body) {
+          case (?body) if (bodyContains(body.txids, txid)) List.add(forks, hash);
+          case null {};
         };
       };
       { canonical; forks = List.toArray(forks) };
@@ -1234,7 +1254,7 @@ module {
         [
           ("chain_fork_tips", "", fs.size()),
           ("chain_fork_blocks", "", Map.size(forkByHash)),
-          ("chain_fork_bodies", "", Map.size(forkBody)),
+          ("chain_fork_bodies", "", forkBodyCount()),
           ("chain_fork_longest", "", longest),
           ("chain_fork_highest_tip_height", "", highestTip),
           ("chain_fork_highest_tip_common_height", "", highestTipCommon),

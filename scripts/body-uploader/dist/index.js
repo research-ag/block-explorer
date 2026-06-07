@@ -5,13 +5,14 @@
  * extracts the txid list of each block, and uploads them to the
  * block_explorer canister via `push_body` / `push_bodies`.
  *
- * Bodies may be uploaded for any block whose body the canister doesn't
- * already know — canonical or fork, in any order. The canister verifies
- * each body against the block's merkle root, indexes canonical bodies in
- * chain order, and keeps everything else in a heap fork-body store (so a
- * reorg re-indexes automatically). Re-uploading a known body is a no-op
- * (counted as `duplicate`). This uploader still walks heights in order
- * for simplicity.
+ * A body may be uploaded only once all of the block's ancestor bodies are
+ * known (so its first-tx serial number is determined): canonical bodies in
+ * strict height order, and a fork block's body only after its parent's.
+ * This uploader walks heights in order, which satisfies that for the
+ * canonical chain. The canister verifies each body against the block's
+ * merkle root, indexes canonical bodies into the txid trie, and stores fork
+ * bodies in the fork-block record (so a reorg re-indexes automatically).
+ * Re-uploading a known body is a no-op (counted as `duplicate`).
  *
  * Algorithm
  * ---------

@@ -564,7 +564,7 @@ suite(
     );
 
     test(
-      "out-of-order upload is stored then drained when the gap fills",
+      "out-of-order canonical and gapped fork bodies are rejected",
       func() {
         let c = newChain();
         let g = canon0(c);
@@ -574,26 +574,37 @@ suite(
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(t, 2));
         ignore push(c, h1);
 
-        // Block 1 body BEFORE genesis: accepted, stored, not yet indexed.
-        switch (c.pushBody(hashOf(h1), 2, t)) {
-          case (#ok ok) assert not ok.canonical_indexed and not ok.duplicate;
-          case _ assert false;
-        };
-        assert c.bodiesHeight() == 0; // nothing indexed yet
-        assert c.forkBodyCount() == 1;
-        assert c.txCountAt(1) == ?2; // known via the fork-body store
-        assert c.txCountOfHash(hashOf(h1)) == ?2;
-
-        // Genesis body fills the gap and drains both into the trie.
-        switch (c.pushBody(g.hash, 1, genMerkle)) {
-          case (#ok ok) assert ok.canonical_indexed;
-          case _ assert false;
-        };
+        // Block 1 body before genesis: rejected (ancestor body unknown).
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#err _) {}; case _ assert false };
+        assert c.bodiesHeight() == 0;
+        // Genesis first, then block 1 — strict chain order.
+        switch (c.pushBody(g.hash, 1, genMerkle)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
         assert c.bodiesHeight() == 2;
-        assert c.totalIndexedTxids() == 3;
-        assert c.forkBodyCount() == 0;
-        assert c.txCountAt(0) == ?1 and c.txCountAt(1) == ?2;
-        assert c.lookupTxid(txid(1)).canonical == ?1;
+        // Extend the canonical chain (header only) so the 2-block fork below
+        // ties on work and does not trigger a reorg.
+        ignore push(c, mkHeader(hashOf(h1), EASY_BITS, 2, 2));
+
+        // Fork chain F1 -> F2 off genesis; F2's body needs F1's body first.
+        let f1 = mkHeaderM(g.hash, EASY_BITS, 100, 9, Merkle.root(txids([30]), 1));
+        ignore push(c, f1);
+        let tf2 = txids([31, 32]);
+        let f2 = mkHeaderM(hashOf(f1), EASY_BITS, 101, 10, Merkle.root(tf2, 2));
+        ignore push(c, f2);
+
+        // F2 body before F1 body: rejected (fork ancestor body unknown).
+        switch (c.pushBody(hashOf(f2), 2, tf2)) { case (#err _) {}; case _ assert false };
+        // F1 body OK (parent genesis has a body); stored in the fork record.
+        switch (c.pushBody(hashOf(f1), 1, txids([30]))) {
+          case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 1;
+          case _ assert false;
+        };
+        // Now F2 body OK (parent F1 has a body); F = F(F1) + N(F1) = 1 + 1.
+        switch (c.pushBody(hashOf(f2), 2, tf2)) {
+          case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 2;
+          case _ assert false;
+        };
+        assert c.forkBodyCount() == 2;
       },
     );
 
