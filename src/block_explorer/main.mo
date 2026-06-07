@@ -318,6 +318,14 @@ persistent actor BlockExplorer {
   //
   // All other methods pass through unchanged.
   // ---------------------------------------------------------------------
+  // NOTE: inspect_message is intentionally DISABLED (commented out below).
+  // When enabled it ran the full push (validation + storage + any reorg)
+  // as a boundary-node dry run whose state changes the IC discards — an
+  // exact accept/reject predictor that spam-filtered bad/duplicate/orphan/
+  // stale headers, at the cost of doing that work twice per accepted push.
+  // With it disabled, all ingress messages are accepted at the boundary and
+  // filtering happens only in the real call. To re-enable, uncomment.
+  /*
   system func inspect({
     caller : Principal;
     arg : Blob;
@@ -373,6 +381,7 @@ persistent actor BlockExplorer {
       case (_) true;
     };
   };
+  */
 
   // ---------------------------------------------------------------------
   // Pull API.
