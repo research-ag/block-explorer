@@ -104,14 +104,17 @@ persistent actor BlockExplorer {
   // consistent with what the canister currently sees.
   renderer.addValue(PT.newValue("headers_total", [], func() = chain.size()));
   renderer.addValue(PT.newValue("tip_height", [], func() = chain.tipHeight()));
-  renderer.addValue(PT.newValue("fork_count", [], func() = chain.forks().size()));
-  renderer.addValue(PT.newValue("reorg_count", [], func() = chain.reorgs().size()));
   renderer.addValue(PT.newValue("bodies_height", [], func() = chain.bodiesHeight()));
-  renderer.addValue(PT.newValue("indexed_txids", [], func() = chain.totalIndexedTxids()));
   renderer.addValue(PT.newValue("uploader_count", [], func() = chain.uploaderStats().size()));
-  renderer.addValue(PT.newValue("header_db_byte_size", [], func() = chain.memoryStats().byte_size));
-  renderer.addValue(PT.newValue("header_db_leaf_count", [], func() = chain.memoryStats().used_leaf_count));
-  renderer.addValue(PT.newValue("header_db_node_count", [], func() = chain.memoryStats().used_node_count));
+  // Memory stats of both stable-trie Enumerations, via each trie's
+  // promtracker `Value` (stable_trie_node_count / _leaf_count / _byte_size
+  // families, with a kind="used"|"total" label), distinguished by a
+  // `trie` label.
+  renderer.addValue(PT.bundle([chain.headerTrieValue()], [("trie", "headers")]));
+  renderer.addValue(PT.bundle([chain.txTrieValue()], [("trie", "txids")]));
+  // Heap data-structure stats: fork-store sizes and reorg history
+  // (chain_fork_* / chain_reorg_* families), computed once per scrape.
+  renderer.addValue(chain.heapStatsValue());
 
   // ---------------------------------------------------------------------
   // Candid-facing types & projections.

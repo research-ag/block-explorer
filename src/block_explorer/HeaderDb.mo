@@ -129,6 +129,11 @@ module {
 
     public func memoryStats() : MemoryStats = Enumeration.memoryStats(trie);
 
+    // Promtracker Value exposing this trie's memoryStats (stable_trie_*
+    // families). Feed to a renderer, optionally wrapped in PT.bundle to
+    // add a distinguishing label.
+    public func toValue() : { read : () -> [(Text, Text, Nat)] } = Enumeration.toValue(trie);
+
     // Persistence hooks: called from the enclosing Chain's share/unshare.
     public func share() : StableData = trie;
     public func unshare(d : StableData) { trie := d };

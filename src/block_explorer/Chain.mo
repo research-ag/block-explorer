@@ -115,6 +115,10 @@ module {
 
   type BlobEnum = Enum.BlobEnumeration.BlobEnumeration;
 
+  // A promtracker pull `Value` (structurally `PT.Value`): one `read()`
+  // returns several `(name, labels, value)` samples per scrape.
+  public type MetricValue = { read : () -> [(Text, Text, Nat)] };
+
   // Body summary for a canonical block whose transactions are indexed.
   public type BodyInfo = {
     height : Nat;
@@ -1074,6 +1078,52 @@ module {
       switch (StableTrie.lookup(txTrie, txid)) {
         case (?(v, _)) ?decodeHeight(v);
         case null null;
+      };
+    };
+
+    // -----------------------------------------------------------------
+    // Metrics (promtracker pull Values).
+    // -----------------------------------------------------------------
+
+    // memoryStats of the canonical header trie (stable_trie_* families).
+    public func headerTrieValue() : MetricValue = headerDb.toValue();
+
+    // memoryStats of the canonical transaction (txid) trie.
+    public func txTrieValue() : MetricValue = StableTrie.toValue(txTrie);
+
+    // Heap fork-store + reorg-history metrics, computed once per scrape.
+    public func heapStatsValue() : MetricValue = {
+      read = func() : [(Text, Text, Nat)] {
+        let fs = forks();
+        var longest : Nat = 0;
+        var highestTip : Nat = 0;
+        var highestTipCommon : Nat = 0;
+        for (f in fs.vals()) {
+          if (f.length > longest) longest := f.length;
+          if (f.tip_height > highestTip) {
+            highestTip := f.tip_height;
+            highestTipCommon := f.branch_height;
+          };
+        };
+        var reorgLastCommon : Nat = 0;
+        var reorgMaxDisplaced : Nat = 0;
+        // Iteration is in insertion order, so the final assignment to
+        // reorgLastCommon is the most recent reorg's common height.
+        for (e in List.values(reorgLog)) {
+          reorgLastCommon := e.common_height;
+          if (e.displaced > reorgMaxDisplaced) reorgMaxDisplaced := e.displaced;
+        };
+        let nr = List.size(reorgLog);
+        [
+          ("chain_fork_tips", "", fs.size()),
+          ("chain_fork_blocks", "", Map.size(forkByHash)),
+          ("chain_fork_longest", "", longest),
+          ("chain_fork_highest_tip_height", "", highestTip),
+          ("chain_fork_highest_tip_common_height", "", highestTipCommon),
+          ("chain_reorg_count", "", nr),
+          ("chain_reorg_last_common_height", "", reorgLastCommon),
+          ("chain_reorg_max_displaced", "", reorgMaxDisplaced),
+        ];
       };
     };
   };
