@@ -272,8 +272,25 @@ persistent actor BlockExplorer {
   // Body summary (tx_count + first_tx_index) for a canonical block.
   public query func get_body(height : Nat) : async ?Chain.BodyInfo = async chain.bodyAt(height);
 
-  // Which canonical block height contains `txid` (32 bytes, internal LE).
-  public query func lookup_txid(txid : Blob) : async ?Nat = async chain.lookupTxid(txid);
+  // All known blocks containing `txid` (32 bytes, internal LE): the
+  // canonical block's height (if any) plus the big-endian display hashes of
+  // every fork block that holds it. Callers that only care about the
+  // canonical chain can ignore `fork_block_hashes_be`.
+  public type TxLocation = {
+    canonical_height : ?Nat;
+    fork_block_hashes_be : [Text];
+  };
+
+  public query func lookup_txid(txid : Blob) : async TxLocation {
+    let r = chain.lookupTxid(txid);
+    {
+      canonical_height = r.canonical;
+      fork_block_hashes_be = Array.map<Blob, Text>(
+        r.forks,
+        func(h) = Header.bytesToHex(Header.reverse32(h)),
+      );
+    };
+  };
 
   // The next height whose body may be uploaded (= count of indexed bodies).
   public query func bodies_next_height() : async Nat = async chain.bodiesHeight();

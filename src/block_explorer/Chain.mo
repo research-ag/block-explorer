@@ -1166,14 +1166,36 @@ module {
       };
     };
 
-    // Which canonical block contains `txid` (internal LE), or null. Only the
-    // canonical txid trie is reverse-indexed; fork-stored bodies are not.
-    public func lookupTxid(txid : Blob) : ?Nat {
-      if (txid.size() != 32) return null;
-      switch (StableTrie.lookup(txTrie, txid)) {
+    // Does the flat txid blob `body` contain `txid`?
+    func bodyContains(body : Blob, txid : Blob) : Bool {
+      let n = body.size() / 32;
+      var i = 0;
+      while (i < n) { if (txidAt(body, i) == txid) return true; i += 1 };
+      false;
+    };
+
+    // Every known block containing `txid` (internal LE): the canonical
+    // height (from the canonical txid trie or, for an out-of-order canonical
+    // body, the fork-body store) plus all fork blocks holding it. Fork
+    // lookup scans the fork-body store (small: real forks only).
+    public func lookupTxid(txid : Blob) : { canonical : ?Nat; forks : [Blob] } {
+      if (txid.size() != 32) return { canonical = null; forks = [] };
+      var canonical = switch (StableTrie.lookup(txTrie, txid)) {
         case (?(v, _)) ?decodeHeight(v);
         case null null;
       };
+      let forks = List.empty<Blob>();
+      for ((hash, body) in Map.entries(forkBody)) {
+        if (bodyContains(body, txid)) {
+          switch (byHashInternal(hash)) {
+            // A canonical block whose body is stored ahead of the frontier
+            // is reported as canonical, not as a fork.
+            case (?b) if (b.isCanonical) canonical := ?b.height else List.add(forks, hash);
+            case null List.add(forks, hash);
+          };
+        };
+      };
+      { canonical; forks = List.toArray(forks) };
     };
 
     // -----------------------------------------------------------------

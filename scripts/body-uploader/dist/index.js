@@ -3,7 +3,15 @@
  *
  * Pulls full blocks from a local Bitcoin Core node via JSON-RPC,
  * extracts the txid list of each block, and uploads them to the
- * block_bodies canister via `put_body`.
+ * block_explorer canister via `push_body` / `push_bodies`.
+ *
+ * Bodies may be uploaded for any block whose body the canister doesn't
+ * already know — canonical or fork, in any order. The canister verifies
+ * each body against the block's merkle root, indexes canonical bodies in
+ * chain order, and keeps everything else in a heap fork-body store (so a
+ * reorg re-indexes automatically). Re-uploading a known body is a no-op
+ * (counted as `duplicate`). This uploader still walks heights in order
+ * for simplicity.
  *
  * Algorithm
  * ---------
@@ -21,9 +29,9 @@
  *      Persist `next = h + 1` after each successful put.
  *   4. Repeat after POLL_INTERVAL seconds (or one-shot when `--once`).
  *
- * The canister rejects a put_body whose block_hash isn't already known
- * to block_explorer (it looks it up first), so this script depends on
- * the header relay (poll-headers.py / watch-headers.py) being ahead of it.
+ * The canister rejects a push_body whose block_hash isn't already known
+ * (the header must be present first), so this script depends on the
+ * header relay (poll-headers.py / watch-headers.py) being ahead of it.
  *
  * State file (default: $HOME/.ic/body-uploader.state.json):
  *   { "next": <height>, "updated_at": "<iso8601>" }
@@ -48,7 +56,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { HttpAgent, Actor, AnonymousIdentity } from "@icp-sdk/core/agent";
 import { Ed25519KeyIdentity } from "@icp-sdk/core/identity";
-import { idlFactory } from "../block_bodies.did.js";
+import { idlFactory } from "../block_explorer.did.js";
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -211,10 +219,10 @@ async function processOneIteration(actor, state) {
         log(`submitting heights=${firstH}..${lastH} (${pending.length} blocks, ` +
             `${totalTxs} txids)`);
         const submitT0 = Date.now();
-        const result = await actor.put_bodies(batch);
+        const result = await actor.push_bodies(batch);
         const submitMs = Date.now() - submitT0;
         if ("err" in result) {
-            logErr(`put_bodies heights=${firstH}..${lastH} (${pending.length} blocks, ` +
+            logErr(`push_bodies heights=${firstH}..${lastH} (${pending.length} blocks, ` +
                 `${totalTxs} txids) submit_ms=${submitMs}: ${result.err}`);
             // Hard failure (e.g. malformed input) — don't advance state.
             pending = [];
@@ -276,16 +284,16 @@ async function processOneIteration(actor, state) {
             for (let i = 0; i < txCount; i += 1) {
                 hashesBlob.set(hexReverse32(txids[i]), i * 32);
             }
-            const result = await actor.put_body(blockHashLE, BigInt(txCount), hashesBlob);
+            const result = await actor.push_body(blockHashLE, BigInt(txCount), hashesBlob);
             if ("ok" in result) {
                 const ok = result.ok;
-                log(`put_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
-                    `dbidx=${ok.dbidx} duplicate=${ok.duplicate}`);
+                log(`push_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
+                    `indexed=${ok.canonical_indexed} duplicate=${ok.duplicate}`);
                 state = { next: h + 1, updated_at: new Date().toISOString() };
                 saveState(state);
                 continue;
             }
-            logErr(`put_body (oversize) height=${h} hash=${hashHex}: ${result.err}`);
+            logErr(`push_body (oversize) height=${h} hash=${hashHex}: ${result.err}`);
             return state;
         }
         const blockHashLE = hexReverse32(hashHex);

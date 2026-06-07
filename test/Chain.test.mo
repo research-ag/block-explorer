@@ -529,7 +529,7 @@ suite(
   "Chain: block bodies",
   func() {
     test(
-      "sequential upload, tx_count, and txid -> height lookup",
+      "canonical upload indexes in chain order; tx_count and txid lookup",
       func() {
         let c = newChain(); // 32-byte keys, real genesis
         let g = canon0(c);
@@ -537,91 +537,131 @@ suite(
 
         // Genesis body: a single coinbase tx (root of [coinbase] == coinbase).
         switch (c.pushBody(g.hash, 1, genMerkle)) {
-          case (#ok ok) assert ok.height == 0 and ok.tx_count == 1 and ok.first_tx_index == 0 and not ok.duplicate;
+          case (#ok ok) assert ok.height == 0 and ok.tx_count == 1 and ok.first_tx_index == 0 and ok.canonical_indexed and not ok.duplicate;
           case (#err _) assert false;
         };
         assert c.bodiesHeight() == 1;
         assert c.totalIndexedTxids() == 1;
         assert c.txCountAt(0) == ?1;
-        assert c.lookupTxid(genMerkle) == ?0;
+        assert c.lookupTxid(genMerkle).canonical == ?0;
 
         // Block 1 with three distinct txs; header merkle crafted to match.
         let t = txids([1, 2, 3]);
-        let m1 = Merkle.root(t, 3);
-        let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, m1);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(t, 3));
         switch (push(c, h1)) { case (#ok ok) assert ok.is_canonical; case _ assert false };
         switch (c.pushBody(hashOf(h1), 3, t)) {
-          case (#ok ok) assert ok.height == 1 and ok.tx_count == 3 and ok.first_tx_index == 1 and not ok.duplicate;
+          case (#ok ok) assert ok.height == 1 and ok.tx_count == 3 and ok.first_tx_index == 1 and ok.canonical_indexed;
           case (#err _) assert false;
         };
         assert c.bodiesHeight() == 2;
         assert c.totalIndexedTxids() == 4;
         assert c.txCountAt(1) == ?3;
-        assert c.lookupTxid(txid(2)) == ?1;
-        assert c.lookupTxid(txid(9)) == null;
-        switch (c.bodyAt(1)) {
-          case (?b) assert b.tx_count == 3 and b.first_tx_index == 1;
-          case null assert false;
-        };
+        assert c.txCountOfHash(hashOf(h1)) == ?3;
+        assert c.lookupTxid(txid(2)).canonical == ?1;
+        assert c.lookupTxid(txid(9)).canonical == null;
+        assert c.forkBodyCount() == 0;
       },
     );
 
     test(
-      "rejects out-of-order / merkle mismatch; duplicate no-ops",
+      "out-of-order upload is stored then drained when the gap fills",
       func() {
         let c = newChain();
         let g = canon0(c);
         let genMerkle = HeaderValue.merkleOf(g.value);
 
         let t = txids([1, 2]);
-        let m1 = Merkle.root(t, 2);
-        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, m1);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(t, 2));
         ignore push(c, h1);
 
-        // Block 1 body before genesis -> out of order.
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#err _) {}; case _ assert false };
-        // Genesis body first.
-        ignore c.pushBody(g.hash, 1, genMerkle);
-        // Re-upload genesis -> duplicate no-op.
-        switch (c.pushBody(g.hash, 1, genMerkle)) { case (#ok ok) assert ok.duplicate; case _ assert false };
-        // Wrong txids for block 1 -> merkle mismatch.
-        switch (c.pushBody(hashOf(h1), 2, txids([5, 6]))) { case (#err _) {}; case _ assert false };
-        // Correct block 1 body.
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert not ok.duplicate; case _ assert false };
+        // Block 1 body BEFORE genesis: accepted, stored, not yet indexed.
+        switch (c.pushBody(hashOf(h1), 2, t)) {
+          case (#ok ok) assert not ok.canonical_indexed and not ok.duplicate;
+          case _ assert false;
+        };
+        assert c.bodiesHeight() == 0; // nothing indexed yet
+        assert c.forkBodyCount() == 1;
+        assert c.txCountAt(1) == ?2; // known via the fork-body store
+        assert c.txCountOfHash(hashOf(h1)) == ?2;
+
+        // Genesis body fills the gap and drains both into the trie.
+        switch (c.pushBody(g.hash, 1, genMerkle)) {
+          case (#ok ok) assert ok.canonical_indexed;
+          case _ assert false;
+        };
         assert c.bodiesHeight() == 2;
+        assert c.totalIndexedTxids() == 3;
+        assert c.forkBodyCount() == 0;
+        assert c.txCountAt(0) == ?1 and c.txCountAt(1) == ?2;
+        assert c.lookupTxid(txid(1)).canonical == ?1;
       },
     );
 
     test(
-      "reorg truncates indexed bodies back to the common ancestor",
+      "fork-block body is retained and auto-indexed across a reorg",
       func() {
         let c = newChain();
         let g = canon0(c);
-        let genMerkle = HeaderValue.merkleOf(g.value);
-        ignore c.pushBody(g.hash, 1, genMerkle);
+        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value));
 
         // A1 canonical, body of 2 txs.
         let tA = txids([10, 11]);
         let a1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(tA, 2));
         ignore push(c, a1);
         ignore c.pushBody(hashOf(a1), 2, tA);
-        assert c.bodiesHeight() == 2;
-        assert c.totalIndexedTxids() == 3;
-        assert c.txCountAt(1) == ?2;
+        assert c.totalIndexedTxids() == 3; // genesis + A1
 
-        // Heavier branch off genesis displaces A1.
-        let b1 = mkHeader(g.hash, EASY_BITS, 1_700_000_010, 101);
+        // Competing fork B1 off genesis; upload its body while non-canonical.
+        let tB = txids([20, 21, 22]);
+        let b1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_010, 101, Merkle.root(tB, 3));
         ignore push(c, b1);
+        switch (c.pushBody(hashOf(b1), 3, tB)) {
+          case (#ok ok) assert not ok.canonical_indexed and not ok.duplicate;
+          case _ assert false;
+        };
+        assert c.forkBodyCount() == 1;
+        assert c.txCountOfHash(hashOf(b1)) == ?3; // queryable while a fork
+
+        // B2 makes the B branch heavier -> reorg.
         let b2 = mkHeader(hashOf(b1), EASY_BITS, 1_700_000_011, 102);
         switch (push(c, b2)) { case (#ok ok) assert ok.is_canonical and ok.reorg_depth == 1; case _ assert false };
 
-        // A1's body is truncated; cursor rolled back; genesis body intact.
-        assert c.bodiesHeight() == 1;
-        assert c.totalIndexedTxids() == 1;
-        assert c.txCountAt(1) == null;
-        assert c.txCountAt(0) == ?1;
-        assert c.lookupTxid(genMerkle) == ?0;
-        assert c.lookupTxid(txid(10)) == null;
+        // B1 (body was known) is auto-indexed; A1's body is retained in the
+        // fork store; B2 has no body.
+        assert c.bodiesHeight() == 2; // genesis + B1
+        assert c.txCountAt(1) == ?3; // B1, now canonical & indexed
+        assert c.txCountAt(2) == null; // B2: no body
+        assert c.lookupTxid(txid(20)).canonical == ?1;
+        // A1 demoted: tx no longer canonical, but found in the fork-body store.
+        let loc = c.lookupTxid(txid(10));
+        assert loc.canonical == null;
+        assert loc.forks.size() == 1 and loc.forks[0] == hashOf(a1);
+        assert c.totalIndexedTxids() == 4; // genesis(1) + B1(3)
+        assert c.txCountOfHash(hashOf(a1)) == ?2; // A1 body retained on heap
+        assert c.forkBodyCount() == 1; // A1's body (B1 drained out)
+      },
+    );
+
+    test(
+      "merkle mismatch and unknown header rejected; duplicate no-ops",
+      func() {
+        let c = newChain();
+        let g = canon0(c);
+        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value));
+
+        let t = txids([1, 2]);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(t, 2));
+        ignore push(c, h1);
+
+        // Wrong txids -> merkle mismatch.
+        switch (c.pushBody(hashOf(h1), 2, txids([5, 6]))) { case (#err _) {}; case _ assert false };
+        // Unknown header.
+        switch (c.pushBody(txid(99), 1, txid(99))) { case (#err _) {}; case _ assert false };
+        // Correct body indexes it.
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
+        // Re-upload -> duplicate no-op.
+        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.duplicate; case _ assert false };
+        assert c.bodiesHeight() == 2;
       },
     );
   },

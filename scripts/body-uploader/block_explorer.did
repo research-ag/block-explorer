@@ -1,0 +1,24 @@
+// Body-upload subset of the block_explorer interface used by body-uploader.
+type PushBodyOk = record {
+  height : nat;
+  tx_count : nat;
+  first_tx_index : nat;
+  canonical_indexed : bool;
+  duplicate : bool;
+};
+type PushBodyResult = variant { ok : PushBodyOk; err : text };
+type BodyBatchResult = record {
+  accepted : nat;
+  duplicate : nat;
+  last_error : opt text;
+};
+type BodyBatchResultR = variant { ok : BodyBatchResult; err : text };
+service : {
+  // Next canonical height whose body is still missing (contiguous frontier).
+  bodies_next_height : () -> (nat) query;
+  // Index one block's body (block_hash internal LE, tx_count, concatenated
+  // txids internal LE). Allowed for any known block whose body isn't known.
+  push_body : (blob, nat, blob) -> (PushBodyResult);
+  // Batched variant; processes in order, stops at the first real error.
+  push_bodies : (vec record { blob; nat; blob }) -> (BodyBatchResultR);
+};
