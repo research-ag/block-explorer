@@ -92,10 +92,29 @@ const idlFactory = ({ IDL }) => {
   });
   const ImportResult = IDL.Variant({ ok: IDL.Nat, err: IDL.Text });
   const PushResult = IDL.Variant({ ok: PushOk, err: IDL.Text });
+  const TxOccurrence = IDL.Record({
+    block_hash_be_hex: IDL.Text,
+    height: IDL.Nat,
+    is_canonical: IDL.Bool,
+    block_time: IDL.Nat32,
+    position: IDL.Nat,
+  });
+  const TxView = IDL.Record({
+    txid_be_hex: IDL.Text,
+    canonical_index: IDL.Opt(IDL.Nat),
+    occurrences: IDL.Vec(TxOccurrence),
+  });
   return IDL.Service({
     get_view: IDL.Func([IDL.Opt(IDL.Nat)], [ChainView], ["query"]),
     get_by_hash: IDL.Func([IDL.Text], [IDL.Opt(BlockInfo)], ["query"]),
     tx_count_of_hash: IDL.Func([IDL.Text], [IDL.Opt(IDL.Nat)], ["query"]),
+    find_tx: IDL.Func([IDL.Text], [IDL.Opt(TxView)], ["query"]),
+    txid_at_index: IDL.Func([IDL.Nat], [IDL.Opt(IDL.Text)], ["query"]),
+    block_txids: IDL.Func(
+      [IDL.Text, IDL.Nat, IDL.Nat],
+      [IDL.Vec(IDL.Text)],
+      ["query"],
+    ),
     import_next: IDL.Func([IDL.Nat], [ImportResult], []),
     push_header: IDL.Func([IDL.Text], [PushResult], []),
     cycles_balance: IDL.Func([], [IDL.Nat], ["query"]),
@@ -692,6 +711,8 @@ async function loadBlock(opts) {
   renderBlock(block);
   attachTxCount(block, txCountPromise);
   renderSiblings(view.siblings, currentHash);
+  $("tx-view-card").style.display = "none"; // showing a block, not a tx
+  renderTxList(block.hash_be_hex);
   writeUrlHash(block);
   setStatus($("browse-status"), "");
   // Fire-and-forget: leaderboard is independent of the current block.
@@ -713,12 +734,162 @@ function writeUrlHash(bi) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Transactions: per-block tx list + transaction view.
+// ---------------------------------------------------------------------------
+
+const TX_PAGE = 100;
+let txListHash = null;
+let txListOffset = 0;
+let txListTotal = 0;
+
+// Show the current block's transaction list (paginated). Hidden if the
+// block has no indexed body.
+async function renderTxList(blockHashBeHex) {
+  txListHash = blockHashBeHex;
+  txListOffset = 0;
+  $("tx-list-body").innerHTML = "";
+  const wrap = $("tx-list-wrap");
+  let count = null;
+  try {
+    const opt = await actor.tx_count_of_hash(blockHashBeHex);
+    count = opt.length ? Number(opt[0]) : null;
+  } catch {
+    count = null;
+  }
+  if (txListHash !== blockHashBeHex) return; // navigated away while awaiting
+  if (count === null || count === 0) {
+    wrap.style.display = "none";
+    return;
+  }
+  txListTotal = count;
+  $("tx-list-count").textContent = fmtNat(BigInt(count));
+  wrap.style.display = "";
+  await loadMoreTxids();
+}
+
+async function loadMoreTxids() {
+  if (txListHash === null) return;
+  const want = txListHash;
+  let txs;
+  try {
+    txs = await actor.block_txids(want, BigInt(txListOffset), BigInt(TX_PAGE));
+  } catch (e) {
+    console.warn("block_txids failed:", e);
+    return;
+  }
+  if (txListHash !== want) return; // navigated away
+  const body = $("tx-list-body");
+  txs.forEach((txid, i) => {
+    const tr = document.createElement("tr");
+    const tdN = document.createElement("td");
+    tdN.textContent = fmtNat(BigInt(txListOffset + i));
+    const tdId = document.createElement("td");
+    tdId.className = "hash linkish";
+    tdId.textContent = txid;
+    tdId.title = "View transaction";
+    tdId.addEventListener("click", () => loadTx(txid));
+    tr.append(tdN, tdId);
+    body.appendChild(tr);
+  });
+  txListOffset += txs.length;
+  $("tx-list-shown").textContent = `showing ${txListOffset} of ${txListTotal}`;
+  $("tx-list-more").style.display = txListOffset < txListTotal ? "" : "none";
+}
+
+// Look up and display a transaction by big-endian txid.
+async function loadTx(txidBeHex) {
+  const txid = txidBeHex.trim().toLowerCase();
+  const search = $("tx-search-status");
+  if (!/^[0-9a-f]{64}$/.test(txid)) {
+    setStatus(search, "Enter a 64-hex-char transaction id.", "error");
+    return;
+  }
+  setStatus(search, "");
+  const card = $("tx-view-card");
+  card.style.display = "";
+  setStatus($("tx-view-status"), "Loading…");
+  let opt;
+  try {
+    opt = await actor.find_tx(txid);
+  } catch (e) {
+    setStatus($("tx-view-status"), "Lookup failed.", "error");
+    return;
+  }
+  if (opt.length === 0) {
+    $("tx-view-id").textContent = txid;
+    $("tx-view-index").textContent = "—";
+    $("tx-view-occ").innerHTML = "";
+    setStatus(
+      $("tx-view-status"),
+      "Not found in any known block (its block body may not be uploaded yet).",
+      "error",
+    );
+    writeTxUrl(txid);
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  renderTxView(opt[0]);
+  writeTxUrl(opt[0].txid_be_hex);
+  card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderTxView(tv) {
+  $("tx-view-id").textContent = tv.txid_be_hex;
+  $("tx-view-index").textContent = tv.canonical_index.length
+    ? fmtNat(tv.canonical_index[0])
+    : "— (not in a canonical block)";
+  const tbody = $("tx-view-occ");
+  tbody.innerHTML = "";
+  // Canonical occurrence first, then forks.
+  const occs = tv.occurrences
+    .slice()
+    .sort((a, b) =>
+      a.is_canonical === b.is_canonical ? 0 : a.is_canonical ? -1 : 1,
+    );
+  for (const o of occs) {
+    const tr = document.createElement("tr");
+    const tdH = document.createElement("td");
+    tdH.textContent = fmtNat(o.height);
+    const tdC = document.createElement("td");
+    tdC.textContent = o.is_canonical ? "canonical" : "fork";
+    tdC.className = o.is_canonical ? "ok" : "warn";
+    const tdP = document.createElement("td");
+    tdP.textContent = fmtNat(o.position);
+    const tdT = document.createElement("td");
+    tdT.textContent = fmtTime(o.block_time);
+    const tdHash = document.createElement("td");
+    tdHash.className = "hash linkish";
+    tdHash.textContent = o.block_hash_be_hex;
+    tdHash.title = "View block";
+    tdHash.addEventListener("click", () =>
+      loadBlock({ hash: o.block_hash_be_hex }),
+    );
+    tr.append(tdH, tdC, tdP, tdT, tdHash);
+    tbody.appendChild(tr);
+  }
+  setStatus($("tx-view-status"), "");
+}
+
+function writeTxUrl(txidBeHex) {
+  const want = `#tx=${txidBeHex}`;
+  if (location.hash !== want) {
+    suppressHashChange = true;
+    history.replaceState(null, "", want);
+  }
+}
+
 function loadFromUrl() {
   const h = location.hash;
   let m;
   if ((m = h.match(/^#h=(\d+)$/))) return loadBlock({ height: BigInt(m[1]) });
   if ((m = h.match(/^#hash=([0-9a-f]{64})$/i)))
     return loadBlock({ hash: m[1].toLowerCase() });
+  if ((m = h.match(/^#tx=([0-9a-f]{64})$/i))) {
+    const txid = m[1].toLowerCase();
+    // Render the tip block for context, then show the tx view.
+    return loadBlock({}).then(() => loadTx(txid));
+  }
   return loadBlock({});
 }
 
@@ -785,6 +956,43 @@ $("btn-find-hash").addEventListener("click", async () => {
 $("hash-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("btn-find-hash").click();
 });
+
+$("btn-find-tx").addEventListener("click", () => loadTx($("txid-input").value));
+$("txid-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("btn-find-tx").click();
+});
+
+$("btn-find-txindex").addEventListener("click", async () => {
+  const v = $("txindex-input").value.trim();
+  const status = $("tx-search-status");
+  if (v === "") return;
+  let idx;
+  try {
+    idx = BigInt(v);
+  } catch {
+    setStatus(status, "Enter a transaction index (number).", "error");
+    return;
+  }
+  setStatus(status, "Looking up…");
+  let opt;
+  try {
+    opt = await actor.txid_at_index(idx);
+  } catch {
+    setStatus(status, "Lookup failed.", "error");
+    return;
+  }
+  if (opt.length === 0) {
+    setStatus(status, "No transaction at that index.", "error");
+    return;
+  }
+  setStatus(status, "");
+  await loadTx(opt[0]);
+});
+$("txindex-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("btn-find-txindex").click();
+});
+
+$("tx-list-more").addEventListener("click", () => loadMoreTxids());
 
 $("btn-refresh").addEventListener("click", async () => {
   const status = $("refresh-status");

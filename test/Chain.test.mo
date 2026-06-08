@@ -560,6 +560,21 @@ suite(
         assert c.lookupTxid(txid(2)).canonical == ?1;
         assert c.lookupTxid(txid(9)).canonical == null;
         assert c.forkBodyCount() == 0;
+
+        // tx-by-index over the canonical ordering: 0 = genesis coinbase,
+        // 1..3 = block 1's three txs.
+        assert c.txidAtIndex(0) == ?genMerkle;
+        assert c.txidAtIndex(1) == ?txid(1);
+        assert c.txidAtIndex(3) == ?txid(3);
+        assert c.txidAtIndex(4) == null;
+        // list a block's txids.
+        assert c.blockTxids(hashOf(h1), 0, 10) == [txid(1), txid(2), txid(3)];
+        assert c.blockTxids(hashOf(h1), 1, 1) == [txid(2)];
+        // rich location of a tx: block 1, position 1, global index 2.
+        switch (c.txLocations(txid(2)).canonical) {
+          case (?l) assert l.height == 1 and l.position == 1 and l.index == 2;
+          case null assert false;
+        };
       },
     );
 

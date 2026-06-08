@@ -299,6 +299,98 @@ persistent actor BlockExplorer {
   public query func total_indexed_txids() : async Nat = async chain.totalIndexedTxids();
 
   // ---------------------------------------------------------------------
+  // Transaction lookups.
+  // ---------------------------------------------------------------------
+
+  // One occurrence of a transaction: the block that contains it, with the
+  // block's height, canonical/fork status, timestamp, and the tx's position
+  // within the block.
+  public type TxOccurrence = {
+    block_hash_be_hex : Text;
+    height : Nat;
+    is_canonical : Bool;
+    block_time : Nat32;
+    position : Nat;
+  };
+
+  // A transaction view: every block (canonical + forks) that contains the
+  // txid, plus its global serial number in the canonical tx ordering (if
+  // it's in a canonical block).
+  public type TxView = {
+    txid_be_hex : Text;
+    canonical_index : ?Nat;
+    occurrences : [TxOccurrence];
+  };
+
+  // Find a transaction by big-endian display txid. Returns null if no known
+  // block contains it.
+  public query func find_tx(txid_be_hex : Text) : async ?TxView {
+    let bytes = Header.hexToBlob(txid_be_hex);
+    if (bytes.size() != 32) return null;
+    let txid = Header.reverse32(bytes);
+    let loc = chain.txLocations(txid);
+    let canonOcc : ?TxOccurrence = switch (loc.canonical) {
+      case (?c) switch (chain.canonicalAt(c.height)) {
+        case (?b) ?{
+          block_hash_be_hex = Header.bytesToHex(Header.reverse32(b.hash));
+          height = c.height;
+          is_canonical = true;
+          block_time = HeaderValue.timeOf(b.value);
+          position = c.position;
+        };
+        case null null;
+      };
+      case null null;
+    };
+    let forkOccs = Array.map<Chain.TxForkLoc, TxOccurrence>(
+      loc.forks,
+      func(f) {
+        let t = switch (chain.byHashInternal(f.hash)) {
+          case (?b) HeaderValue.timeOf(b.value);
+          case null (0 : Nat32);
+        };
+        {
+          block_hash_be_hex = Header.bytesToHex(Header.reverse32(f.hash));
+          height = f.height;
+          is_canonical = false;
+          block_time = t;
+          position = f.position;
+        };
+      },
+    );
+    let occurrences = switch (canonOcc) {
+      case (?o) Array.tabulate<TxOccurrence>(forkOccs.size() + 1, func(i) = if (i == 0) o else forkOccs[i - 1]);
+      case null forkOccs;
+    };
+    if (occurrences.size() == 0) return null;
+    ?{
+      txid_be_hex = Header.bytesToHex(Header.reverse32(txid));
+      canonical_index = switch (loc.canonical) { case (?c) ?c.index; case null null };
+      occurrences;
+    };
+  };
+
+  // The txid (big-endian display) at a global canonical serial index, or null.
+  public query func txid_at_index(index : Nat) : async ?Text {
+    switch (chain.txidAtIndex(index)) {
+      case (?t) ?Header.bytesToHex(Header.reverse32(t));
+      case null null;
+    };
+  };
+
+  // The transaction ids (big-endian display) of a block, in block order,
+  // paginated (limit capped at 1000). Works for canonical and fork blocks.
+  public query func block_txids(block_hash_be_hex : Text, offset : Nat, limit : Nat) : async [Text] {
+    let bytes = Header.hexToBlob(block_hash_be_hex);
+    if (bytes.size() != 32) return [];
+    let cap = if (limit > 1000) 1000 else limit;
+    Array.map<Blob, Text>(
+      chain.blockTxids(Header.reverse32(bytes), offset, cap),
+      func(t) = Header.bytesToHex(Header.reverse32(t)),
+    );
+  };
+
+  // ---------------------------------------------------------------------
   // Ingress inspection.
   //
   // inspect_message runs at the boundary node before an ingress call

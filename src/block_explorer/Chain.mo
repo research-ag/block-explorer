@@ -140,6 +140,12 @@ module {
     canonical_indexed : Bool; // txids live in the canonical txid trie
   };
 
+  // A transaction's canonical location: its block height, position within
+  // the block, and global serial index in the canonical tx ordering.
+  public type TxCanonLoc = { height : Nat; position : Nat; index : Nat };
+  // A transaction's location in a fork block.
+  public type TxForkLoc = { hash : Blob; height : Nat; position : Nat };
+
   public type PushBodyOk = {
     height : Nat;
     tx_count : Nat;
@@ -1216,6 +1222,78 @@ module {
         };
       };
       { canonical; forks = List.toArray(forks) };
+    };
+
+    // txid (internal LE) at global canonical serial `index`, or null.
+    public func txidAtIndex(index : Nat) : ?Blob {
+      switch (StableTrie.get(txTrie, index)) { case (?(k, _)) ?k; case null null };
+    };
+
+    // Position of `txid` within `body` (flat txid blob), or null.
+    func bodyPositionOf(body : Blob, txid : Blob) : ?Nat {
+      let n = body.size() / 32;
+      var i = 0;
+      while (i < n) { if (txidAt(body, i) == txid) return ?i; i += 1 };
+      null;
+    };
+
+    // All locations of `txid` (internal LE): the canonical occurrence (with
+    // its global serial index and in-block position) plus each fork block
+    // that holds it.
+    public func txLocations(txid : Blob) : { canonical : ?TxCanonLoc; forks : [TxForkLoc] } {
+      if (txid.size() != 32) return { canonical = null; forks = [] };
+      let canonical : ?TxCanonLoc = switch (StableTrie.lookup(txTrie, txid)) {
+        case (?(v, idx)) {
+          let height = decodeHeight(v);
+          let f = switch (headerDb.get(height)) { case (?(_, hv)) HeaderValue.firstTxIndexOf(hv); case null 0 };
+          ?{ height; position = idx - f : Nat; index = idx };
+        };
+        case null null;
+      };
+      let forks = List.empty<TxForkLoc>();
+      for ((hash, fb) in Map.entries(forkByHash)) {
+        switch (fb.body) {
+          case (?body) switch (bodyPositionOf(body.txids, txid)) {
+            case (?pos) List.add(forks, { hash; height = fb.height; position = pos });
+            case null {};
+          };
+          case null {};
+        };
+      };
+      { canonical; forks = List.toArray(forks) };
+    };
+
+    // Txids of the block `hash` (canonical or fork) in block order, internal
+    // LE, paginated. Empty if the block or its body isn't known.
+    public func blockTxids(hash : Blob, offset : Nat, limit : Nat) : [Blob] {
+      switch (byHashInternal(hash)) {
+        case null [];
+        case (?b) {
+          if (b.isCanonical and b.height < bodiesNextHeight) {
+            let f = HeaderValue.firstTxIndexOf(b.value);
+            let n = trieTxCount(b.height);
+            if (offset >= n) return [];
+            let rem : Nat = n - offset;
+            let take = if (limit < rem) limit else rem;
+            Array.tabulate<Blob>(
+              take,
+              func(i) = switch (StableTrie.get(txTrie, f + offset + i)) {
+                case (?(k, _)) k;
+                case null Runtime.trap("blockTxids: missing txid");
+              },
+            );
+          } else switch (forkBodyOf(b.hash)) {
+            case (?body) {
+              let n = body.txids.size() / 32;
+              if (offset >= n) return [];
+              let rem : Nat = n - offset;
+              let take = if (limit < rem) limit else rem;
+              Array.tabulate<Blob>(take, func(i) = txidAt(body.txids, offset + i));
+            };
+            case null [];
+          };
+        };
+      };
     };
 
     // -----------------------------------------------------------------

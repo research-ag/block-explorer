@@ -59,6 +59,17 @@
         <button id="btn-find-hash">find by hash</button>
         <span id="hash-status" class="status"></span>
       </div>
+      <div class="button-row">
+        <input
+          id="txid-input"
+          type="text"
+          placeholder="transaction id (64 hex chars, big-endian)"
+        />
+        <button id="btn-find-tx">find tx</button>
+        <input id="txindex-input" type="number" min="0" placeholder="tx index" />
+        <button id="btn-find-txindex">tx by index</button>
+        <span id="tx-search-status" class="status"></span>
+      </div>
 
       <table class="block-table">
         <tbody>
@@ -129,6 +140,68 @@
         </tbody>
       </table>
       <div id="browse-status" class="status"></div>
+
+      <div id="tx-list-wrap" style="display: none">
+        <h3 style="margin-top: 1rem">
+          Transactions (<span id="tx-list-count">0</span>)
+        </h3>
+        <p class="muted">
+          Transaction ids in block order. Click a row to view that
+          transaction.
+        </p>
+        <table class="block-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Transaction id</th>
+            </tr>
+          </thead>
+          <tbody id="tx-list-body"></tbody>
+        </table>
+        <div class="button-row">
+          <button id="tx-list-more" type="button" style="display: none">
+            load more
+          </button>
+          <span id="tx-list-shown" class="muted"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="tx-view-card" style="display: none">
+      <h2>Transaction</h2>
+      <table class="block-table">
+        <tbody>
+          <tr>
+            <th>Txid</th>
+            <td>
+              <span id="tx-view-id" class="hash"></span
+              ><button class="copy-btn" data-copy-target="tx-view-id" title="Copy">⎘</button>
+            </td>
+          </tr>
+          <tr>
+            <th>Canonical index</th>
+            <td id="tx-view-index" class="muted"></td>
+          </tr>
+        </tbody>
+      </table>
+      <h3>Included in</h3>
+      <p class="muted">
+        Every known block — canonical and forks — containing this
+        transaction. Click a block hash to view that block.
+      </p>
+      <table class="block-table">
+        <thead>
+          <tr>
+            <th>Height</th>
+            <th>Canonical?</th>
+            <th>Position</th>
+            <th>Block time (UTC)</th>
+            <th>Block hash</th>
+          </tr>
+        </thead>
+        <tbody id="tx-view-occ"></tbody>
+      </table>
+      <div id="tx-view-status" class="status"></div>
     </section>
 
     <section class="card" id="siblings-card" style="display: none">
