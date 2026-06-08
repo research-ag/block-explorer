@@ -104,7 +104,13 @@ const idlFactory = ({ IDL }) => {
     canonical_index: IDL.Opt(IDL.Nat),
     occurrences: IDL.Vec(TxOccurrence),
   });
+  const TxidStatus = IDL.Record({
+    total_txids: IDL.Nat,
+    txid_height: IDL.Opt(IDL.Nat),
+    txid_tip_time: IDL.Opt(IDL.Nat32),
+  });
   return IDL.Service({
+    txid_status: IDL.Func([], [TxidStatus], ["query"]),
     get_view: IDL.Func([IDL.Opt(IDL.Nat)], [ChainView], ["query"]),
     get_by_hash: IDL.Func([IDL.Text], [IDL.Opt(BlockInfo)], ["query"]),
     tx_count_of_hash: IDL.Func([IDL.Text], [IDL.Opt(IDL.Nat)], ["query"]),
@@ -275,6 +281,25 @@ function renderTip(tip, totalBlocks) {
   $("tip-time").textContent = fmtTime(tip.time);
   $("tip-difficulty").textContent = fmtDifficultyShort(tip.difficulty_x1e8);
   $("tip-stored").textContent = fmtNat(totalBlocks);
+}
+
+// Refresh the indexed-transaction summary panels (independent of the
+// current block; fired fire-and-forget alongside tip refreshes).
+async function refreshTxidStatus() {
+  let s;
+  try {
+    s = await actor.txid_status();
+  } catch (e) {
+    console.warn("txid_status failed:", e);
+    return;
+  }
+  $("tip-txids").textContent = fmtNat(s.total_txids);
+  $("tip-txid-height").textContent = s.txid_height.length
+    ? fmtNat(s.txid_height[0])
+    : "—";
+  $("tip-txid-time").textContent = s.txid_tip_time.length
+    ? fmtTime(s.txid_tip_time[0])
+    : "—";
 }
 
 function renderBlock(bi) {
@@ -715,8 +740,9 @@ async function loadBlock(opts) {
   renderTxList(block.hash_be_hex);
   writeUrlHash(block);
   setStatus($("browse-status"), "");
-  // Fire-and-forget: leaderboard is independent of the current block.
+  // Fire-and-forget: leaderboard + txid status are independent of the block.
   refreshLeaderboard();
+  refreshTxidStatus();
 }
 
 // ---------------------------------------------------------------------------

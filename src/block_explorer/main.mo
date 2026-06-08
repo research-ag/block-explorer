@@ -298,6 +298,27 @@ persistent actor BlockExplorer {
   // Total transactions indexed across the canonical chain.
   public query func total_indexed_txids() : async Nat = async chain.totalIndexedTxids();
 
+  // Summary of the indexed-transaction frontier for the UI.
+  public type TxidStatus = {
+    total_txids : Nat; // total canonical txids indexed
+    txid_height : ?Nat; // highest canonical height whose body is indexed
+    txid_tip_time : ?Nat32; // timestamp of the block at txid_height
+  };
+
+  public query func txid_status() : async TxidStatus {
+    let total = chain.totalIndexedTxids();
+    let bh = chain.bodiesHeight(); // # canonical blocks with bodies; heights [0, bh)
+    if (bh == 0) {
+      return { total_txids = total; txid_height = null; txid_tip_time = null };
+    };
+    let h : Nat = bh - 1;
+    let time = switch (chain.canonicalAt(h)) {
+      case (?b) ?HeaderValue.timeOf(b.value);
+      case null null;
+    };
+    { total_txids = total; txid_height = ?h; txid_tip_time = time };
+  };
+
   // ---------------------------------------------------------------------
   // Transaction lookups.
   // ---------------------------------------------------------------------
