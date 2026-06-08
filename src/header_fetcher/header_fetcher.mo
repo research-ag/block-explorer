@@ -1018,7 +1018,10 @@ persistent actor HeaderFetcher {
   public shared func tick_now() : async () { await tick() };
 
   var timerId : ?Nat = null;
-  // Tick interval in seconds; 0 means the recurring timer is stopped.
+  // Tick interval in seconds; 0 means the recurring timer is stopped. This
+  // is a non-transient var in a persistent actor, so it is already a stable
+  // variable — saved across upgrades automatically (no preupgrade needed);
+  // postupgrade re-arms the timer from it.
   var timerSeconds : Nat = 0;
   renderer.addValue(PT.newValue("timer_seconds", [], func() = timerSeconds));
 
