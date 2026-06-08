@@ -8,10 +8,11 @@
 // Algorithm
 // ---------
 //   0. Call `<api>/blocks/tip/hash` — returns just the provider's
-//      tip hash (~65 B, ~50.8M cycles at n=13). If it matches
+//      tip hash (64 B body; ~685 B total with HTTP headers, ~71M cycles
+//      at n=13 with a 2 KiB response cap). If it matches
 //      `lastSeenTipHash` from the last successful tick, the chain
 //      hasn't moved and the tick is done. ~90% of ticks short-circuit
-//      here, saving ~85M cycles each vs running the full /blocks path.
+//      here, saving ~64M cycles each vs running the full /blocks path.
 //   1. Otherwise call `<api>/blocks` — returns up to 10 most recent
 //      blocks from the provider in descending order, each with its
 //      hash (`id`), `height`, and the full header fields.
@@ -175,10 +176,16 @@ persistent actor HeaderFetcher {
   // response is rejected if it exceeds this.
   transient let BLOCKS_MAX_BYTES : Nat64 = 8_192;
 
-  // /blocks/tip/hash returns a single 64-char hex line. 128 B is
-  // generous for the precheck call (~50.8M cycles vs ~135M for the
-  // full /blocks).
-  transient let TIP_HASH_MAX_BYTES : Nat64 = 128;
+  // /blocks/tip/hash returns a single 64-char hex line. NOTE:
+  // `max_response_bytes` caps the HTTP response *headers + body*, not just
+  // the body — and these Esplora providers send ~620-650 B of headers
+  // (CSP, CORS, HSTS, cache-control, …) on top of the 64 B body (measured:
+  // blockstream ≈685 B total, mempool ≈671 B). 128 B therefore rejected
+  // every response ("Header size exceeds specified response size limit").
+  // 2 KiB leaves ample headroom for CDN header bloat (cf-ray, nel,
+  // report-to, alt-svc, …). Cost at 2 KiB ≈ 71M cycles — still well under
+  // the ~135M of the full /blocks fetch, so the precheck stays worthwhile.
+  transient let TIP_HASH_MAX_BYTES : Nat64 = 2_048;
 
   // Per-tick bounds.
   transient let BATCH_SIZE : Nat = 10; // /blocks returns up to 10
