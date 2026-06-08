@@ -1018,14 +1018,28 @@ persistent actor HeaderFetcher {
   public shared func tick_now() : async () { await tick() };
 
   var timerId : ?Nat = null;
+  // Tick interval in seconds; 0 means the recurring timer is stopped.
+  var timerSeconds : Nat = 0;
+  renderer.addValue(PT.newValue("timer_seconds", [], func() = timerSeconds));
 
   public func startTimer(i : Nat) : async () {
+    switch (timerId) { case (?t) Timer.cancelTimer(t); case null {} };
     timerId := ?Timer.recurringTimer<system>(#seconds i, tick);
+    timerSeconds := i;
   };
   public func stopTimer() : async () {
     let ?t = timerId else return;
     Timer.cancelTimer(t);
     timerId := null;
+    timerSeconds := 0;
+  };
+
+  // Recurring timers don't survive upgrades, so re-arm from the persisted
+  // interval. Keeps both the schedule and `timer_seconds` accurate.
+  system func postupgrade() {
+    if (timerSeconds > 0) {
+      timerId := ?Timer.recurringTimer<system>(#seconds timerSeconds, tick);
+    };
   };
 
 };
