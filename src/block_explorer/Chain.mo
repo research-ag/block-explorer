@@ -200,15 +200,16 @@ module {
     Nat8.fromNat(Nat32.toNat((v >> (Nat32.fromNat(i) * 8)) & 0xff));
   };
 
-  // Encode a block height as a 4-byte little-endian blob (txid-trie value).
+  // Encode a block height as a 3-byte little-endian blob (txid-trie value).
+  // 3 bytes = 24 bits = max height 16_777_215 (~300 years of blocks).
   func encodeHeight(h : Nat) : Blob {
-    if (h > 0xFFFF_FFFF) Runtime.trap("Chain: height overflow for txid trie value");
+    if (h > 0xFF_FFFF) Runtime.trap("Chain: height overflow for txid trie value (> 2^24)");
     let v = Nat32.fromNat(h);
-    Blob.fromArray([le32Byte(v, 0), le32Byte(v, 1), le32Byte(v, 2), le32Byte(v, 3)]);
+    Blob.fromArray([le32Byte(v, 0), le32Byte(v, 1), le32Byte(v, 2)]);
   };
 
   func decodeHeight(b : Blob) : Nat {
-    Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000 + Nat8.toNat(b[3]) * 0x100_0000;
+    Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000;
   };
 
   // Slice the 32-byte txid at index `i` out of a flat hashes blob.
@@ -222,10 +223,17 @@ module {
   // Chain class.
   // ---------------------------------------------------------------------
 
+  // Production root_aridity for the txid trie (= 4^14). Allocates a ~1 GB
+  // flat root region at trie creation (fine on the IC; tests pass a tiny
+  // value since the wasm test runtime caps stable memory).
+  public let TX_ROOT_ARIDITY : Nat = 268_435_456;
+
   // `keySize` is the canonical-trie key width. Production passes
   // HeaderDb.KEY_SIZE (28); tests may pass HeaderDb.HASH_SIZE (32) to
-  // store synthetic non-PoW headers (see HeaderDb).
-  public class Chain(keySize : Nat) {
+  // store synthetic non-PoW headers (see HeaderDb). `txRootAridity` is the
+  // txid-trie root fan-out — production passes TX_ROOT_ARIDITY; tests pass a
+  // small value to avoid the ~1 GB upfront root allocation.
+  public class Chain(keySize : Nat, txRootAridity : Nat) {
 
     let headerDb : HeaderDb.HeaderDb = HeaderDb.HeaderDb(keySize);
     var tipWork : Nat = 0;
@@ -247,14 +255,26 @@ module {
 
     // Block-body index: txid -> height, in canonical chain order. The
     // enumeration index of each txid is its position in the chain-wide
-    // transaction ordering (genesis coinbase = 0). Value is the 4-byte
+    // transaction ordering (genesis coinbase = 0). Value is the 3-byte
     // little-endian height of the block the tx belongs to.
+    //
+    // Sizing:
+    //   pointer_size = 4   -> caps the trie at 2^31 ≈ 2.1 B txids. Bitcoin is
+    //                        at ~1.4 B today; when this fills (~a few years) the
+    //                        plan is to add a SECOND txid trie for the next 2 B
+    //                        and have lookups consult both (the per-block
+    //                        firstTxIndex stays the global serial, so the
+    //                        extension is additive — no re-index of this trie).
+    //   value_size = 3     -> 24-bit height (max 16.7 M, ~300 years).
+    //   root_aridity = 4^14 (= 268_435_456) -> ~1 GB flat root region collapsing
+    //                        28 key bits / 14 levels; dense at ~2 B keys (~7.5
+    //                        keys/prefix), so lookups are ~1-2 hops.
     var txTrie : StableTrie.Enumeration = StableTrie.empty({
-      pointer_size = 6;
+      pointer_size = 4;
       aridity = 4;
-      root_aridity = ?262144;
+      root_aridity = ?txRootAridity;
       key_size = 32;
-      value_size = 4;
+      value_size = 3;
     });
     // Canonical bodies are known contiguously for heights [0, this); the
     // canonical txid trie holds exactly those, in chain order.
@@ -1348,8 +1368,12 @@ module {
   // Convenience: fresh chain seeded with genesis.
   // ---------------------------------------------------------------------
 
+  // Small txid-trie root for tests (the wasm test runtime can't allocate the
+  // production ~1 GB root region).
+  let TEST_TX_ROOT_ARIDITY : Nat = 256;
+
   public func empty() : Chain {
-    let c = Chain(HeaderDb.KEY_SIZE);
+    let c = Chain(HeaderDb.KEY_SIZE, TX_ROOT_ARIDITY);
     c.initGenesis(0, Principal.fromText("aaaaa-aa"));
     c;
   };
@@ -1358,7 +1382,7 @@ module {
   // synthetic (non-PoW) headers can be stored without tripping the
   // trailing-zero truncation invariant.
   public func emptyForTest() : Chain {
-    let c = Chain(HeaderDb.HASH_SIZE);
+    let c = Chain(HeaderDb.HASH_SIZE, TEST_TX_ROOT_ARIDITY);
     c.initGenesis(0, Principal.fromText("aaaaa-aa"));
     c;
   };
@@ -1367,7 +1391,7 @@ module {
   // (hex). `keySize` selects the trie key width — pass HeaderDb.KEY_SIZE
   // (28) to exercise the production truncation path with real PoW headers.
   public func fromRootHex(rawHex : Text, keySize : Nat) : Chain {
-    let c = Chain(keySize);
+    let c = Chain(keySize, TEST_TX_ROOT_ARIDITY);
     c.initRoot(Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
     c;
   };

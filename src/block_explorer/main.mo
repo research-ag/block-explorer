@@ -82,7 +82,7 @@ persistent actor BlockExplorer {
   // ---------------------------------------------------------------------
 
   var chainData : ?Chain.StableData = null;
-  transient let chain : Chain.Chain = Chain.Chain(28);
+  transient let chain : Chain.Chain = Chain.Chain(28, Chain.TX_ROOT_ARIDITY);
 
   func nowSecs() : Int { Time.now() / 1_000_000_000 };
   func nowSecsNat32() : Nat32 {
