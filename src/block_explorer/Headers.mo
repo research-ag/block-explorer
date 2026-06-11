@@ -36,23 +36,21 @@ module {
     if (hash.size() != HASH_SIZE) {
       Runtime.trap("Headers: hash size " # debug_show hash.size() # " != 32");
     };
-    let arr = hash.toArray();
     var i = keySize;
     while (i < HASH_SIZE) {
-      if (arr[i] != (0 : Nat8)) {
+      if (hash[i] != (0 : Nat8)) {
         Runtime.trap("Headers: hash trailing byte " # debug_show i # " not zero (PoW invariant violated)");
       };
       i += 1;
     };
-    Blob.fromArray(Array.tabulate<Nat8>(keySize, func(j) = arr[j]));
+    Blob.fromArray(Array.tabulate<Nat8>(keySize, func(j) = hash[j]));
   };
 
   // Re-pad a stored key back to a 32-byte hash with zero bytes.
   func expand(trie : Enumeration.Enumeration, key : Blob) : Blob {
     let keySize = trie.key_size;
-    let arr = key.toArray();
     Blob.fromArray(
-      Array.tabulate<Nat8>(HASH_SIZE, func(i) = if (i < keySize) arr[i] else (0 : Nat8))
+      Array.tabulate<Nat8>(HASH_SIZE, func(i) = if (i < keySize) key[i] else (0 : Nat8))
     );
   };
 

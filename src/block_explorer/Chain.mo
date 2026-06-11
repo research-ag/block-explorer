@@ -237,11 +237,13 @@ module {
     Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000;
   };
 
-  // Slice the 32-byte txid at index `i` out of a flat hashes blob.
+  // Slice the 32-byte txid at index `i` out of a flat hashes blob, indexing
+  // the Blob directly. (A Blob.toArray here converts the ENTIRE flat blob
+  // per extracted txid — quadratic: ~512 MB of churn to index one 4000-tx
+  // body.)
   func txidAt(hashes : Blob, i : Nat) : Blob {
-    let arr = Blob.toArray(hashes);
     let off = i * 32;
-    Blob.fromArray(Array.tabulate<Nat8>(32, func(j) = arr[off + j]));
+    Blob.fromArray(Array.tabulate<Nat8>(32, func(j) = hashes[off + j]));
   };
 
   // ---------------------------------------------------------------------
@@ -981,14 +983,12 @@ module {
   // Read txids stored in the canonical trie at indices [lo, hi) into a flat
   // blob (moves a demoted block's body into the fork store).
   func extractTxids(self : State, lo : Nat, hi : Nat) : Blob {
-    let keys = Array.tabulate<[Nat8]>(
+    let keys = Array.tabulate<Blob>(
       hi - lo : Nat,
-      func(k) = Blob.toArray(
-        switch (StableTrie.get(self.txTrie, lo + k)) {
-          case (?(key, _)) key;
-          case null Runtime.trap("extractTxids: missing txid " # debug_show(lo + k));
-        }
-      ),
+      func(k) = switch (StableTrie.get(self.txTrie, lo + k)) {
+        case (?(key, _)) key;
+        case null Runtime.trap("extractTxids: missing txid " # debug_show(lo + k));
+      },
     );
     Blob.fromArray(Array.tabulate<Nat8>((hi - lo : Nat) * 32, func(j) = keys[j / 32][j % 32]));
   };
