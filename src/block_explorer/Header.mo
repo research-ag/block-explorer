@@ -4,9 +4,9 @@
 import Blob "mo:core/Blob";
 import Char "mo:core/Char";
 import Int "mo:core/Int";
-import Iter "mo:core/Iter";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
+import Nat64 "mo:core/Nat64";
 import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import VarArray "mo:core/VarArray";
@@ -42,16 +42,24 @@ module {
   };
 
   public func hexToBlob(t : Text) : Blob {
-    let chars = Iter.toArray(t.chars());
-    if (chars.size() % 2 != 0) Runtime.trap("odd-length hex");
-    let n = chars.size() / 2;
-    let mut = VarArray.repeat<Nat8>(0, n);
+    let size = t.size();
+    if (size % 2 != 0) Runtime.trap("odd-length hex");
+    let mut = VarArray.repeat<Nat8>(0, size / 2);
     var i = 0;
-    while (i < n) {
-      let hi = hexNibble(chars[2 * i]);
-      let lo = hexNibble(chars[2 * i + 1]);
-      mut[i] := (hi << 4) | lo;
-      i += 1;
+    var hi : Nat8 = 0;
+    var haveHi = false;
+    // Stream the chars — materializing them via Iter.toArray costs ~12 KB
+    // per 80-byte header.
+    for (c in t.chars()) {
+      let nib = hexNibble(c);
+      if (haveHi) {
+        mut[i] := (hi << 4) | nib;
+        i += 1;
+        haveHi := false;
+      } else {
+        hi := nib;
+        haveHi := true;
+      };
     };
     Blob.fromVarArray(mut);
   };
@@ -161,13 +169,31 @@ module {
 
   // Removed: bytesEq([Nat8],[Nat8]).  Use Blob equality (==) instead.
 
-  // Interpret a little-endian Blob as a Nat.
+  // Interpret a little-endian Blob as a Nat. Assembles via Nat64 limbs:
+  // per-byte `acc * 256 + b` allocates a fresh, growing bignum every
+  // iteration (~7 KB for 32 bytes); limbs cut that to a handful of ops.
   public func leBytesToNat(h : Blob) : Nat {
+    let TWO_POW_64 : Nat = 0x1_0000_0000_0000_0000;
+    func limbAt(lo : Nat, width : Nat) : Nat64 {
+      var limb : Nat64 = 0;
+      var j = lo + width;
+      while (j > lo) {
+        j -= 1;
+        limb := (limb << 8) | Nat64.fromNat(h[j].toNat());
+      };
+      limb;
+    };
     var acc : Nat = 0;
     var i : Nat = h.size();
+    let rem = i % 8;
+    if (rem > 0) {
+      // top (most significant) partial limb first
+      acc := Nat64.toNat(limbAt(i - rem, rem));
+      i -= rem;
+    };
     while (i > 0) {
-      i -= 1;
-      acc := acc * 256 + h[i].toNat();
+      acc := acc * TWO_POW_64 + Nat64.toNat(limbAt(i - 8, 8));
+      i -= 8;
     };
     acc;
   };
@@ -301,19 +327,17 @@ module {
   // gathers the ancestor data; this function applies all five rules.
   //
   // `expectedBits` is precomputed by the caller (either prev.bits, or
-  // computeRetargetNBits at a 2016-boundary).
-  public func validateAgainst(
-    header : Blob,
+  // computeRetargetNBits at a 2016-boundary). Takes the already-parsed
+  // header and its already-computed hash so hot callers don't parse or
+  // sha256d the same 80 bytes twice.
+  public func validateParsed(
+    parsed : Parsed,
+    headerHashLE : Blob,
     expectedBits : Nat32,
     prevHashLE : Blob,
     mtp : Nat32,
     nowSecs : Int,
   ) : Result.Result<(), Text> {
-    if (header.size() != 80) return #err("header is not 80 bytes");
-    let parsed = switch (parseHeader(header)) {
-      case (?p) p;
-      case null return #err("could not parse header");
-    };
     switch (checkContinuity(parsed, prevHashLE)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
@@ -322,7 +346,7 @@ module {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
-    switch (checkPoW(headerHashBlob(header), parsed.bits)) {
+    switch (checkPoW(headerHashLE, parsed.bits)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
@@ -335,6 +359,23 @@ module {
       case (#ok()) {};
     };
     #ok();
+  };
+
+  // Convenience wrapper over `validateParsed` for callers holding only the
+  // raw header (parses and hashes it first).
+  public func validateAgainst(
+    header : Blob,
+    expectedBits : Nat32,
+    prevHashLE : Blob,
+    mtp : Nat32,
+    nowSecs : Int,
+  ) : Result.Result<(), Text> {
+    if (header.size() != 80) return #err("header is not 80 bytes");
+    let parsed = switch (parseHeader(header)) {
+      case (?p) p;
+      case null return #err("could not parse header");
+    };
+    validateParsed(parsed, headerHashBlob(header), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };

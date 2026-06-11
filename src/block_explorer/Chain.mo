@@ -132,6 +132,11 @@ module {
     txCountOverride : Map.Map<Nat, Nat>; // BIP30 duplicate-coinbase heights
     var tipWork : Nat; // cumulative work of the canonical tip
     var bodiesNextHeight : Nat; // canonical bodies known for [0, this)
+    // Timestamps of the canonical tip and its ancestors, newest first, at
+    // most MTP_WINDOW (11) entries — the median-time-past context. Kept in
+    // sync on every canonical append / reorg so the per-push MTP check never
+    // reads the header trie.
+    var recentTimes : [Nat32];
     var initialized : Bool;
   };
 
@@ -177,6 +182,7 @@ module {
     txCountOverride = Map.empty<Nat, Nat>();
     var tipWork = 0;
     var bodiesNextHeight = 0;
+    var recentTimes = [];
     var initialized = false;
   };
 
@@ -252,6 +258,7 @@ module {
     assert idx == 0;
     Uploaders.record(self.uploaders, hash, uploader);
     self.tipWork := work;
+    self.recentTimes := [parsed.time];
     self.initialized := true;
   };
 
@@ -265,6 +272,43 @@ module {
       case (?(h, _)) h;
       case null Runtime.trap("canonPrevHash: missing index " # debug_show(idx - 1 : Nat));
     };
+  };
+
+  // Narrow reads: fetch a canonical block's 76-byte value by INDEX (no trie
+  // descend, no key expansion) and extract single fields at the Blob level
+  // (the HeaderValue accessors allocate nothing).
+  func canonValueAt(self : State, height : Nat) : Blob {
+    switch (Headers.valueAt(self.headerTrie, height)) {
+      case (?v) v;
+      case null Runtime.trap("canonValueAt: missing index " # debug_show height);
+    };
+  };
+
+  func canonTimeAt(self : State, height : Nat) : Nat32 = HeaderValue.timeOf(canonValueAt(self, height));
+
+  // ---------------------------------------------------------------------
+  // Internal: median-time-past timestamp cache.
+  //
+  // `recentTimes` mirrors the timestamps of the canonical tip and its
+  // ancestors (newest first, <= MTP_WINDOW entries). The hot push path
+  // reads its MTP context from here instead of the header trie.
+  // ---------------------------------------------------------------------
+
+  let MTP_WINDOW : Nat = 11;
+
+  // Record a new canonical tip timestamp (on append / promote).
+  func pushRecentTime(self : State, t : Nat32) {
+    let old = self.recentTimes;
+    let size = if (old.size() < MTP_WINDOW) old.size() + 1 else MTP_WINDOW;
+    self.recentTimes := Array.tabulate<Nat32>(size, func(i) = if (i == 0) t else old[i - 1]);
+  };
+
+  // Rebuild the cache from the trie tip downwards (narrow index reads).
+  // Needed only when the tip moves backwards (reorg rollback).
+  func rebuildRecentTimes(self : State) {
+    let tip = tipHeight(self);
+    let count = if (tip + 1 < MTP_WINDOW) tip + 1 else MTP_WINDOW;
+    self.recentTimes := Array.tabulate<Nat32>(count, func(i) = canonTimeAt(self, tip - i));
   };
 
   func storedCanonAt(self : State, idx : Nat) : StoredBlock {
@@ -332,53 +376,169 @@ module {
   func parentOf(self : State, b : StoredBlock) : ?StoredBlock {
     if (b.height == 0) return null;
     if (b.isCanonical) return ?storedCanonAt(self, b.height - 1);
-    byHashInternal(self, b.prevHash);
-  };
-
-  // Ancestor of `start` at `targetHeight` (<= start.height).
-  func ancestorAt(self : State, start : StoredBlock, targetHeight : Nat) : ?StoredBlock {
-    if (targetHeight > start.height) return null;
-    var cur = start;
-    loop {
-      if (cur.height == targetHeight) return ?cur;
-      if (cur.isCanonical) return ?storedCanonAt(self, targetHeight);
-      switch (parentOf(self, cur)) {
-        case (?p) cur := p;
-        case null return null;
+    // Fork block: its parent is either another fork block (heap map) or the
+    // canonical block at height b.height - 1 — check by INDEX and compare
+    // hashes instead of descending the trie by hash.
+    switch (ForkStore.get(self.forks, b.prevHash)) {
+      case (?fb) ?storedFork(fb);
+      case null {
+        let idx = b.height - 1 : Nat;
+        if (idx > tipHeight(self)) return null;
+        switch (Headers.get(self.headerTrie, idx)) {
+          case (?(h, value)) {
+            if (h != b.prevHash) return null;
+            ?{
+              hash = h;
+              height = idx;
+              cumWork = HeaderValue.cumWorkOf(value);
+              value;
+              prevHash = canonPrevHash(self, idx);
+              isCanonical = true;
+            };
+          };
+          case null null;
+        };
       };
     };
   };
 
-  func lastNTimestamps(self : State, start : StoredBlock, n : Nat) : [Nat32] {
-    let buf = List.empty<Nat32>();
-    var cur : ?StoredBlock = ?start;
-    var i = 0;
-    label loop_ loop {
-      if (i >= n) break loop_;
-      switch (cur) {
-        case null break loop_;
-        case (?b) {
-          List.add(buf, HeaderValue.timeOf(b.value));
-          i += 1;
-          cur := parentOf(self, b);
+  // Lightweight parent view for the push path: exactly the fields push
+  // needs, no prev_hash read, no 76-byte value re-encode for fork blocks.
+  type ParentInfo = {
+    hash : Blob;
+    height : Nat;
+    cumWork : Nat;
+    bits : Nat32;
+    time : Nat32;
+    isCanonical : Bool;
+  };
+
+  // Resolve a new header's parent by prev_hash.
+  //   1. The canonical tip (the overwhelmingly common case) — found with a
+  //      single INDEX read and a hash compare; cumWork comes from the
+  //      cached tipWork, so nothing is decoded.
+  //   2. A fork block — heap map hit, fields read directly.
+  //   3. A canonical non-tip block — the one case that needs a trie descend.
+  func resolveParent(self : State, prevHash : Blob) : ?ParentInfo {
+    let tipIdx = tipHeight(self);
+    switch (Headers.get(self.headerTrie, tipIdx)) {
+      case (?(h, value)) if (h == prevHash) {
+        return ?{
+          hash = prevHash;
+          height = tipIdx;
+          cumWork = self.tipWork;
+          bits = HeaderValue.bitsOf(value);
+          time = HeaderValue.timeOf(value);
+          isCanonical = true;
         };
       };
+      case _ {};
+    };
+    switch (ForkStore.get(self.forks, prevHash)) {
+      case (?fb) {
+        return ?{
+          hash = fb.hash;
+          height = fb.height;
+          cumWork = fb.cumWork;
+          bits = fb.bits;
+          time = fb.time;
+          isCanonical = false;
+        };
+      };
+      case null {};
+    };
+    switch (Headers.lookup(self.headerTrie, prevHash)) {
+      case (?(value, idx)) ?{
+        hash = prevHash;
+        height = idx;
+        cumWork = HeaderValue.cumWorkOf(value);
+        bits = HeaderValue.bitsOf(value);
+        time = HeaderValue.timeOf(value);
+        isCanonical = true;
+      };
+      case null null;
+    };
+  };
+
+  // Timestamps of `start` and its ancestors, newest first, up to n.
+  // The canonical-tip case is served from the recentTimes cache (zero trie
+  // reads); otherwise canonical segments use narrow index reads (timeOf
+  // only — no StoredBlock, no cumWork decode, no prev_hash read) and fork
+  // segments read the heap ForkBlock records, with no trie descend even at
+  // the fork-to-canonical transition (the parent height is known).
+  func lastTimestampsFrom(self : State, startHash : Blob, startHeight : Nat, startIsCanonical : Bool, n : Nat) : [Nat32] {
+    if (n == 0) return [];
+    if (startIsCanonical and startHeight == tipHeight(self)) {
+      let cached = self.recentTimes;
+      let take = if (n < cached.size()) n else cached.size();
+      return Array.tabulate<Nat32>(take, func(i) = cached[i]);
+    };
+    let buf = List.empty<Nat32>();
+    var remaining = n;
+    // Fork segment (if any): walk the heap fork store down to the
+    // canonical anchor.
+    var canonFrom : ?Nat = if (startIsCanonical) ?startHeight else null;
+    if (not startIsCanonical) {
+      var curHash = startHash;
+      label walk while (remaining > 0) {
+        switch (ForkStore.get(self.forks, curHash)) {
+          case (?fb) {
+            List.add(buf, fb.time);
+            remaining -= 1;
+            if (fb.height == 0) break walk;
+            curHash := fb.prevHash;
+            // Parent not in the fork store => canonical at fb.height - 1.
+            if (not ForkStore.contains(self.forks, curHash)) {
+              canonFrom := ?(fb.height - 1 : Nat);
+              break walk;
+            };
+          };
+          case null break walk;
+        };
+      };
+    };
+    switch (canonFrom) {
+      case (?h0) {
+        var h = h0;
+        label canon while (remaining > 0) {
+          List.add(buf, canonTimeAt(self, h));
+          remaining -= 1;
+          if (h == 0) break canon;
+          h -= 1;
+        };
+      };
+      case null {};
     };
     List.toArray(buf);
   };
 
-  func expectedBitsFor(self : State, parent : StoredBlock, newHeight : Nat) : Nat32 {
-    let parentBits = HeaderValue.bitsOf(parent.value);
+  // Timestamp of `parent`'s ancestor at `targetHeight` (for the retarget
+  // rule). Canonical parents resolve with one narrow index read; fork
+  // parents walk the heap fork store down to the canonical anchor.
+  func ancestorTimeAt(self : State, parent : ParentInfo, targetHeight : Nat) : ?Nat32 {
+    if (targetHeight > parent.height) return null;
+    if (parent.isCanonical) return ?canonTimeAt(self, targetHeight);
+    if (targetHeight == parent.height) return ?parent.time;
+    var curHash = parent.hash;
+    loop {
+      switch (ForkStore.get(self.forks, curHash)) {
+        case (?fb) {
+          if (fb.height == targetHeight) return ?fb.time;
+          if (fb.height == 0) return null;
+          curHash := fb.prevHash;
+        };
+        // Left the fork store: every remaining ancestor is canonical.
+        case null return ?canonTimeAt(self, targetHeight);
+      };
+    };
+  };
+
+  func expectedBitsFor(self : State, parent : ParentInfo, newHeight : Nat) : Nat32 {
+    let parentBits = parent.bits;
     if (newHeight % Header.RETARGET_INTERVAL == 0 and newHeight >= Header.RETARGET_INTERVAL) {
       let firstHeight = newHeight - Header.RETARGET_INTERVAL : Nat;
-      switch (ancestorAt(self, parent, firstHeight)) {
-        case (?first) {
-          Header.computeRetargetNBits(
-            HeaderValue.timeOf(parent.value),
-            parentBits,
-            HeaderValue.timeOf(first.value),
-          );
-        };
+      switch (ancestorTimeAt(self, parent, firstHeight)) {
+        case (?firstTime) Header.computeRetargetNBits(parent.time, parentBits, firstTime);
         case null parentBits;
       };
     } else {
@@ -401,16 +561,25 @@ module {
     let branch = List.empty<ForkBlock>();
     var curHash = newTipHash;
     var commonHeight : Nat = 0;
+    let tipIdx = tipHeight(self);
     label findCommon loop {
       let fb = switch (ForkStore.get(self.forks, curHash)) {
         case (?x) x;
         case null Runtime.trap("maybeReorg: branch block missing from fork store");
       };
       List.add(branch, fb);
-      switch (Headers.lookup(self.headerTrie, fb.prevHash)) {
-        case (?(_, idx)) { commonHeight := idx; break findCommon };
-        case null curHash := fb.prevHash;
+      // The branch block's parent is canonical iff the canonical entry at
+      // its known height matches — an INDEX read, not a trie descend.
+      if (fb.height >= 1 and (fb.height - 1 : Nat) <= tipIdx) {
+        switch (Headers.get(self.headerTrie, fb.height - 1 : Nat)) {
+          case (?(h, _)) if (h == fb.prevHash) {
+            commonHeight := fb.height - 1 : Nat;
+            break findCommon;
+          };
+          case _ {};
+        };
       };
+      curHash := fb.prevHash;
     };
 
     let oldTipHeight = tipHeight(self);
@@ -477,6 +646,12 @@ module {
       });
     };
 
+    // The rollback moved the tip below the old window — refill the
+    // timestamp cache from the surviving canonical tail (narrow index
+    // reads); the promoted branch's timestamps then come from the heap
+    // ForkBlock records as they are appended below.
+    rebuildRecentTimes(self);
+
     // 3. Append the new branch (ancestor-first) into the canonical trie.
     var k = List.size(branch);
     while (k > 0) {
@@ -498,6 +673,7 @@ module {
         firstSeen = fb.firstSeen;
       });
       ignore Headers.add(self.headerTrie, fb.hash, value);
+      pushRecentTime(self, fb.time);
       // If the promoted block's body is known, re-index it in chain order.
       switch (fb.body) {
         case (?b) if (fb.height == self.bodiesNextHeight) {
@@ -526,20 +702,15 @@ module {
 
   func storeAndMaybeReorg(
     self : State,
-    raw : Blob,
-    bits : Nat32,
+    parsed : Header.Parsed,
     hash : Blob,
-    parent : StoredBlock,
+    parent : ParentInfo,
     firstSeenSecs : Nat32,
     uploader : Principal,
     now : Int,
   ) : PushOk {
     let newHeight = parent.height + 1;
-    let cumWork = parent.cumWork + Header.chainWork(bits);
-    let parsed = switch (Header.parseHeader(raw)) {
-      case (?p) p;
-      case null Runtime.trap("storeAndMaybeReorg: unparseable header");
-    };
+    let cumWork = parent.cumWork + Header.chainWork(parsed.bits);
 
     Uploaders.record(self.uploaders, hash, uploader);
 
@@ -559,6 +730,7 @@ module {
         firstSeen = firstSeenSecs;
       });
       ignore Headers.add(self.headerTrie, hash, value);
+      pushRecentTime(self, parsed.time);
       self.tipWork := cumWork;
       isCanonical := true;
     } else {
@@ -602,13 +774,13 @@ module {
       case (?_) return #err("duplicate: hash already present");
       case null {};
     };
-    let parent = switch (byHashInternal(self, parsed.prev_hash)) {
+    let parent = switch (resolveParent(self, parsed.prev_hash)) {
       case (?p) p;
       case null return #err("unknown previous block hash");
     };
     // Reject headers whose timestamp is more than ONE_YEAR_SECS before the
-    // current canonical tip's timestamp.
-    let tipTimeNat = Nat32.toNat(HeaderValue.timeOf(tipBlock(self).value));
+    // current canonical tip's timestamp (tip time from the cache).
+    let tipTimeNat = Nat32.toNat(self.recentTimes[0]);
     let parsedTimeNat = Nat32.toNat(parsed.time);
     if (parsedTimeNat + ONE_YEAR_SECS < tipTimeNat) {
       return #err(
@@ -619,15 +791,15 @@ module {
     };
     let newHeight = parent.height + 1;
     let expectedBits = expectedBitsFor(self, parent, newHeight);
-    let stamps = lastNTimestamps(self, parent, if (newHeight < 11) newHeight else 11);
+    let stamps = lastTimestampsFrom(self, parent.hash, parent.height, parent.isCanonical, if (newHeight < MTP_WINDOW) newHeight else MTP_WINDOW);
     let mtp = Header.medianTimePast(stamps);
 
-    switch (Header.validateAgainst(raw, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
+    switch (Header.validateParsed(parsed, hash, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
     let firstSeen = nat32OfNowSecs(nowSecs);
-    #ok(storeAndMaybeReorg(self, raw, parsed.bits, hash, parent, firstSeen, uploader, nowSecs));
+    #ok(storeAndMaybeReorg(self, parsed, hash, parent, firstSeen, uploader, nowSecs));
   };
 
   public func pushUnchecked(self : State, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
@@ -641,11 +813,11 @@ module {
       case (?_) return #err("duplicate: hash already present");
       case null {};
     };
-    let parent = switch (byHashInternal(self, parsed.prev_hash)) {
+    let parent = switch (resolveParent(self, parsed.prev_hash)) {
       case (?p) p;
       case null return #err("unknown previous block hash");
     };
-    #ok(storeAndMaybeReorg(self, raw, parsed.bits, hash, parent, nat32OfNowSecs(nowSecs), uploader, nowSecs));
+    #ok(storeAndMaybeReorg(self, parsed, hash, parent, nat32OfNowSecs(nowSecs), uploader, nowSecs));
   };
 
   // ---------------------------------------------------------------------
@@ -706,7 +878,7 @@ module {
 
   // Bitcoin-Core "median time past": median of `b` and its 10 ancestors.
   public func mediantimeOf(self : State, b : StoredBlock) : Nat32 {
-    let stamps = lastNTimestamps(self, b, 11);
+    let stamps = lastTimestampsFrom(self, b.hash, b.height, b.isCanonical, MTP_WINDOW);
     let sorted = Array.sort<Nat32>(stamps, Nat32.compare);
     sorted[sorted.size() / 2];
   };

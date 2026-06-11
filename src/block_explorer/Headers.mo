@@ -72,6 +72,15 @@ module {
     };
   };
 
+  // Read only the value at an index — skips the key re-expansion. Use for
+  // narrow field reads (e.g. a single timestamp via HeaderValue.timeOf).
+  public func valueAt(trie : Enumeration.Enumeration, index : Nat) : ?Blob {
+    switch (Enumeration.get(trie, index)) {
+      case null null;
+      case (?(_, v)) ?v;
+    };
+  };
+
   // Overwrite the value at an index in place (key unchanged). Traps on OOB.
   public func put(trie : Enumeration.Enumeration, index : Nat, value : Blob) =
     Enumeration.put(trie, index, value);

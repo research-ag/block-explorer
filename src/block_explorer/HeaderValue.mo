@@ -32,6 +32,7 @@
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
+import Nat64 "mo:core/Nat64";
 import VarArray "mo:core/VarArray";
 
 module {
@@ -61,12 +62,17 @@ module {
     buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
   };
 
+  // Split into two Nat64 limbs first (2 bignum ops), then extract bytes with
+  // machine-word shifts — per-byte `% 256` / `/= 256` on a Nat allocates a
+  // fresh bignum every iteration.
   func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
-    var x = v;
+    let lo = Nat64.fromNat(v % 0x1_0000_0000_0000_0000);
+    let hi = Nat64.fromNat(v / 0x1_0000_0000_0000_0000);
     var i = 0;
-    while (i < 16) {
-      buf[off + i] := Nat8.fromNat(x % 256);
-      x /= 256;
+    while (i < 8) {
+      let sh = Nat64.fromNat(i) * 8;
+      buf[off + i] := Nat8.fromNat(Nat64.toNat((lo >> sh) & 0xff));
+      buf[off + 8 + i] := Nat8.fromNat(Nat64.toNat((hi >> sh) & 0xff));
       i += 1;
     };
   };
@@ -91,14 +97,18 @@ module {
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
   };
 
+  // Assemble via two Nat64 limbs (3 bignum ops total) — per-byte
+  // `acc * 256 + b` allocates a fresh, growing bignum every iteration.
   func readLE128(b : Blob, off : Nat) : Nat {
-    var acc : Nat = 0;
-    var i : Nat = 16;
+    var lo : Nat64 = 0;
+    var hi : Nat64 = 0;
+    var i = 8;
     while (i > 0) {
       i -= 1;
-      acc := acc * 256 + b[off + i].toNat();
+      lo := (lo << 8) | Nat64.fromNat(b[off + i].toNat());
+      hi := (hi << 8) | Nat64.fromNat(b[off + 8 + i].toNat());
     };
-    acc;
+    Nat64.toNat(hi) * 0x1_0000_0000_0000_0000 + Nat64.toNat(lo);
   };
 
   // ---------------------------------------------------------------------
