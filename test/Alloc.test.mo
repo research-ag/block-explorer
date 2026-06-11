@@ -264,3 +264,12 @@ do {
   });
   measure("withFirstTxIndex (patch) ", 1000, func(_) { ignore HeaderValue.withFirstTxIndex(v, 12345) });
 };
+
+// ---- isolate cumWork cost inside encodeFromRaw ----
+do {
+  var big : Nat = 0x7000_0000_0000_0000_0000_0000; // 96-bit, realistic
+  var small : Nat = 7; // compact
+  measure("encodeFromRaw cumWork=big  ", 1000, func(_) { ignore HeaderValue.encodeFromRaw(raws[0], 0, 300000, big, 0) });
+  measure("encodeFromRaw cumWork=small", 1000, func(_) { ignore HeaderValue.encodeFromRaw(raws[0], 0, 300000, small, 0) });
+  measure("mod+div 2^64 of 96-bit Nat ", 1000, func(_) { ignore (big % 0x1_0000_0000_0000_0000, big / 0x1_0000_0000_0000_0000) });
+};

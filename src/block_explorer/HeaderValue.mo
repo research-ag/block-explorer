@@ -35,6 +35,8 @@ import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
 import VarArray "mo:core/VarArray";
 
+import Prim "mo:⛔";
+
 module {
 
   public let SIZE : Nat = 76;
@@ -62,22 +64,21 @@ module {
     buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
   };
 
-  // Split into two Nat64 limbs first (2 bignum ops), then extract bytes
-  // with machine-word shifts. Per-byte `% 256` / `/= 256` on a Nat
-  // allocates a fresh bignum every iteration. (Nat32 quarters measured
-  // WORSE: full-range Nat32 values are heap-boxed just like Nat64 —
-  // Motoko's compact scalars are 31-bit — and quartering doubles the
-  // bignum divisions.)
+  // Split into two Nat64 limbs, then explode each into its 8 bytes in one
+  // prim call (most-significant byte first). Measured allocation anatomy:
+  // the cost here is the TWO BIGNUM OPS splitting cumWork (% and / by 2^64,
+  // ~0.8 KB for a 96-bit value — bignum div allocates internal temporaries,
+  // and Nat has no bitwise ops to avoid it); byte extraction is free either
+  // way (explodeNat64 == shift/mask loop — Nat64 locals are unboxed).
+  // Avoid: per-byte `% 256` on a Nat (fresh bignum per iteration, ~12 KB)
+  // and Nat32 quarters (doubles the bignum divisions, measured worse).
   func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
-    let lo = Nat64.fromNat(v % 0x1_0000_0000_0000_0000);
-    let hi = Nat64.fromNat(v / 0x1_0000_0000_0000_0000);
-    var i = 0;
-    while (i < 8) {
-      let sh = Nat64.fromNat(i) * 8;
-      buf[off + i] := Nat8.fromNat(Nat64.toNat((lo >> sh) & 0xff));
-      buf[off + 8 + i] := Nat8.fromNat(Nat64.toNat((hi >> sh) & 0xff));
-      i += 1;
-    };
+    let (l7, l6, l5, l4, l3, l2, l1, l0) = Prim.explodeNat64(Nat64.fromNat(v % 0x1_0000_0000_0000_0000));
+    let (h7, h6, h5, h4, h3, h2, h1, h0) = Prim.explodeNat64(Nat64.fromNat(v / 0x1_0000_0000_0000_0000));
+    buf[off] := l0; buf[off + 1] := l1; buf[off + 2] := l2; buf[off + 3] := l3;
+    buf[off + 4] := l4; buf[off + 5] := l5; buf[off + 6] := l6; buf[off + 7] := l7;
+    buf[off + 8] := h0; buf[off + 9] := h1; buf[off + 10] := h2; buf[off + 11] := h3;
+    buf[off + 12] := h4; buf[off + 13] := h5; buf[off + 14] := h6; buf[off + 15] := h7;
   };
 
   func writeBlob32(buf : [var Nat8], off : Nat, b : Blob) {
