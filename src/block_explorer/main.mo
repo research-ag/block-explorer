@@ -56,7 +56,9 @@ persistent actor BlockExplorer {
 
   // Stateful batch gauges (watermarks reset on upgrade, like the renderer).
   // Each Gauge emits <prefix>_last/_sum/_count plus high/low watermarks.
-  transient let tracker = PT.Tracker.new();
+  // Hold-down 62 s (default is 302): gauge watermarks decay after roughly
+  // one scrape interval instead of five minutes.
+  transient let tracker = PT.Tracker.newWith([], 62);
   renderer.addValue(PT.Tracker.toValue(tracker));
   // Heap size (rts_heap_size) sampled at the end of each batch — including
   // batches stopped early by the heap limit.
