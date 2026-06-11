@@ -211,8 +211,24 @@ persistent actor BlockExplorer {
   // 10_000 * 80 = 800_000 bytes of raw header data.
   let MAX_PUSH_BATCH : Nat = 10_000;
 
-  public shared ({ caller }) func push_header(raw_hex : Text) : async Result.Result<Chain.PushOk, Text> {
-    chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller);
+  // Candid-facing PushOk: Chain works in raw bytes; the hash is rendered as
+  // display hex only here, for the one endpoint that returns it.
+  public type PushOk = {
+    height : Nat;
+    hash_be_hex : Text;
+    is_canonical : Bool;
+    reorg_depth : Nat;
+  };
+
+  func toPushOk(ok : Chain.PushOk) : PushOk = {
+    height = ok.height;
+    hash_be_hex = Header.bytesToHex(Header.reverse32(ok.hash));
+    is_canonical = ok.is_canonical;
+    reorg_depth = ok.reorg_depth;
+  };
+
+  public shared ({ caller }) func push_header(raw_hex : Text) : async Result.Result<PushOk, Text> {
+    Result.mapOk(chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller), toPushOk);
   };
 
   // Loop body of push_headers / push_headers_hex, also reused by

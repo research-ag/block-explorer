@@ -70,9 +70,13 @@ module {
     isCanonical : Bool;
   };
 
+  // Raw bytes only — rendering the hash as display hex costs ~5 KB per call
+  // (128 Text-concat allocations), and batch callers discard the result
+  // anyway. The candid boundary (main.mo) hexifies for the one endpoint
+  // that returns it.
   public type PushOk = {
     height : Nat;
-    hash_be_hex : Text;
+    hash : Blob; // internal LE order, 32 bytes
     is_canonical : Bool;
     reorg_depth : Nat;
   };
@@ -780,7 +784,7 @@ module {
 
     {
       height = newHeight;
-      hash_be_hex = bytesToHexBE(hash);
+      hash;
       is_canonical = isCanonical;
       reorg_depth = reorgDepth;
     };
