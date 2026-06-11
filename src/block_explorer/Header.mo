@@ -9,6 +9,7 @@ import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
 import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
+import Text "mo:core/Text";
 import VarArray "mo:core/VarArray";
 
 import Prim "mo:⛔";
@@ -33,10 +34,10 @@ module {
   // Hex helpers.
   // ---------------------------------------------------------------------
 
-  func hexCharAt(n : Nat) : Char {
-    // n in [0, 16)
-    if (n < 10) Char.fromNat32(0x30 + Nat32.fromNat(n)) else Char.fromNat32(0x61 + Nat32.fromNat(n - 10));
-  };
+  // Lowercase hex alphabet as ASCII bytes — hex Text is built as a byte
+  // buffer and decoded once (per-char Char.toText + `#=` measured ~5 KB
+  // per 32-byte hash; this is ~0.3 KB).
+  let HEX_CHARS : [Nat8] = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66];
 
   func hexNibble(c : Char) : Nat8 {
     let n = c.toNat32();
@@ -66,28 +67,36 @@ module {
     Blob.fromVarArray(mut);
   };
 
-  // Hex-encode a byte sequence (Blob or [Nat8]).  Cold/display path.
+  // Hex-encode a byte sequence: emit ASCII into one buffer, decode once.
   public func bytesToHex(bs : Blob) : Text {
-    var out = "";
+    let mut = VarArray.repeat<Nat8>(0, bs.size() * 2);
+    var i = 0;
     for (b in bs.vals()) {
       let n = b.toNat();
-      out #= hexCharAt(n / 16).toText();
-      out #= hexCharAt(n % 16).toText();
+      mut[i] := HEX_CHARS[n / 16];
+      mut[i + 1] := HEX_CHARS[n % 16];
+      i += 2;
     };
-    out;
+    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
+      case (?t) t;
+      case null Runtime.trap("bytesToHex: unreachable (pure ASCII)");
+    };
   };
 
   public func nat32Hex(v : Nat32) : Text {
-    var out = "";
-    var i : Nat = 4;
-    while (i > 0) {
-      i -= 1;
-      let shift = Nat32.fromNat(i) * 8;
+    let mut = VarArray.repeat<Nat8>(0, 8);
+    var i : Nat = 0;
+    while (i < 4) {
+      let shift = Nat32.fromNat(3 - i) * 8;
       let byte = ((v >> shift) & 0xff).toNat();
-      out #= hexCharAt(byte / 16).toText();
-      out #= hexCharAt(byte % 16).toText();
+      mut[2 * i] := HEX_CHARS[byte / 16];
+      mut[2 * i + 1] := HEX_CHARS[byte % 16];
+      i += 1;
     };
-    out;
+    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
+      case (?t) t;
+      case null Runtime.trap("nat32Hex: unreachable (pure ASCII)");
+    };
   };
 
   // ---------------------------------------------------------------------
