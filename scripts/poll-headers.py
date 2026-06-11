@@ -23,7 +23,7 @@ definitions):
   type ChainView       = record { tip : BlockInfo; ... };
   type BatchPushResult = record {
     accepted   : nat;       // headers newly stored
-    new_tip    : BlockInfo;
+    tip_height : nat;
     last_error : opt text;  // first failure that stopped the batch
   };
   service : {
@@ -89,7 +89,7 @@ BlockInfoType = Types.Record({
 
 BatchPushResultType = Types.Record({
     "accepted": Types.Nat,
-    "new_tip": BlockInfoType,
+    "tip_height": Types.Nat,
     "last_error": Types.Opt(Types.Text),
 })
 

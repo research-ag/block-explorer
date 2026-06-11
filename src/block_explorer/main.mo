@@ -3,7 +3,8 @@
 // Two ways to add headers:
 //   - import_next(n)        : pull next N from the official Bitcoin canister
 //                             (ghsi2-tqaaa-aaaan-aaaca-cai)
-//   - push_header(rawHex)   : push a single 80-byte raw header (hex-encoded)
+//   - push_header(raw)      : push a single 80-byte raw header (blob);
+//                             push_header_hex is the hex convenience wrapper
 //
 // Every accepted header is stored forever, indexed by hash. Forks are
 // tracked; the canonical chain is whichever fork has the most cumulative
@@ -201,41 +202,50 @@ persistent actor BlockExplorer {
   // Push API.
   // ---------------------------------------------------------------------
 
+  // The standard push interface (single and batched) is raw-byte based:
+  // headers go in as 80-byte blobs, results come back as counts / raw
+  // hashes — no hex anywhere on the path. push_header_hex is the single
+  // hex convenience wrapper for manual / console use.
+
   public type BatchPushResult = {
     accepted : Nat; // number of headers successfully appended
-    new_tip : BlockInfo;
+    tip_height : Nat; // canonical tip height after the batch
     last_error : ?Text; // first failure encountered (stops the batch)
   };
 
-  // Maximum headers per push_headers / push_headers_hex call.
+  // Maximum headers per push_headers call.
   // 10_000 * 80 = 800_000 bytes of raw header data.
   let MAX_PUSH_BATCH : Nat = 10_000;
 
-  // Candid-facing PushOk: Chain works in raw bytes; the hash is rendered as
-  // display hex only here, for the one endpoint that returns it.
-  public type PushOk = {
+  // Standard single push: raw 80-byte header in, raw hash out.
+  public shared ({ caller }) func push_header(raw_header : Blob) : async Result.Result<Chain.PushOk, Text> {
+    chain.push(sha, raw_header, nowSecs(), caller);
+  };
+
+  // Hex convenience wrapper (single only): hex header in, hex hash out.
+  public type PushOkHex = {
     height : Nat;
     hash_be_hex : Text;
     is_canonical : Bool;
     reorg_depth : Nat;
   };
 
-  func toPushOk(ok : Chain.PushOk) : PushOk = {
-    height = ok.height;
-    hash_be_hex = Header.bytesToHex(Header.reverse32(ok.hash));
-    is_canonical = ok.is_canonical;
-    reorg_depth = ok.reorg_depth;
+  public shared ({ caller }) func push_header_hex(raw_hex : Text) : async Result.Result<PushOkHex, Text> {
+    Result.mapOk<Chain.PushOk, PushOkHex, Text>(
+      chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller),
+      func(ok) = {
+        height = ok.height;
+        hash_be_hex = Header.bytesToHex(Header.reverse32(ok.hash));
+        is_canonical = ok.is_canonical;
+        reorg_depth = ok.reorg_depth;
+      },
+    );
   };
 
-  public shared ({ caller }) func push_header(raw_hex : Text) : async Result.Result<PushOk, Text> {
-    Result.mapOk(chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller), toPushOk);
-  };
-
-  // Loop body of push_headers / push_headers_hex, also reused by
-  // inspect_message as a true dry-run. Pushes headers in order,
-  // halting at the first rejection. Any state mutations made from
-  // inspect_message's invocation are discarded by the IC when
-  // inspect returns, so calling this from there is safe.
+  // Loop body of push_headers, also reusable by inspect_message as a true
+  // dry-run. Pushes headers in order, halting at the first rejection. Any
+  // state mutations made from inspect_message's invocation are discarded by
+  // the IC when inspect returns, so calling this from there is safe.
   func pushHeadersImpl(headers : [Blob], caller : Principal) : BatchPushResult {
     let now = nowSecs();
     var accepted : Nat = 0;
@@ -254,7 +264,7 @@ persistent actor BlockExplorer {
     PT.Gauge.update(batchSizeHeaders, accepted);
     {
       accepted;
-      new_tip = toBlockInfo(chain.tipBlock(), true);
+      tip_height = chain.tipHeight();
       last_error = lastErr;
     };
   };
@@ -263,18 +273,6 @@ persistent actor BlockExplorer {
   // rejection and reports how many were accepted plus the error message.
   public shared ({ caller }) func push_headers(headers : [Blob]) : async Result.Result<BatchPushResult, Text> {
     if (headers.size() > MAX_PUSH_BATCH) return #err("batch too large: max " # debug_show MAX_PUSH_BATCH # " headers per call");
-    #ok(pushHeadersImpl(headers, caller));
-  };
-
-  // Hex-encoded variant of push_headers — convenience for callers that
-  // already have headers as text (e.g. browser fetches from a third-party
-  // explorer API). Decodes upfront and reuses the same impl.
-  public shared ({ caller }) func push_headers_hex(headers_hex : [Text]) : async Result.Result<BatchPushResult, Text> {
-    if (headers_hex.size() > MAX_PUSH_BATCH) return #err("batch too large: max " # debug_show MAX_PUSH_BATCH # " headers per call");
-    let headers = Array.tabulate<Blob>(
-      headers_hex.size(),
-      func(i) = Header.hexToBlob(headers_hex[i]),
-    );
     #ok(pushHeadersImpl(headers, caller));
   };
 
@@ -492,7 +490,7 @@ persistent actor BlockExplorer {
   //                        newly added (`accepted > 0`). Rejects
   //                        empty / oversize / all-known / error-
   //                        before-first-add uniformly.
-  //   push_headers_hex   — same, after decoding the hex inputs.
+  //   push_header_hex    — same as push_header, after hex decode.
   //
   // All other methods pass through unchanged.
   // ---------------------------------------------------------------------
@@ -522,9 +520,9 @@ persistent actor BlockExplorer {
       #lookup_txid : () -> (txid : Blob);
       #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob);
       #push_bodies : () -> (batch : [(Blob, Nat, Blob)]);
-      #push_header : () -> (raw_hex : Text);
+      #push_header : () -> (raw_header : Blob);
+      #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
-      #push_headers_hex : () -> (headers_hex : [Text]);
       #reorg_log : () -> (offset : Nat, limit : Nat);
       #set_cycles_per_call : () -> (n : Nat);
       #total_indexed_txids : () -> ();

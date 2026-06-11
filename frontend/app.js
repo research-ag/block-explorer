@@ -122,7 +122,7 @@ const idlFactory = ({ IDL }) => {
       ["query"],
     ),
     import_next: IDL.Func([IDL.Nat], [ImportResult], []),
-    push_header: IDL.Func([IDL.Text], [PushResult], []),
+    push_header_hex: IDL.Func([IDL.Text], [PushResult], []),
     cycles_balance: IDL.Func([], [IDL.Nat], ["query"]),
     uploader_leaderboard: IDL.Func(
       [IDL.Nat],

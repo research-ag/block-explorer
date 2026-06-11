@@ -28,7 +28,7 @@
 //      version, prev, merkle, time, bits, nonce — everything needed
 //      to reconstruct the canonical 80-byte raw header locally —
 //      so no /block/<hash>/header outcall is needed. The full
-//      ascending batch is pushed in a single `push_headers_hex`
+//      ascending batch is pushed in a single `push_headers`
 //      call. Bounded by MAX_FORWARD (=100) per tick.
 //
 // Note: we never ask block_explorer for *its* tip. The provider's
@@ -48,9 +48,9 @@
 // Per-tick call budget:
 //   up to MAX_BATCHES /blocks outcalls +
 //   up to MAX_BATCHES have_hashes (inter-canister, 1 per batch) +
-//   at most 1 push_headers_hex (inter-canister, regardless of N).
+//   at most 1 push_headers (inter-canister, regardless of N).
 // In the typical "near the tip" tick this is 1 outcall + 1
-// have_hashes + (0 or 1) push_headers_hex. No /block/<hash>/header
+// have_hashes + (0 or 1) push_headers. No /block/<hash>/header
 // outcalls — every header is reconstructed locally from the
 // version/prev/merkle/time/bits/nonce fields in the /blocks response.
 // Esplora-compatible `/api/blocks` shape only.
@@ -88,6 +88,8 @@ import Http "mo:promtracker/mixins/http";
 
 import Prim "mo:⛔";
 
+import BEHeader "../block_explorer/Header";
+
 persistent actor HeaderFetcher {
 
   // ------------------------------------------------------------------
@@ -118,7 +120,7 @@ persistent actor HeaderFetcher {
 
   type BlockExplorer = actor {
     have_hashes : ([Text]) -> async [Bool];
-    push_headers_hex : ([Text]) -> async Result.Result<BatchPushResult, Text>;
+    push_headers : ([Blob]) -> async Result.Result<BatchPushResult, Text>;
   };
 
   transient let blockExplorerId : Principal = Principal.fromText(
@@ -935,7 +937,7 @@ persistent actor HeaderFetcher {
     // iterate `collected` in reverse (it's descending) so the
     // resulting array is in chain order — required for the
     // anchor-to-parent push on the explorer side.
-    let rawHexes = List.empty<Text>();
+    let rawHeaders = List.empty<Blob>();
     let pushHeights = List.empty<Nat>();
     var ii : Nat = collectedArr.size();
     label fwd loop {
@@ -959,11 +961,11 @@ persistent actor HeaderFetcher {
           return;
         };
       };
-      List.add(rawHexes, rawHex);
+      List.add(rawHeaders, BEHeader.hexToBlob(rawHex));
       List.add(pushHeights, h);
     };
 
-    let toPush = List.toArray(rawHexes);
+    let toPush = List.toArray(rawHeaders);
     if (toPush.size() == 0) {
       // Nothing within the forward window. Shouldn't normally happen
       // since the `List.size(collected) == 0` short-circuit above
@@ -978,9 +980,9 @@ persistent actor HeaderFetcher {
     // One inter-canister call, regardless of batch size (capped by
     // block_explorer's MAX_PUSH_BATCH = 10 000, well above MAX_FORWARD).
     let pushRes = try {
-      await blockExplorer.push_headers_hex(toPush);
+      await blockExplorer.push_headers(toPush);
     } catch (e) {
-      record(myTick, ?lo, #push, #call_failed(Error.message(e)), "push_headers_hex");
+      record(myTick, ?lo, #push, #call_failed(Error.message(e)), "push_headers");
       return;
     };
     switch pushRes {

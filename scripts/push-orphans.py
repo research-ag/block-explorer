@@ -2,7 +2,7 @@
 """
 Push orphan/stale block headers from a flat 80-byte-per-header file
 (e.g. the `stale_headers` file produced by `fetch-stale-headers.py`)
-to the BlockExplorer canister via `push_headers_hex`.
+to the BlockExplorer canister via `push_headers`.
 
 Unlike `push-headers.py`, this script does NOT seek into the file based on
 the canister's tip height. Each header is independent and the canister
@@ -132,9 +132,14 @@ def have_hashes(canister, env, hashes_be):
     return [b == "true" for b in bools]
 
 
-def push_batch(canister, env, headers_hex):
-    """Send one batch via push_headers_hex; return (accepted, last_error)."""
-    inner = "; ".join(f'"{h}"' for h in headers_hex)
+def candid_blob(raw):
+    """Candid text-format blob literal for raw bytes."""
+    return 'blob "' + "".join(f"\\{b:02x}" for b in raw) + '"'
+
+
+def push_batch(canister, env, headers_raw):
+    """Send one batch via push_headers (raw blobs); return (accepted, last_error)."""
+    inner = "; ".join(candid_blob(h) for h in headers_raw)
     arg = f"(vec {{ {inner} }})"
 
     with tempfile.NamedTemporaryFile(
@@ -144,7 +149,7 @@ def push_batch(canister, env, headers_hex):
         tmp_path = tmp.name
     try:
         args = [
-            "canister", "call", canister, "push_headers_hex",
+            "canister", "call", canister, "push_headers",
             "--args-file", tmp_path,
         ]
         if env:
@@ -158,7 +163,7 @@ def push_batch(canister, env, headers_hex):
         return 0, err_m.group(1)
     acc_m = re.search(r"accepted\s*=\s*([\d_]+)\s*:\s*nat", out)
     if not acc_m:
-        sys.stderr.write("Could not parse push_headers_hex output:\n" + out)
+        sys.stderr.write("Could not parse push_headers output:\n" + out)
         sys.exit(1)
     accepted = parse_nat(acc_m.group(1))
     last_err = None
@@ -296,7 +301,7 @@ def drain_batch(args, indexed):
     Each iteration:
       1. Query have_hashes for every (still-pending header + its prev).
       2. Split into duplicates / orphans / pushable.
-      3. push_headers_hex the pushable subset.
+      3. push_headers the pushable subset.
       4. If push errors out partway, print full details for the
          offending header (so the user can isolate it), then drop it
          from pending so the iteration can make progress.
@@ -359,8 +364,7 @@ def drain_batch(args, indexed):
             return (accepted_total, rejected_total, dup_total,
                     len(orphans), validation_errs)
 
-        headers_hex = [raw.hex() for _, raw in to_push]
-        accepted, err = push_batch(args.canister, args.env, headers_hex)
+        accepted, err = push_batch(args.canister, args.env, [raw for _, raw in to_push])
         accepted_total += accepted
         suffix = (f"iter {iter_no}: pushed={len(to_push)} accepted={accepted}"
                   f" dup={local_dups} orphan={len(orphans)}")
