@@ -671,6 +671,15 @@ persistent actor BlockExplorer {
   // Batched membership check. Used by client-side pre-filters to avoid
   // shipping headers whose hash is already stored or whose parent is
   // unknown. Returns one Bool per input, in the same order.
+  // Recompute the chain's hashes from stored headers, genesis up to height
+  // n, and return the hash of block n (internal LE order; null if n is
+  // beyond the tip). n = 0 is the genesis hash. A pure read-only integrity
+  // check — callable as a query or (for larger n, with more instruction
+  // budget) as an update call; it alters no state either way.
+  public query func rehash(n : Nat) : async ?Blob {
+    chain.rehashChain(sha, n);
+  };
+
   transient let MAX_HAVE_HASHES : Nat = 50_000;
   public query func have_hashes(hashes_be_hex : [Text]) : async [Bool] {
     if (hashes_be_hex.size() > MAX_HAVE_HASHES) {

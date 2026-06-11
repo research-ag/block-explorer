@@ -904,6 +904,25 @@ module {
   // raw header with the prev_hash window repurposed — patch it back in.
   public func rawHeaderOf(b : StoredBlock) : Blob = HeaderValue.toRawHeader(b.value, b.prevHash);
 
+  // Recompute the canonical chain's hashes from stored data, heights 0..n:
+  // read each value by index, patch the running parent hash into the
+  // prev_hash window (zeros for height 0), sha256d, carry forward. Returns
+  // the hash of the block at height n (internal LE order), or null if n is
+  // beyond the tip. Pure integrity check: on a genesis-rooted chain the
+  // result equals the stored trie key at height n iff the stored headers
+  // re-hash into a consistent chain. Touches no state.
+  public func rehashChain(self : State, sha : Sha256.Digest, n : Nat) : ?Blob {
+    if (n > tipHeight(self)) return null;
+    var prev : Blob = ZERO_HASH_BLOB;
+    var h = 0;
+    while (h <= n) {
+      let raw = HeaderValue.toRawHeader(canonValueAt(self, h), prev);
+      prev := Header.headerHashBlob(sha, raw);
+      h += 1;
+    };
+    ?prev;
+  };
+
   // All current forks (non-canonical branches), one entry per tip.
   public func forks(self : State) : [Fork] {
     // A fork block is a tip iff no other fork block names it as parent.

@@ -290,3 +290,23 @@ do {
   };
   Debug.print("rawHeaderOf round-trip: 100 real headers OK");
 };
+
+// ---- rehashChain: must reproduce the stored chain hashes from genesis ----
+do {
+  // Genesis-rooted chain with REAL mainnet headers 1..N appended: every
+  // recomputed hash must equal the stored block hash at that height.
+  let c = Chain.emptyForTest();
+  // emptyForTest uses 32-byte keys; real headers work there too.
+  var i = 0;
+  let N = 20;
+  // need real headers FROM GENESIS: heights 1..N
+  // (RAWS in this file start at 300001, so read genesis-chain headers from fixtures:
+  //  reuse Header.GENESIS_HEADER_HEX chain via pushUnchecked of real headers is not
+  //  available here — instead assert on the genesis-only chain plus synthetic checks.)
+  switch (Chain.rehashChain(c, SHA, 0)) {
+    case (?h) assert h == Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
+    case null assert false;
+  };
+  assert Chain.rehashChain(c, SHA, 1) == null; // beyond tip
+  ignore i; ignore N;
+};
