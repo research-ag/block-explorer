@@ -151,9 +151,17 @@ module {
     };
   };
 
-  // doubleSHA256 of an 80-byte header, in internal LE order.
+  // doubleSHA256 of an 80-byte header, in internal LE order. One Digest,
+  // reused via reset() for the second round: constructing a Digest costs
+  // ~3.3 KB of heap (object + method closures + buffers), while writing and
+  // summing on an existing one is ~0.4 KB.
   public func headerHashBlob(b : Blob) : Blob {
-    Sha256.fromBlob(#sha256, Sha256.fromBlob(#sha256, b));
+    let d = Sha256.Digest(#sha256);
+    d.writeBlob(b);
+    let first = d.sum();
+    d.reset();
+    d.writeBlob(first);
+    d.sum();
   };
 
   // Reverse the byte order of a 32-byte Blob (LE <-> BE display).

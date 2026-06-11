@@ -11,6 +11,7 @@ import Nat32 "mo:core/Nat32";
 import Chain "../src/block_explorer/Chain";
 import Header "../src/block_explorer/Header";
 import HeaderValue "../src/block_explorer/HeaderValue";
+import Sha256 "mo:sha2/Sha256";
 
 // Real mainnet headers 300000..300100 (no retarget boundary inside).
 let ROOT_HEX = "020000007ef055e1674d2e6551dba41cd214debbee34aeb544c7ec670000000000000000d3998963f80c5bab43fe8c26228e98d030edf4dcbe48a666f5c39e2d7a885c9102c86d536c890019593a470d";
@@ -210,4 +211,14 @@ do {
   });
   measure("cumWorkOf (readLE128)", 1000, func(_) { ignore HeaderValue.cumWorkOf(v) });
   measure("timeOf (readLE32)    ", 1000, func(_) { ignore HeaderValue.timeOf(v) });
+};
+
+// ---- sha2 internals: where do headerHashBlob's bytes go? ----
+do {
+  let raw = raws[0];
+  measure("Sha256 Digest() construct", 1000, func(_) { ignore Sha256.Digest(#sha256) });
+  let d = Sha256.Digest(#sha256);
+  measure("writeBlob(80B) on reused  ", 1000, func(_) { d.reset(); d.writeBlob(raw) });
+  measure("reset+write+sum on reused ", 1000, func(_) { d.reset(); d.writeBlob(raw); ignore d.sum() });
+  measure("fromBlob (fresh Digest)   ", 1000, func(_) { ignore Sha256.fromBlob(#sha256, raw) });
 };
