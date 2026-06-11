@@ -310,20 +310,56 @@ module {
     if (parsed.prev_hash == prevHash) #ok() else #err("prev_block_hash mismatch");
   };
 
-  // PoW check against an already-decoded target (callers with a per-period
-  // bits -> target memo avoid re-running nBitsToTarget per header).
-  public func checkPoWTarget(headerHashLE : Blob, target : Nat) : Result.Result<(), Text> {
-    if (target == 0 or target > POW_LIMIT_TARGET) {
-      return #err("nBits out of range");
+  // PoW check directly on the compact nBits encoding — no target bignum is
+  // ever computed and nothing allocates. target = mant * 256^(exp - 3), so
+  // in the 32-byte LE hash it is: zero bytes at LE indices [exp..32), the
+  // 3-byte mantissa window at LE indices exp-1 (hi) .. exp-3 (lo), and free
+  // bytes below. hash <= target iff the high bytes are zero and the window,
+  // read as a number, is < mant — or == mant with all lower bytes zero.
+  //
+  // Semantics mirror the old nBitsToTarget-based check exactly:
+  //  - the sign bit (0x00800000) is masked off, like nBitsToTarget;
+  //  - "nBits out of range" iff target == 0 (mant == 0) or target >
+  //    POW_LIMIT_TARGET (= 0xffff * 256^26). The encoding is not canonical,
+  //    so the limit check is per (exp, mant): exceeded iff
+  //    (exp == 0x1d and mant > 0xffff) or (exp == 0x1e and mant > 0xff)
+  //    or (exp >= 0x1f) — and never for exp < 0x1d since mant <= 0x7fffff
+  //    < 0xffff * 256.
+  //  - exp < 3 (window extends below byte 0; never on mainnet) falls back
+  //    to the exact bignum comparison.
+  public func checkPoW(headerHashLE : Blob, bits : Nat32) : Result.Result<(), Text> {
+    let exp = Nat32.toNat(bits >> 24);
+    let mant = bits & 0x007f_ffff;
+    if (mant == 0) return #err("nBits out of range"); // target == 0
+    if (exp >= 0x1f or (exp == 0x1e and mant > 0xff) or (exp == 0x1d and mant > 0xffff)) {
+      return #err("nBits out of range"); // target > POW_LIMIT_TARGET
     };
-    if (leBytesToNat(headerHashLE) > target) {
-      return #err("proof-of-work failed");
+    if (exp < 3) {
+      if (leBytesToNat(headerHashLE) > nBitsToTarget(bits)) {
+        return #err("proof-of-work failed");
+      };
+      return #ok();
+    };
+    // Bytes above the mantissa window must be zero (LE indices exp..31).
+    var i = exp;
+    while (i < 32) {
+      if (headerHashLE[i] != (0 : Nat8)) return #err("proof-of-work failed");
+      i += 1;
+    };
+    // The 3-byte window vs the mantissa.
+    let w : Nat32 = (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 1])) << 16)
+                  | (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 2])) << 8)
+                  | Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 3]));
+    if (w > mant) return #err("proof-of-work failed");
+    if (w == mant) {
+      // Exactly at the window: hash <= target only if every lower byte is 0.
+      var j = 0;
+      while (j + 3 < exp) {
+        if (headerHashLE[j] != (0 : Nat8)) return #err("proof-of-work failed");
+        j += 1;
+      };
     };
     #ok();
-  };
-
-  public func checkPoW(headerHashLE : Blob, bits : Nat32) : Result.Result<(), Text> {
-    checkPoWTarget(headerHashLE, nBitsToTarget(bits));
   };
 
   public func checkBits(actualBits : Nat32, expectedBits : Nat32) : Result.Result<(), Text> {
@@ -346,13 +382,12 @@ module {
   //
   // `expectedBits` is precomputed by the caller (either prev.bits, or
   // computeRetargetNBits at a 2016-boundary). Takes the already-parsed
-  // header, its already-computed hash, and the already-decoded target of
-  // parsed.bits, so hot callers don't parse, sha256d, or nBitsToTarget the
-  // same header twice.
+  // header and its already-computed hash, so hot callers don't parse or
+  // sha256d the same header twice. The PoW check works on the compact bits
+  // directly — no target is computed anywhere on this path.
   public func validateParsed(
     parsed : Parsed,
     headerHashLE : Blob,
-    target : Nat, // = nBitsToTarget(parsed.bits)
     expectedBits : Nat32,
     prevHashLE : Blob,
     mtp : Nat32,
@@ -366,7 +401,7 @@ module {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
-    switch (checkPoWTarget(headerHashLE, target)) {
+    switch (checkPoW(headerHashLE, parsed.bits)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
@@ -395,7 +430,7 @@ module {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    validateParsed(parsed, headerHashBlob(Sha256.Digest(#sha256), header), nBitsToTarget(parsed.bits), expectedBits, prevHashLE, mtp, nowSecs);
+    validateParsed(parsed, headerHashBlob(Sha256.Digest(#sha256), header), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };

@@ -808,10 +808,7 @@ module {
     let stamps = lastTimestampsFrom(self, parent.hash, parent.height, parent.isCanonical, if (newHeight < MTP_WINDOW) newHeight else MTP_WINDOW);
     let mtp = Header.medianTimePast(stamps);
 
-    // Decode the header's own target once via the memo (bits is constant
-    // within a difficulty period); the PoW check reuses it.
-    let (target, _) = targetWorkFor(self, parsed.bits);
-    switch (Header.validateParsed(parsed, hash, target, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
+    switch (Header.validateParsed(parsed, hash, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
