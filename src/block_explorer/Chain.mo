@@ -39,6 +39,7 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Set "mo:core/Set";
 
+import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
 import Header "Header";
@@ -242,20 +243,20 @@ module {
   // Initialization.
   // ---------------------------------------------------------------------
 
-  public func initGenesis(self : State, firstSeenSecs : Nat32, uploader : Principal) {
-    initRoot(self, Header.hexToBlob(Header.GENESIS_HEADER_HEX), firstSeenSecs, uploader);
+  public func initGenesis(self : State, sha : Sha256.Digest, firstSeenSecs : Nat32, uploader : Principal) {
+    initRoot(self, sha, Header.hexToBlob(Header.GENESIS_HEADER_HEX), firstSeenSecs, uploader);
   };
 
   // Seed index-0 from an arbitrary 80-byte header (genesis in production; a
   // checkpoint block in tests). Height 0, cumWork = its own block work; its
   // real prev_hash is ignored (height-0 reports a zero prev_hash).
-  public func initRoot(self : State, raw : Blob, firstSeenSecs : Nat32, uploader : Principal) {
+  public func initRoot(self : State, sha : Sha256.Digest, raw : Blob, firstSeenSecs : Nat32, uploader : Principal) {
     if (self.initialized) return;
     let parsed = switch (Header.parseHeader(raw)) {
       case (?p) p;
       case null Runtime.trap("root header invalid");
     };
-    let hash = Header.headerHashBlob(raw);
+    let hash = Header.headerHashBlob(sha, raw);
     let work = targetWorkFor(self, parsed.bits).1;
     let value = HeaderValue.encode({
       version = parsed.version;
@@ -789,13 +790,13 @@ module {
   // Public mutating API.
   // ---------------------------------------------------------------------
 
-  public func push(self : State, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
+  public func push(self : State, sha : Sha256.Digest, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
     if (raw.size() != 80) return #err("header is not 80 bytes");
     let parsed = switch (Header.parseHeader(raw)) {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    let hash = Header.headerHashBlob(raw);
+    let hash = Header.headerHashBlob(sha, raw);
     switch (byHashInternal(self, hash)) {
       case (?_) return #err("duplicate: hash already present");
       case null {};
@@ -831,13 +832,13 @@ module {
     #ok(storeAndMaybeReorg(self, parsed, hash, parent, firstSeen, uploader, nowSecs));
   };
 
-  public func pushUnchecked(self : State, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
+  public func pushUnchecked(self : State, sha : Sha256.Digest, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
     if (raw.size() != 80) return #err("header is not 80 bytes");
     let parsed = switch (Header.parseHeader(raw)) {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    let hash = Header.headerHashBlob(raw);
+    let hash = Header.headerHashBlob(sha, raw);
     switch (byHashInternal(self, hash)) {
       case (?_) return #err("duplicate: hash already present");
       case null {};
@@ -1101,7 +1102,7 @@ module {
   // Index a block's body — allowed only when all ancestor bodies are known.
   // Canonical bodies go to the txid trie in chain order; fork bodies into the
   // ForkBlock record. Re-upload is a no-op.
-  public func pushBody(self : State, blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
+  public func pushBody(self : State, sha : Sha256.Digest, blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     if (txCount == 0) return #err("tx_count must be >= 1");
     if (hashes.size() != txCount * 32) {
@@ -1112,7 +1113,7 @@ module {
       case null return #err("unknown block header hash");
     };
     if (bodyKnown(self, b)) return #ok(bodyResult(self, b, true));
-    if (Merkle.root(hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
+    if (Merkle.root(sha, hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
 
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {
@@ -1314,7 +1315,7 @@ module {
   // headers store without tripping the trailing-zero truncation invariant).
   public func emptyForTest() : State {
     let s = newState(newHeaderTrie(Headers.HASH_SIZE), newTxTrie(TEST_TX_ROOT_ARIDITY));
-    initGenesis(s, 0, Principal.fromText("aaaaa-aa"));
+    initGenesis(s, Sha256.Digest(#sha256), 0, Principal.fromText("aaaaa-aa"));
     s;
   };
 
@@ -1323,7 +1324,7 @@ module {
   // truncation path with real PoW headers.
   public func fromRootHex(rawHex : Text, keySize : Nat) : State {
     let s = newState(newHeaderTrie(keySize), newTxTrie(TEST_TX_ROOT_ARIDITY));
-    initRoot(s, Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
+    initRoot(s, Sha256.Digest(#sha256), Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
     s;
   };
 

@@ -151,12 +151,15 @@ module {
     };
   };
 
-  // doubleSHA256 of an 80-byte header, in internal LE order. One Digest,
-  // reused via reset() for the second round: constructing a Digest costs
-  // ~3.3 KB of heap (object + method closures + buffers), while writing and
-  // summing on an existing one is ~0.4 KB.
-  public func headerHashBlob(b : Blob) : Blob {
-    let d = Sha256.Digest(#sha256);
+  // doubleSHA256 of an 80-byte header, in internal LE order, on a
+  // caller-provided engine. Constructing a Sha256.Digest costs ~3.3 KB of
+  // heap (object + method closures + buffers) while reuse via reset() is
+  // ~0.4 KB per hash — so the actor holds ONE transient engine for its whole
+  // lifetime and threads it through (a module-level instance is impossible:
+  // M0014, non-static expression in library). Resets the engine first;
+  // leaves it in a finished state.
+  public func headerHashBlob(d : Sha256.Digest, b : Blob) : Blob {
+    d.reset();
     d.writeBlob(b);
     let first = d.sum();
     d.reset();
@@ -390,7 +393,7 @@ module {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    validateParsed(parsed, headerHashBlob(header), nBitsToTarget(parsed.bits), expectedBits, prevHashLE, mtp, nowSecs);
+    validateParsed(parsed, headerHashBlob(Sha256.Digest(#sha256), header), nBitsToTarget(parsed.bits), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };

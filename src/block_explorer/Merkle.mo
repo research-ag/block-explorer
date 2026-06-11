@@ -16,14 +16,19 @@ import Sha256 "mo:sha2/Sha256";
 
 module {
 
-  // Bitcoin sha256d of the concatenation `left || right`, computed
-  // via a streaming Digest so we don't allocate a 64-byte
-  // intermediate buffer per inner node.
-  func sha256dPair(left : Blob, right : Blob) : Blob {
-    let d = Sha256.Digest(#sha256);
+  // Bitcoin sha256d of the concatenation `left || right` on a reused
+  // engine. Streaming the two halves avoids a 64-byte concat buffer, and
+  // reusing one Digest across the whole tree avoids the ~3.3 KB Digest
+  // construction per hash — at 2 fresh Digests per inner node, a 4000-tx
+  // block would otherwise allocate ~26 MB just building its merkle root.
+  func sha256dPair(d : Sha256.Digest, left : Blob, right : Blob) : Blob {
+    d.reset();
     d.writeBlob(left);
     d.writeBlob(right);
-    Sha256.fromBlob(#sha256, d.sum());
+    let first = d.sum();
+    d.reset();
+    d.writeBlob(first);
+    d.sum();
   };
 
   // Slice a 32-byte hash out of a flat hashes blob at index `i`.
@@ -36,10 +41,11 @@ module {
   };
 
   // Compute the Bitcoin merkle root for `txCount` leaves stored
-  // contiguously in `hashes` at stride 32. Returns the root in
+  // contiguously in `hashes` at stride 32, using the caller's hash engine
+  // (reset between hashes; left in a finished state). Returns the root in
   // internal LE order. Traps if `hashes.size() != txCount * 32` or
   // `txCount == 0` (no block has zero txs — coinbase is mandatory).
-  public func root(hashes : Blob, txCount : Nat) : Blob {
+  public func root(d : Sha256.Digest, hashes : Blob, txCount : Nat) : Blob {
     if (txCount == 0) {
       // Caller should have validated; treat as programmer error.
       assert false;
@@ -59,7 +65,7 @@ module {
       while (i < nextN) {
         let leftIdx = i * 2;
         let rightIdx = if (leftIdx + 1 < n) leftIdx + 1 else leftIdx; // dup last on odd
-        next[i] := sha256dPair(level[leftIdx], level[rightIdx]);
+        next[i] := sha256dPair(d, level[leftIdx], level[rightIdx]);
         i += 1;
       };
       level := next;

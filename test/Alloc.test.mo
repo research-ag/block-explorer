@@ -13,6 +13,8 @@ import Header "../src/block_explorer/Header";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Sha256 "mo:sha2/Sha256";
 
+let SHA = Sha256.Digest(#sha256);
+
 // Real mainnet headers 300000..300100 (no retarget boundary inside).
 let ROOT_HEX = "020000007ef055e1674d2e6551dba41cd214debbee34aeb544c7ec670000000000000000d3998963f80c5bab43fe8c26228e98d030edf4dcbe48a666f5c39e2d7a885c9102c86d536c890019593a470d";
 let HDRS_HEX : [Text] = [
@@ -142,7 +144,7 @@ let raws : [Blob] = do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   measure("push (full, validated)", raws.size(), func(i) {
-    switch (Chain.push(c, raws[i], NOW, UPLOADER)) {
+    switch (Chain.push(c, SHA, raws[i], NOW, UPLOADER)) {
       case (#ok _) {};
       case (#err m) Prim.trap("push failed at " # debug_show i # ": " # m);
     };
@@ -153,7 +155,7 @@ do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   measure("pushUnchecked        ", raws.size(), func(i) {
-    switch (Chain.pushUnchecked(c, raws[i], NOW, UPLOADER)) {
+    switch (Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER)) {
       case (#ok _) {};
       case (#err m) Prim.trap("pushUnchecked failed: " # m);
     };
@@ -162,12 +164,12 @@ do {
 
 // ---- components ----
 let raw0 = raws[0];
-let hash0 = Header.headerHashBlob(raw0);
+let hash0 = Header.headerHashBlob(SHA, raw0);
 let bits0 = Header.bitsOf(raw0);
 
 measure("hexToBlob(160 chars) ", 1000, func(_) { ignore Header.hexToBlob(HDRS_HEX[0]) });
 measure("parseHeader          ", 1000, func(_) { ignore Header.parseHeader(raw0) });
-measure("headerHashBlob(2xSHA)", 1000, func(_) { ignore Header.headerHashBlob(raw0) });
+measure("headerHashBlob(2xSHA)", 1000, func(_) { ignore Header.headerHashBlob(SHA, raw0) });
 measure("nBitsToTarget        ", 1000, func(_) { ignore Header.nBitsToTarget(bits0) });
 measure("chainWork            ", 1000, func(_) { ignore Header.chainWork(bits0) });
 measure("leBytesToNat(32B)    ", 1000, func(_) { ignore Header.leBytesToNat(hash0) });
@@ -188,7 +190,7 @@ measure("HeaderValue.encode   ", 1000, func(_) {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   var i = 0;
-  while (i < raws.size()) { ignore Chain.pushUnchecked(c, raws[i], NOW, UPLOADER); i += 1 };
+  while (i < raws.size()) { ignore Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER); i += 1 };
   measure("tipBlock (storedCanonAt)", 1000, func(_) { ignore Chain.tipBlock(c) });
   measure("mediantimeOf(tip) [lastNTimestamps 11]", 1000, func(_) { ignore Chain.mediantimeOf(c, Chain.tipBlock(c)) });
   measure("byHashInternal(known)", 1000, func(_) { ignore Chain.byHashInternal(c, hash0) });
@@ -201,7 +203,7 @@ do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   var i = 0;
-  while (i < raws.size()) { ignore Chain.pushUnchecked(c, raws[i], NOW, UPLOADER); i += 1 };
+  while (i < raws.size()) { ignore Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER); i += 1 };
   // a realistic 76-byte value blob: encode with a real-sized cumWork (~2^95)
   let parsed1 = switch (Header.parseHeader(raws[0])) { case (?p) p; case null Prim.trap("p") };
   let v = HeaderValue.encode({

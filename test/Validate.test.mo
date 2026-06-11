@@ -6,8 +6,11 @@ import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import Result "mo:core/Result";
 
+import Sha256 "mo:sha2/Sha256";
 import Header "../src/block_explorer/Header";
 import F "fixtures/Fixtures";
+
+let SHA = Sha256.Digest(#sha256);
 
 ignore Nat8.toNat;
 
@@ -47,7 +50,7 @@ suite(
         var height = 1;
         while (height < chainHex.size()) {
           let prevP = parsedAt(chainHex[height - 1]);
-          let prevHash = Header.headerHashBlob(Header.hexToBlob(chainHex[height - 1]));
+          let prevHash = Header.headerHashBlob(SHA, Header.hexToBlob(chainHex[height - 1]));
           // collect last up-to-11 timestamps before `height`
           let n : Nat = if (height < 11) height else 11;
           let buf = Array.tabulate<Nat32>(
@@ -81,7 +84,7 @@ suite(
           },
         );
         let prevP = parsedAt(F.H_4);
-        let prevHash = Header.headerHashBlob(Header.hexToBlob(F.H_4));
+        let prevHash = Header.headerHashBlob(SHA, Header.hexToBlob(F.H_4));
         let r = Header.validateAgainst(
           Blob.fromArray(mutated),
           prevP.bits,
@@ -113,7 +116,7 @@ suite(
       "future-drift rejection",
       func() {
         let prevP = parsedAt(F.H_0);
-        let prevHash = Header.headerHashBlob(Header.hexToBlob(F.H_0));
+        let prevHash = Header.headerHashBlob(SHA, Header.hexToBlob(F.H_0));
         // Block 1's timestamp is in 2009.  If "now" is in 2008 (well before
         // block 1's time + 2h drift window), future-drift must reject.
         let r = Header.validateAgainst(
@@ -131,7 +134,7 @@ suite(
       "MTP rejection (header time <= mtp)",
       func() {
         let prevP = parsedAt(F.H_4);
-        let prevHash = Header.headerHashBlob(Header.hexToBlob(F.H_4));
+        let prevHash = Header.headerHashBlob(SHA, Header.hexToBlob(F.H_4));
         let h5 = parsedAt(F.H_5);
         let r = Header.validateAgainst(
           Header.hexToBlob(F.H_5),

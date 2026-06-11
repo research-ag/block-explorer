@@ -6,8 +6,11 @@ import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import Result "mo:core/Result";
 
+import Sha256 "mo:sha2/Sha256";
 import Header "../src/block_explorer/Header";
 import F "fixtures/Fixtures";
+
+let SHA = Sha256.Digest(#sha256);
 
 func isOk<E>(r : Result.Result<(), E>) : Bool {
   switch r { case (#ok()) true; case (#err _) false };
@@ -24,7 +27,7 @@ suite(
           case (?p) p;
           case null { assert false; return };
         };
-        let h = Header.headerHashBlob(blob);
+        let h = Header.headerHashBlob(SHA, blob);
         assert isOk(Header.checkPoW(h, p.bits));
       },
     );
@@ -37,7 +40,7 @@ suite(
           case (?p) p;
           case null { assert false; return };
         };
-        let h = Header.headerHashBlob(blob);
+        let h = Header.headerHashBlob(SHA, blob);
         assert isOk(Header.checkPoW(h, p.bits));
       },
     );
@@ -58,7 +61,7 @@ suite(
           case (?p) p;
           case null { assert false; return };
         };
-        let h = Header.headerHashBlob(mblob);
+        let h = Header.headerHashBlob(SHA, mblob);
         assert not isOk(Header.checkPoW(h, p.bits));
       },
     );

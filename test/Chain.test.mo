@@ -21,6 +21,8 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import VarArray "mo:core/VarArray";
 
+import Sha256 "mo:sha2/Sha256";
+
 import Header "../src/block_explorer/Header";
 import Chain "../src/block_explorer/Chain";
 import Merkle "../src/block_explorer/Merkle";
@@ -36,6 +38,8 @@ let ANON : Principal = Principal.fromText("2vxsx-fae");
 
 // Full 32-byte keys so synthetic (non-PoW) headers store without
 // tripping the production trailing-zero truncation invariant.
+let SHA = Sha256.Digest(#sha256);
+
 func newChain() : Chain.State = Chain.emptyForTest();
 
 func isErr(r : Result.Result<Chain.PushOk, Text>) : Bool {
@@ -43,7 +47,7 @@ func isErr(r : Result.Result<Chain.PushOk, Text>) : Bool {
 };
 
 func push(c : Chain.State, raw : Blob) : Result.Result<Chain.PushOk, Text> =
-  c.pushUnchecked(raw, FUTURE_NOW, UPLOADER);
+  c.pushUnchecked(SHA, raw, FUTURE_NOW, UPLOADER);
 
 // --- Synthetic-header builder --------------------------------------------
 
@@ -85,7 +89,7 @@ func mkHeaderM(prevHash : Blob, bits : Nat32, time : Nat32, nonce : Nat32, merkl
   Blob.fromVarArray(buf);
 };
 
-func hashOf(raw : Blob) : Blob = Header.headerHashBlob(raw);
+func hashOf(raw : Blob) : Blob = Header.headerHashBlob(SHA, raw);
 
 // A 32-byte txid that is all `b` bytes.
 func txid(b : Nat8) : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = b));
@@ -108,7 +112,7 @@ func canon0(c : Chain.State) : Chain.StoredBlock {
 };
 
 let GENESIS_HASH : Blob =
-  Header.headerHashBlob(Header.hexToBlob(Header.GENESIS_HEADER_HEX));
+  Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
 
 // Genesis difficulty (least work per block).
 let EASY_BITS : Nat32 = 0x1d00ffff;
@@ -395,9 +399,9 @@ suite(
       func() {
         let c = newChain();
         let a1 = mkHeader(GENESIS_HASH, EASY_BITS, 1, 1);
-        ignore c.pushUnchecked(a1, FUTURE_NOW, UPLOADER);
+        ignore c.pushUnchecked(SHA, a1, FUTURE_NOW, UPLOADER);
         let a2 = mkHeader(hashOf(a1), EASY_BITS, 2, 2);
-        ignore c.pushUnchecked(a2, FUTURE_NOW, ANON);
+        ignore c.pushUnchecked(SHA, a2, FUTURE_NOW, ANON);
 
         // Non-anonymous block resolves to its uploader.
         assert c.uploaderOf(hashOf(a1)) == UPLOADER;
@@ -470,16 +474,16 @@ suite(
         let a2Raw = Header.hexToBlob(A2_HEX);
 
         // B extends the canonical chain (real header, 28-byte key).
-        switch (c.pushUnchecked(bRaw, FUTURE_NOW, UPLOADER)) {
+        switch (c.pushUnchecked(SHA, bRaw, FUTURE_NOW, UPLOADER)) {
           case (#ok ok) assert ok.height == 1 and ok.is_canonical and ok.reorg_depth == 0;
           case _ assert false;
         };
         // C and A are equal-work siblings of B → forks, no reorg.
-        switch (c.pushUnchecked(cRaw, FUTURE_NOW, UPLOADER)) {
+        switch (c.pushUnchecked(SHA, cRaw, FUTURE_NOW, UPLOADER)) {
           case (#ok ok) assert not ok.is_canonical and ok.reorg_depth == 0;
           case _ assert false;
         };
-        switch (c.pushUnchecked(aRaw, FUTURE_NOW, UPLOADER)) {
+        switch (c.pushUnchecked(SHA, aRaw, FUTURE_NOW, UPLOADER)) {
           case (#ok ok) assert not ok.is_canonical and ok.reorg_depth == 0;
           case _ assert false;
         };
@@ -488,7 +492,7 @@ suite(
         assert c.forks().size() == 2;
 
         // A2 makes the A-branch heavier → real reorg.
-        switch (c.pushUnchecked(a2Raw, FUTURE_NOW, UPLOADER)) {
+        switch (c.pushUnchecked(SHA, a2Raw, FUTURE_NOW, UPLOADER)) {
           case (#ok ok) assert ok.height == 2 and ok.is_canonical and ok.reorg_depth == 1;
           case _ assert false;
         };
@@ -536,7 +540,7 @@ suite(
         let genMerkle = HeaderValue.merkleOf(g.value); // genesis coinbase txid
 
         // Genesis body: a single coinbase tx (root of [coinbase] == coinbase).
-        switch (c.pushBody(g.hash, 1, genMerkle)) {
+        switch (c.pushBody(SHA, g.hash, 1, genMerkle)) {
           case (#ok ok) assert ok.height == 0 and ok.tx_count == 1 and ok.first_tx_index == 0 and ok.canonical_indexed and not ok.duplicate;
           case (#err _) assert false;
         };
@@ -547,9 +551,9 @@ suite(
 
         // Block 1 with three distinct txs; header merkle crafted to match.
         let t = txids([1, 2, 3]);
-        let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(t, 3));
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(SHA, t, 3));
         switch (push(c, h1)) { case (#ok ok) assert ok.is_canonical; case _ assert false };
-        switch (c.pushBody(hashOf(h1), 3, t)) {
+        switch (c.pushBody(SHA, hashOf(h1), 3, t)) {
           case (#ok ok) assert ok.height == 1 and ok.tx_count == 3 and ok.first_tx_index == 1 and ok.canonical_indexed;
           case (#err _) assert false;
         };
@@ -586,36 +590,36 @@ suite(
         let genMerkle = HeaderValue.merkleOf(g.value);
 
         let t = txids([1, 2]);
-        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(t, 2));
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(SHA, t, 2));
         ignore push(c, h1);
 
         // Block 1 body before genesis: rejected (ancestor body unknown).
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(h1), 2, t)) { case (#err _) {}; case _ assert false };
         assert c.bodiesHeight() == 0;
         // Genesis first, then block 1 — strict chain order.
-        switch (c.pushBody(g.hash, 1, genMerkle)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
+        switch (c.pushBody(SHA, g.hash, 1, genMerkle)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
         assert c.bodiesHeight() == 2;
         // Extend the canonical chain (header only) so the 2-block fork below
         // ties on work and does not trigger a reorg.
         ignore push(c, mkHeader(hashOf(h1), EASY_BITS, 2, 2));
 
         // Fork chain F1 -> F2 off genesis; F2's body needs F1's body first.
-        let f1 = mkHeaderM(g.hash, EASY_BITS, 100, 9, Merkle.root(txids([30]), 1));
+        let f1 = mkHeaderM(g.hash, EASY_BITS, 100, 9, Merkle.root(SHA, txids([30]), 1));
         ignore push(c, f1);
         let tf2 = txids([31, 32]);
-        let f2 = mkHeaderM(hashOf(f1), EASY_BITS, 101, 10, Merkle.root(tf2, 2));
+        let f2 = mkHeaderM(hashOf(f1), EASY_BITS, 101, 10, Merkle.root(SHA, tf2, 2));
         ignore push(c, f2);
 
         // F2 body before F1 body: rejected (fork ancestor body unknown).
-        switch (c.pushBody(hashOf(f2), 2, tf2)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(f2), 2, tf2)) { case (#err _) {}; case _ assert false };
         // F1 body OK (parent genesis has a body); stored in the fork record.
-        switch (c.pushBody(hashOf(f1), 1, txids([30]))) {
+        switch (c.pushBody(SHA, hashOf(f1), 1, txids([30]))) {
           case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 1;
           case _ assert false;
         };
         // Now F2 body OK (parent F1 has a body); F = F(F1) + N(F1) = 1 + 1.
-        switch (c.pushBody(hashOf(f2), 2, tf2)) {
+        switch (c.pushBody(SHA, hashOf(f2), 2, tf2)) {
           case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 2;
           case _ assert false;
         };
@@ -628,20 +632,20 @@ suite(
       func() {
         let c = newChain();
         let g = canon0(c);
-        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value));
+        ignore c.pushBody(SHA, g.hash, 1, HeaderValue.merkleOf(g.value));
 
         // A1 canonical, body of 2 txs.
         let tA = txids([10, 11]);
-        let a1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(tA, 2));
+        let a1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, Merkle.root(SHA, tA, 2));
         ignore push(c, a1);
-        ignore c.pushBody(hashOf(a1), 2, tA);
+        ignore c.pushBody(SHA, hashOf(a1), 2, tA);
         assert c.totalIndexedTxids() == 3; // genesis + A1
 
         // Competing fork B1 off genesis; upload its body while non-canonical.
         let tB = txids([20, 21, 22]);
-        let b1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_010, 101, Merkle.root(tB, 3));
+        let b1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_010, 101, Merkle.root(SHA, tB, 3));
         ignore push(c, b1);
-        switch (c.pushBody(hashOf(b1), 3, tB)) {
+        switch (c.pushBody(SHA, hashOf(b1), 3, tB)) {
           case (#ok ok) assert not ok.canonical_indexed and not ok.duplicate;
           case _ assert false;
         };
@@ -673,20 +677,20 @@ suite(
       func() {
         let c = newChain();
         let g = canon0(c);
-        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value));
+        ignore c.pushBody(SHA, g.hash, 1, HeaderValue.merkleOf(g.value));
 
         let t = txids([1, 2]);
-        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(t, 2));
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, Merkle.root(SHA, t, 2));
         ignore push(c, h1);
 
         // Wrong txids -> merkle mismatch.
-        switch (c.pushBody(hashOf(h1), 2, txids([5, 6]))) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(h1), 2, txids([5, 6]))) { case (#err _) {}; case _ assert false };
         // Unknown header.
-        switch (c.pushBody(txid(99), 1, txid(99))) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(SHA, txid(99), 1, txid(99))) { case (#err _) {}; case _ assert false };
         // Correct body indexes it.
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(h1), 2, t)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
         // Re-upload -> duplicate no-op.
-        switch (c.pushBody(hashOf(h1), 2, t)) { case (#ok ok) assert ok.duplicate; case _ assert false };
+        switch (c.pushBody(SHA, hashOf(h1), 2, t)) { case (#ok ok) assert ok.duplicate; case _ assert false };
         assert c.bodiesHeight() == 2;
       },
     );

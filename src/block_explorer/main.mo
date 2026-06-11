@@ -26,6 +26,8 @@ import Time "mo:core/Time";
 
 import Prim "mo:⛔";
 
+import Sha256 "mo:sha2/Sha256";
+
 import PT "mo:promtracker";
 import StableTrie "mo:stable-trie/Enumeration";
 
@@ -71,6 +73,13 @@ persistent actor BlockExplorer {
   let HEAP_LIMIT : Nat = 2_147_483_648; // 2 GiB
 
   func heapExceeded() : Bool = Prim.rts_heap_size() >= HEAP_LIMIT;
+
+  // One SHA-256 engine for the canister's whole lifetime (re-created on
+  // upgrade), threaded into every hashing call: constructing a Digest costs
+  // ~3.3 KB of heap, reuse via reset() is ~0.4 KB per hash. A module-level
+  // instance is impossible (M0014), so the actor owns it. Safe to share:
+  // each use is synchronous within one message, never held across an await.
+  transient let sha = Sha256.Digest(#sha256);
 
   // ---------------------------------------------------------------------
   // Bitcoin canister interface (ghsi2-tqaaa-aaaan-aaaca-cai).
@@ -126,7 +135,7 @@ persistent actor BlockExplorer {
   // Fresh install only: seed genesis. Runs on every actor start, but the
   // `initialized` guard (persisted) makes it a no-op after the first install.
   if (not chain.initialized) {
-    Chain.initGenesis(chain, nowSecsNat32(), Principal.fromActor(BlockExplorer));
+    Chain.initGenesis(chain, sha, nowSecsNat32(), Principal.fromActor(BlockExplorer));
   };
 
   // Chain-level pull values, read from `chain` directly so the metric output
@@ -203,7 +212,7 @@ persistent actor BlockExplorer {
   let MAX_PUSH_BATCH : Nat = 10_000;
 
   public shared ({ caller }) func push_header(raw_hex : Text) : async Result.Result<Chain.PushOk, Text> {
-    chain.push(Header.hexToBlob(raw_hex), nowSecs(), caller);
+    chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller);
   };
 
   // Loop body of push_headers / push_headers_hex, also reused by
@@ -216,7 +225,7 @@ persistent actor BlockExplorer {
     var accepted : Nat = 0;
     var lastErr : ?Text = null;
     label loopH for (h in headers.vals()) {
-      switch (chain.push(h, now, caller)) {
+      switch (chain.push(sha, h, now, caller)) {
         case (#ok _) accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopH };
       };
@@ -270,7 +279,7 @@ persistent actor BlockExplorer {
   };
 
   public func push_body(block_hash_internal : Blob, tx_count : Nat, hashes : Blob) : async Result.Result<Chain.PushBodyOk, Text> {
-    chain.pushBody(block_hash_internal, tx_count, hashes);
+    chain.pushBody(sha, block_hash_internal, tx_count, hashes);
   };
 
   // Batched upload; processes entries in order, stopping at the first
@@ -282,7 +291,7 @@ persistent actor BlockExplorer {
     var duplicate = 0;
     var lastErr : ?Text = null;
     label loopB for ((block_hash, tx_count, hashes) in batch.vals()) {
-      switch (chain.pushBody(block_hash, tx_count, hashes)) {
+      switch (chain.pushBody(sha, block_hash, tx_count, hashes)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
@@ -512,7 +521,7 @@ persistent actor BlockExplorer {
     switch (msg) {
       case (#push_header fetch) {
         let raw_hex = fetch();
-        switch (chain.push(Header.hexToBlob(raw_hex), nowSecs(), caller)) {
+        switch (chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller)) {
           case (#ok _) true;
           case (#err _) false;
         };
@@ -576,7 +585,7 @@ persistent actor BlockExplorer {
     var imported : Nat = 0;
     var firstErr : ?Text = null;
     label loopH for (h in resp.block_headers.vals()) {
-      switch (chain.push(h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
+      switch (chain.push(sha, h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
         case (#ok _) imported += 1;
         case (#err msg) { firstErr := ?msg; break loopH };
       };

@@ -10,7 +10,10 @@ import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
 
 import Header "../src/block_explorer/Header";
+import Sha256 "mo:sha2/Sha256";
 import Merkle "../src/block_explorer/Merkle";
+
+let SHA = Sha256.Digest(#sha256);
 
 // Pack BE-hex hashes into a single flat LE-byte hashes blob, the
 // shape that `Merkle.root` consumes.
@@ -30,7 +33,7 @@ func leBlob(beHexes : [Text]) : Blob {
 // Run Merkle.root and compare its output (LE) to the expected
 // big-endian hex.
 func rootBE(beHexes : [Text]) : Text {
-  let r = Merkle.root(leBlob(beHexes), beHexes.size());
+  let r = Merkle.root(SHA, leBlob(beHexes), beHexes.size());
   Header.bytesToHex(Header.reverse32(r));
 };
 
@@ -68,12 +71,12 @@ suite(
         // rule the tree collapses to:
         //   L1 = [ sha256d(H||H), sha256d(H||H) ]
         //   root = sha256d(L1[0] || L1[1])
-        // i.e. it must equal Merkle.root([H,H,H,H], 4) for the same
+        // i.e. it must equal Merkle.root(SHA, [H,H,H,H], 4) for the same
         // four-leaf tree of all-zero hashes. This exercises the
         // odd-count code path.
         let zero96 = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 96));
         let zero128 = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 128));
-        assert Merkle.root(zero96, 3) == Merkle.root(zero128, 4);
+        assert Merkle.root(SHA, zero96, 3) == Merkle.root(SHA, zero128, 4);
       },
     );
   },
