@@ -24,6 +24,8 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Time "mo:core/Time";
 
+import Prim "mo:⛔";
+
 import PT "mo:promtracker";
 import StableTrie "mo:stable-trie/Enumeration";
 
@@ -48,6 +50,27 @@ persistent actor BlockExplorer {
   transient let renderer = PT.Renderer();
   renderer.addCanisterLabel(BlockExplorer);
   renderer.addValue(PT.allSystemMetrics);
+
+  // Stateful batch gauges (watermarks reset on upgrade, like the renderer).
+  // Each Gauge emits <prefix>_last/_sum/_count plus high/low watermarks.
+  transient let tracker = PT.Tracker.new();
+  renderer.addValue(PT.Tracker.toValue(tracker));
+  // Heap size (rts_heap_size) sampled at the end of each batch — including
+  // batches stopped early by the heap limit.
+  transient let headersBatchHeap = PT.Tracker.newGauge(tracker, "headers_batch_heap_size", [], []);
+  transient let txidsBatchHeap = PT.Tracker.newGauge(tracker, "txids_batch_heap_size", [], []);
+  // Number of batch entries actually processed (may be less than submitted
+  // when the batch halts on an error or the heap limit).
+  transient let headersBatchProcessed = PT.Tracker.newGauge(tracker, "headers_batch_processed", [], []);
+  transient let txidsBatchProcessed = PT.Tracker.newGauge(tracker, "txids_batch_processed", [], []);
+
+  // Stop processing further batch entries once the heap reaches this size.
+  // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
+  // next message. Callers learn how far the batch got from the result's
+  // accepted/duplicate counts and retry the rest later.
+  let HEAP_LIMIT : Nat = 2_147_483_648; // 2 GiB
+
+  func heapExceeded() : Bool = Prim.rts_heap_size() >= HEAP_LIMIT;
 
   // ---------------------------------------------------------------------
   // Bitcoin canister interface (ghsi2-tqaaa-aaaan-aaaca-cai).
@@ -197,7 +220,13 @@ persistent actor BlockExplorer {
         case (#ok _) accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopH };
       };
+      if (heapExceeded()) {
+        lastErr := ?("heap limit reached: batch stopped after " # debug_show accepted # " headers; retry the rest");
+        break loopH;
+      };
     };
+    PT.Gauge.update(headersBatchHeap, Prim.rts_heap_size());
+    PT.Gauge.update(headersBatchProcessed, accepted);
     {
       accepted;
       new_tip = toBlockInfo(chain.tipBlock(), true);
@@ -257,7 +286,13 @@ persistent actor BlockExplorer {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
+      if (heapExceeded()) {
+        lastErr := ?("heap limit reached: batch stopped after " # debug_show (accepted + duplicate) # " bodies; retry the rest");
+        break loopB;
+      };
     };
+    PT.Gauge.update(txidsBatchHeap, Prim.rts_heap_size());
+    PT.Gauge.update(txidsBatchProcessed, accepted + duplicate);
     #ok({ accepted; duplicate; last_error = lastErr });
   };
 
@@ -539,14 +574,19 @@ persistent actor BlockExplorer {
     };
 
     var imported : Nat = 0;
+    var firstErr : ?Text = null;
     label loopH for (h in resp.block_headers.vals()) {
       switch (chain.push(h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
         case (#ok _) imported += 1;
-        case (#err msg) {
-          if (imported == 0) return #err(msg);
-          break loopH;
-        };
+        case (#err msg) { firstErr := ?msg; break loopH };
       };
+      if (heapExceeded()) break loopH;
+    };
+    PT.Gauge.update(headersBatchHeap, Prim.rts_heap_size());
+    PT.Gauge.update(headersBatchProcessed, imported);
+    switch (firstErr) {
+      case (?msg) if (imported == 0) return #err(msg);
+      case null {};
     };
     #ok(imported);
   };
