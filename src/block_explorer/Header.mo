@@ -11,6 +11,8 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import VarArray "mo:core/VarArray";
 
+import Prim "mo:⛔";
+
 import Sha256 "mo:sha2/Sha256";
 
 module {
@@ -187,7 +189,6 @@ module {
   // just like Nat64 — compact scalars are 31-bit — and halving the limb
   // width doubles the bignum combines.)
   public func leBytesToNat(h : Blob) : Nat {
-    let TWO_POW_64 : Nat = 0x1_0000_0000_0000_0000;
     func limbAt(lo : Nat, width : Nat) : Nat64 {
       var limb : Nat64 = 0;
       var j = lo + width;
@@ -206,7 +207,7 @@ module {
       i -= rem;
     };
     while (i > 0) {
-      acc := acc * TWO_POW_64 + Nat64.toNat(limbAt(i - 8, 8));
+      acc := Prim.shiftLeft(acc, 64) + Nat64.toNat(limbAt(i - 8, 8));
       i -= 8;
     };
     acc;
@@ -216,12 +217,10 @@ module {
   // nBits <-> target conversion (Bitcoin "compact" format).
   // ---------------------------------------------------------------------
 
-  func pow256(n : Nat) : Nat {
-    var acc : Nat = 1;
-    var i = 0;
-    while (i < n) { acc *= 256; i += 1 };
-    acc;
-  };
+  // 256^n as a single bignum shift — a `*= 256` loop allocates a fresh,
+  // growing bignum per iteration (~3.6 KB inside nBitsToTarget for typical
+  // exponents).
+  func pow256(n : Nat) : Nat = Prim.shiftLeft(1, Nat32.fromNat(8 * n));
 
   public func nBitsToTarget(bits : Nat32) : Nat {
     let exp : Nat = (bits >> 24).toNat();

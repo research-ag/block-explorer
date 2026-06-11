@@ -64,17 +64,18 @@ module {
     buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
   };
 
-  // Split into two Nat64 limbs, then explode each into its 8 bytes in one
-  // prim call (most-significant byte first). Measured allocation anatomy:
-  // the cost here is the TWO BIGNUM OPS splitting cumWork (% and / by 2^64,
-  // ~0.8 KB for a 96-bit value — bignum div allocates internal temporaries,
-  // and Nat has no bitwise ops to avoid it); byte extraction is free either
-  // way (explodeNat64 == shift/mask loop — Nat64 locals are unboxed).
-  // Avoid: per-byte `% 256` on a Nat (fresh bignum per iteration, ~12 KB)
-  // and Nat32 quarters (doubles the bignum divisions, measured worse).
+  // Split into two Nat64 limbs WITHOUT bignum division: Nat64.fromIntWrap
+  // takes the value mod 2^64 (= the low limb, exact for Nat) and
+  // Prim.shiftRight(v, 64) yields the high limb — bignum % and / by 2^64
+  // allocate ~0.8 KB of internal temporaries for a 96-bit cumWork, the
+  // wrap+shift split doesn't. Then explode each limb into its 8 bytes in
+  // one prim call (most-significant byte first); byte extraction is free
+  // either way (Nat64 locals are unboxed). Avoid: per-byte `% 256` on a
+  // Nat (fresh bignum per iteration, ~12 KB) and Nat32 quarters (measured
+  // worse).
   func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
-    let (l7, l6, l5, l4, l3, l2, l1, l0) = Prim.explodeNat64(Nat64.fromNat(v % 0x1_0000_0000_0000_0000));
-    let (h7, h6, h5, h4, h3, h2, h1, h0) = Prim.explodeNat64(Nat64.fromNat(v / 0x1_0000_0000_0000_0000));
+    let (l7, l6, l5, l4, l3, l2, l1, l0) = Prim.explodeNat64(Nat64.fromIntWrap(v));
+    let (h7, h6, h5, h4, h3, h2, h1, h0) = Prim.explodeNat64(Nat64.fromIntWrap(Prim.shiftRight(v, 64)));
     buf[off] := l0; buf[off + 1] := l1; buf[off + 2] := l2; buf[off + 3] := l3;
     buf[off + 4] := l4; buf[off + 5] := l5; buf[off + 6] := l6; buf[off + 7] := l7;
     buf[off + 8] := h0; buf[off + 9] := h1; buf[off + 10] := h2; buf[off + 11] := h3;
@@ -112,7 +113,7 @@ module {
       lo := (lo << 8) | Nat64.fromNat(b[off + i].toNat());
       hi := (hi << 8) | Nat64.fromNat(b[off + 8 + i].toNat());
     };
-    Nat64.toNat(hi) * 0x1_0000_0000_0000_0000 + Nat64.toNat(lo);
+    Prim.shiftLeft(Nat64.toNat(hi), 64) + Nat64.toNat(lo);
   };
 
   // ---------------------------------------------------------------------
