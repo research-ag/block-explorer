@@ -103,6 +103,12 @@ persistent actor HeaderFetcher {
   // system-metrics bundle.
   // ------------------------------------------------------------------
   let pt = PT.Tracker.new();
+  // Hold-down 62 s (default 302). `pt` is STABLE (counters survive
+  // upgrades), so a value passed to the initializer would be pinned at
+  // install time — this statement re-runs on every start, applying the
+  // current code's value to fresh installs AND upgrades alike. (Hold-down
+  // only affects gauge watermarks; today this tracker holds only counters.)
+  PT.Tracker.setHoldDown(pt, 62);
   transient let renderer = PT.Renderer();
   renderer.addCanisterLabel(HeaderFetcher);
   renderer.addValue(PT.allSystemMetrics);
