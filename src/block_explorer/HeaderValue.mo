@@ -62,9 +62,12 @@ module {
     buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
   };
 
-  // Split into two Nat64 limbs first (2 bignum ops), then extract bytes with
-  // machine-word shifts — per-byte `% 256` / `/= 256` on a Nat allocates a
-  // fresh bignum every iteration.
+  // Split into two Nat64 limbs first (2 bignum ops), then extract bytes
+  // with machine-word shifts. Per-byte `% 256` / `/= 256` on a Nat
+  // allocates a fresh bignum every iteration. (Nat32 quarters measured
+  // WORSE: full-range Nat32 values are heap-boxed just like Nat64 —
+  // Motoko's compact scalars are 31-bit — and quartering doubles the
+  // bignum divisions.)
   func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
     let lo = Nat64.fromNat(v % 0x1_0000_0000_0000_0000);
     let hi = Nat64.fromNat(v / 0x1_0000_0000_0000_0000);
@@ -126,6 +129,34 @@ module {
     writeLE32(mut, 52, Nat32.fromNat(f.height));
     writeLE128(mut, 56, f.cumWork);
     writeLE32(mut, 72, f.firstSeen);
+    Blob.fromVarArray(mut);
+  };
+
+  // Encode straight from the raw 80-byte header: version (raw[0..4)) and
+  // the contiguous merkle|time|bits|nonce run (raw[36..80)) are copied as
+  // bytes — no parse, no Nat32 round trips. Only the computed fields
+  // (firstTxIndex, height, cumWork, firstSeen) are serialized. The value
+  // layout was chosen to make these two copies possible.
+  public func encodeFromRaw(raw : Blob, firstTxIndex : Nat, height : Nat, cumWork : Nat, firstSeen : Nat32) : Blob {
+    let mut = VarArray.repeat<Nat8>(0, SIZE);
+    var i = 0;
+    while (i < 4) { mut[i] := raw[i]; i += 1 }; // version
+    writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
+    var j = 0;
+    while (j < 44) { mut[8 + j] := raw[36 + j]; j += 1 }; // merkle|time|bits|nonce
+    writeLE32(mut, 52, Nat32.fromNat(height));
+    writeLE128(mut, 56, cumWork);
+    writeLE32(mut, 72, firstSeen);
+    Blob.fromVarArray(mut);
+  };
+
+  // Copy of `b` with only firstTxIndex (bytes 4..8) replaced — a byte-level
+  // patch, not a decode/re-encode of all nine fields.
+  public func withFirstTxIndex(b : Blob, f : Nat) : Blob {
+    let mut = VarArray.repeat<Nat8>(0, SIZE);
+    var i = 0;
+    while (i < SIZE) { mut[i] := b[i]; i += 1 };
+    writeLE32(mut, 4, Nat32.fromNat(f));
     Blob.fromVarArray(mut);
   };
 

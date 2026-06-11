@@ -255,3 +255,12 @@ do {
 
   measure("bytesToHexBE (PushOk hex)", 1000, func(_) { ignore Header.bytesToHex(Header.reverse32(hash0)) });
 };
+
+// ---- byte-copy encode variants ----
+do {
+  let v = HeaderValue.encodeFromRaw(raws[0], 0, 300000, 0x7000_0000_0000_0000_0000_0000, 0);
+  measure("encodeFromRaw (byte copy)", 1000, func(_) {
+    ignore HeaderValue.encodeFromRaw(raws[0], 0, 300000, 0x7000_0000_0000_0000_0000_0000, 0);
+  });
+  measure("withFirstTxIndex (patch) ", 1000, func(_) { ignore HeaderValue.withFirstTxIndex(v, 12345) });
+};

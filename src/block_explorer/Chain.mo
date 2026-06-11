@@ -262,17 +262,7 @@ module {
     };
     let hash = Header.headerHashBlob(sha, raw);
     let work = targetWorkFor(self, parsed.bits).1;
-    let value = HeaderValue.encode({
-      version = parsed.version;
-      firstTxIndex = 0;
-      merkle = parsed.merkle;
-      time = parsed.time;
-      bits = parsed.bits;
-      nonce = parsed.nonce;
-      height = 0;
-      cumWork = work;
-      firstSeen = firstSeenSecs;
-    });
+    let value = HeaderValue.encodeFromRaw(raw, 0, 0, work, firstSeenSecs);
     let idx = Headers.add(self.headerTrie, hash, value);
     assert idx == 0;
     Uploaders.record(self.uploaders, hash, uploader);
@@ -733,6 +723,7 @@ module {
 
   func storeAndMaybeReorg(
     self : State,
+    raw : Blob,
     parsed : Header.Parsed,
     hash : Blob,
     parent : ParentInfo,
@@ -749,17 +740,9 @@ module {
     var reorgDepth : Nat = 0;
 
     if (parent.isCanonical and parent.height == tipHeight(self)) {
-      let value = HeaderValue.encode({
-        version = parsed.version;
-        firstTxIndex = 0;
-        merkle = parsed.merkle;
-        time = parsed.time;
-        bits = parsed.bits;
-        nonce = parsed.nonce;
-        height = newHeight;
-        cumWork;
-        firstSeen = firstSeenSecs;
-      });
+      // version and merkle|time|bits|nonce are copied straight from the raw
+      // header bytes — no re-serialization of parsed fields.
+      let value = HeaderValue.encodeFromRaw(raw, 0, newHeight, cumWork, firstSeenSecs);
       ignore Headers.add(self.headerTrie, hash, value);
       pushRecentTime(self, parsed.time);
       self.tipWork := cumWork;
@@ -833,7 +816,7 @@ module {
       case (#ok()) {};
     };
     let firstSeen = nat32OfNowSecs(nowSecs);
-    #ok(storeAndMaybeReorg(self, parsed, hash, parent, firstSeen, uploader, nowSecs));
+    #ok(storeAndMaybeReorg(self, raw, parsed, hash, parent, firstSeen, uploader, nowSecs));
   };
 
   public func pushUnchecked(self : State, sha : Sha256.Digest, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
@@ -851,7 +834,7 @@ module {
       case (?p) p;
       case null return #err("unknown previous block hash");
     };
-    #ok(storeAndMaybeReorg(self, parsed, hash, parent, nat32OfNowSecs(nowSecs), uploader, nowSecs));
+    #ok(storeAndMaybeReorg(self, raw, parsed, hash, parent, nat32OfNowSecs(nowSecs), uploader, nowSecs));
   };
 
   // ---------------------------------------------------------------------
@@ -1011,21 +994,6 @@ module {
     n;
   };
 
-  // Re-encode a header value with a new firstTxIndex (F); other fields kept.
-  func withFirstTxIndex(value : Blob, f : Nat) : Blob {
-    HeaderValue.encode({
-      version = HeaderValue.versionOf(value);
-      firstTxIndex = f;
-      merkle = HeaderValue.merkleOf(value);
-      time = HeaderValue.timeOf(value);
-      bits = HeaderValue.bitsOf(value);
-      nonce = HeaderValue.nonceOf(value);
-      height = HeaderValue.heightOf(value);
-      cumWork = HeaderValue.cumWorkOf(value);
-      firstSeen = HeaderValue.firstSeenOf(value);
-    });
-  };
-
   // Read txids stored in the canonical trie at indices [lo, hi) into a flat
   // blob (moves a demoted block's body into the fork store).
   func extractTxids(self : State, lo : Nat, hi : Nat) : Blob {
@@ -1045,7 +1013,7 @@ module {
   // trie, setting its F and recording a BIP30 override on cross-block dup txids.
   func appendCanonicalBody(self : State, height : Nat, value : Blob, body : Blob) {
     let f = StableTrie.size(self.txTrie);
-    Headers.put(self.headerTrie, height, withFirstTxIndex(value, f));
+    Headers.put(self.headerTrie, height, HeaderValue.withFirstTxIndex(value, f));
     let n = body.size() / 32;
     let hv = encodeHeight(height);
     var i = 0;

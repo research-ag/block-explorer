@@ -183,6 +183,9 @@ module {
   // Interpret a little-endian Blob as a Nat. Assembles via Nat64 limbs:
   // per-byte `acc * 256 + b` allocates a fresh, growing bignum every
   // iteration (~7 KB for 32 bytes); limbs cut that to a handful of ops.
+  // (Nat32 limbs measured WORSE: full-range Nat32 values are heap-boxed
+  // just like Nat64 — compact scalars are 31-bit — and halving the limb
+  // width doubles the bignum combines.)
   public func leBytesToNat(h : Blob) : Nat {
     let TWO_POW_64 : Nat = 0x1_0000_0000_0000_0000;
     func limbAt(lo : Nat, width : Nat) : Nat64 {
