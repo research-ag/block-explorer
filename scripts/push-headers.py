@@ -180,6 +180,14 @@ def main():
               + (f"  err={err}" if err else ""))
         pushed += accepted
         cursor += accepted
+        # "heap limit reached" is the one retryable last_error: the canister
+        # stopped the batch to bound heap growth within a single message, and
+        # the GC reclaims that garbage between messages. Continue from where
+        # it stopped (cursor already advanced by `accepted`). Every other
+        # error is a hard rejection that would fail identically on retry.
+        if err and err.startswith("heap limit reached") and accepted > 0:
+            print(f"  canister heap limit; continuing from height {cursor}")
+            continue
         if accepted < len(headers) or err:
             print(f"Stopping after {pushed} accepted headers.")
             sys.exit(1 if err else 0)
