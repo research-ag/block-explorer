@@ -377,6 +377,13 @@ def drain_batch(args, indexed):
             pending = orphans
             continue
 
+        if err and err.startswith("heap limit reached"):
+            # Retryable: the canister paused the batch to bound heap growth;
+            # to_push[accepted] was NOT rejected. Re-queue everything
+            # unprocessed and go around again.
+            pending = list(to_push[accepted:]) + orphans
+            continue
+
         # Partial / total failure. The canister stops at the first bad
         # header in the batch, so to_push[accepted] is the offender.
         offender_idx, offender_raw = to_push[accepted]
