@@ -71,7 +71,11 @@ persistent actor BlockExplorer {
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
   // next message. Callers learn how far the batch got from the result's
   // accepted/duplicate counts and retry the rest later.
-  let HEAP_LIMIT : Nat = 1_073_741_824; // 1 GiB
+  //
+  // Constants are `transient` so upgrades pick up new values from the code —
+  // a plain `let` in a persistent actor is stable and would silently keep
+  // the value the canister was installed with.
+  transient let HEAP_LIMIT : Nat = 1_073_741_824; // 1 GiB
 
   func heapExceeded() : Bool = Prim.rts_heap_size() >= HEAP_LIMIT;
 
@@ -106,7 +110,7 @@ persistent actor BlockExplorer {
   transient let bitcoin_canister : BitcoinCanister = actor ("ghsi2-tqaaa-aaaan-aaaca-cai");
 
   var cyclesPerCall : Nat = 10_000_000_000;
-  let MAX_BATCH : Nat = 100;
+  transient let MAX_BATCH : Nat = 100;
 
   // ---------------------------------------------------------------------
   // Chain state.
@@ -216,7 +220,7 @@ persistent actor BlockExplorer {
   // Maximum headers per push_headers call.
   // 20_000 * 80 = 1_600_000 bytes of raw header data (under the 2 MB
   // ingress message limit).
-  let MAX_PUSH_BATCH : Nat = 20_000;
+  transient let MAX_PUSH_BATCH : Nat = 20_000;
 
   // Standard single push: raw 80-byte header in, raw hash out.
   public shared ({ caller }) func push_header(raw_header : Blob) : async Result.Result<Chain.PushOk, Text> {
@@ -665,7 +669,7 @@ persistent actor BlockExplorer {
   // Batched membership check. Used by client-side pre-filters to avoid
   // shipping headers whose hash is already stored or whose parent is
   // unknown. Returns one Bool per input, in the same order.
-  let MAX_HAVE_HASHES : Nat = 50_000;
+  transient let MAX_HAVE_HASHES : Nat = 50_000;
   public query func have_hashes(hashes_be_hex : [Text]) : async [Bool] {
     if (hashes_be_hex.size() > MAX_HAVE_HASHES) {
       // Best-effort: trap rather than silently truncate.

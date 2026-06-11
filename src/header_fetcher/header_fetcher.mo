@@ -239,7 +239,10 @@ persistent actor HeaderFetcher {
     detail : Text;
   };
 
-  let LOG_CAPACITY : Nat = 50;
+  // Transient: a plain `let` would be stable and pin the installed value
+  // across upgrades. The ring buffer itself persists, so wrap-around math
+  // follows logBuf.size(), not this constant.
+  transient let LOG_CAPACITY : Nat = 50;
   var logBuf : [var ?LogEntry] = [var];
   var logNext : Nat = 0;
   var logCount : Nat = 0;
@@ -304,7 +307,7 @@ persistent actor HeaderFetcher {
       outcome;
       detail;
     };
-    logNext := (logNext + 1) % LOG_CAPACITY;
+    logNext := (logNext + 1) % logBuf.size();
     logCount += 1;
 
     let ok = switch outcome { case (#ok) true; case _ false };
