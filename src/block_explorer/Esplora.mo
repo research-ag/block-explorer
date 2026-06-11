@@ -122,7 +122,7 @@ module {
   // Render a stored block in Esplora's `/block/:hash` schema, omitting
   // `tx_count`, `size`, `weight` (we don't have transaction data).
   // Genesis (height 0) omits `previousblockhash` to match Esplora.
-  func blockJson(chain : Chain.Chain, b : Chain.StoredBlock) : Text {
+  func blockJson(chain : Chain.State, b : Chain.StoredBlock) : Text {
     let v = b.value;
     let bits = HeaderValue.bitsOf(v);
     let target = Header.nBitsToTarget(bits);
@@ -138,7 +138,7 @@ module {
     out #= quoted("timestamp") # ":" # Nat32.toText(HeaderValue.timeOf(v)) # ",";
     out #= quoted("merkle_root") # ":" # quoted(merkleHex) # ",";
     if (b.height > 0) {
-      let prevHex = Header.bytesToHex(Header.reverse32(chain.prevHashOf(b)));
+      let prevHex = Header.bytesToHex(Header.reverse32(Chain.prevHashOf(b)));
       out #= quoted("previousblockhash") # ":" # quoted(prevHex) # ",";
     };
     out #= quoted("mediantime") # ":" # Nat32.toText(mediantime) # ",";
@@ -149,8 +149,8 @@ module {
     out;
   };
 
-  func statusJson(chain : Chain.Chain, b : Chain.StoredBlock) : Text {
-    let inBest = chain.isOnCanonical(b);
+  func statusJson(chain : Chain.State, b : Chain.StoredBlock) : Text {
+    let inBest = Chain.isOnCanonical(b);
     var out = "{";
     out #= quoted("in_best_chain") # ":" # (if (inBest) "true" else "false") # ",";
     out #= quoted("height") # ":" # Nat.toText(b.height);
@@ -167,7 +167,7 @@ module {
     out;
   };
 
-  func blocksListJson(chain : Chain.Chain, startHeight : Nat) : Text {
+  func blocksListJson(chain : Chain.State, startHeight : Nat) : Text {
     let n : Nat = if (startHeight + 1 < 10) startHeight + 1 else 10;
     var out = "[";
     var i : Nat = 0;
@@ -194,7 +194,7 @@ module {
   // lazily by main.mo when the route matches `/metrics`). Passing a
   // thunk avoids the cost when serving Esplora routes.
   public func handle(
-    chain : Chain.Chain,
+    chain : Chain.State,
     metricsBody : () -> Text,
     req : Request,
   ) : Response {
@@ -256,7 +256,7 @@ module {
       };
       if (p.size() == 2) return json(200, blockJson(chain, b));
       if (p.size() == 3 and p[2] == "header") {
-        return plain(200, Header.bytesToHex(chain.rawHeaderOf(b)));
+        return plain(200, Header.bytesToHex(Chain.rawHeaderOf(b)));
       };
       if (p.size() == 3 and p[2] == "status") {
         return json(200, statusJson(chain, b));

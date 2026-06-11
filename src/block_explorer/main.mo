@@ -9,8 +9,9 @@
 // tracked; the canonical chain is whichever fork has the most cumulative
 // proof-of-work.
 //
-// The full chain state is a single stable record (`Chain.Chain`) — no
-// snapshot, share/unshare, or pre/post-upgrade hooks are needed.
+// All chain state lives in top-level stable `let`s (the two tries plus a
+// `Chain.State` bundle); EOP persists them directly, so no share/unshare or
+// pre/post-upgrade hooks are needed.
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
@@ -24,9 +25,11 @@ import Runtime "mo:core/Runtime";
 import Time "mo:core/Time";
 
 import PT "mo:promtracker";
+import StableTrie "mo:stable-trie/Enumeration";
 
 import Header "Header";
 import HeaderValue "HeaderValue";
+import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
 
@@ -75,14 +78,21 @@ persistent actor BlockExplorer {
   // ---------------------------------------------------------------------
   // Chain state.
   //
-  // The Chain class wraps a stable mo:stable-trie HeaderDb plus a
-  // stable canonical-chain Region plus EOP-stable heap Maps. The class
-  // instance itself is transient (heap-bound trie bookkeeping); we
-  // share/unshare it across upgrades through `chainData`.
+  // All chain state is held in top-level stable `let`s — the two stable-trie
+  // Enumerations directly, and the heap structures bundled into `chain :
+  // Chain.State` (see Chain.mo). There is no class, no share/unshare and no
+  // pre/postupgrade hook: a top-level `let` initializer runs ONLY on fresh
+  // install, so on upgrade EOP restores each value as-is. Operations use
+  // dot-notation, e.g. `chain.push(...)` == `Chain.push(chain, ...)`.
   // ---------------------------------------------------------------------
 
-  var chainData : ?Chain.StableData = null;
-  transient let chain : Chain.Chain = Chain.Chain(28, Chain.TX_ROOT_ARIDITY);
+  // Single top-level stable root. The two tries are fields (chain.headerTrie /
+  // chain.txTrie); building them inline keeps each trie referenced from exactly
+  // one place.
+  let chain : Chain.State = Chain.newState(
+    Chain.newHeaderTrie(Headers.KEY_SIZE),
+    Chain.newTxTrie(Chain.TX_ROOT_ARIDITY),
+  );
 
   func nowSecs() : Int { Time.now() / 1_000_000_000 };
   func nowSecsNat32() : Nat32 {
@@ -90,28 +100,23 @@ persistent actor BlockExplorer {
     if (s <= 0) 0 else Nat32.fromNat(Int.abs(s) % 0x1_0000_0000);
   };
 
-  switch (chainData) {
-    case (?d) chain.unshare(d);
-    case null chain.initGenesis(nowSecsNat32(), Principal.fromActor(BlockExplorer));
+  // Fresh install only: seed genesis. Runs on every actor start, but the
+  // `initialized` guard (persisted) makes it a no-op after the first install.
+  if (not chain.initialized) {
+    Chain.initGenesis(chain, nowSecsNat32(), Principal.fromActor(BlockExplorer));
   };
 
-  system func preupgrade() {
-    chainData := ?chain.share();
-  };
-
-  // Chain-level pull values, registered now that `chain` exists.
-  // All read from `chain` directly so the metric output is always
-  // consistent with what the canister currently sees.
+  // Chain-level pull values, read from `chain` directly so the metric output
+  // is always consistent with what the canister currently sees.
   renderer.addValue(PT.newValue("headers_total", [], func() = chain.size()));
   renderer.addValue(PT.newValue("tip_height", [], func() = chain.tipHeight()));
   renderer.addValue(PT.newValue("bodies_height", [], func() = chain.bodiesHeight()));
   renderer.addValue(PT.newValue("uploader_count", [], func() = chain.uploaderStats().size()));
-  // Memory stats of both stable-trie Enumerations, via each trie's
-  // promtracker `Value` (stable_trie_node_count / _leaf_count / _byte_size
-  // families, with a kind="used"|"total" label), distinguished by a
-  // `trie` label.
-  renderer.addValue(PT.bundle([chain.headerTrieValue()], [("trie", "headers")]));
-  renderer.addValue(PT.bundle([chain.txTrieValue()], [("trie", "txids")]));
+  // Memory stats of both stable-trie Enumerations (stable_trie_node_count /
+  // _leaf_count / _byte_size families, with a kind="used"|"total" label),
+  // distinguished by a `trie` label.
+  renderer.addValue(PT.bundle([StableTrie.toValue(chain.headerTrie)], [("trie", "headers")]));
+  renderer.addValue(PT.bundle([StableTrie.toValue(chain.txTrie)], [("trie", "txids")]));
   // Heap data-structure stats: fork-store sizes and reorg history
   // (chain_fork_* / chain_reorg_* families), computed once per scrape.
   renderer.addValue(chain.heapStatsValue());
@@ -141,7 +146,7 @@ persistent actor BlockExplorer {
     let bits = HeaderValue.bitsOf(v);
     let target = Header.nBitsToTarget(bits);
     let difficulty_x1e8 : Nat = if (target == 0) 0 else Header.POW_LIMIT_TARGET * 100_000_000 / target;
-    let prevHashLE = chain.prevHashOf(b);
+    let prevHashLE = Chain.prevHashOf(b);
     let merkleLE = HeaderValue.merkleOf(v);
     {
       height = b.height;
@@ -574,7 +579,7 @@ persistent actor BlockExplorer {
     };
     let siblings_ : [BlockInfo] = Array.map<Chain.StoredBlock, BlockInfo>(
       chain.allAt(h),
-      func(b) = toBlockInfo(b, chain.isOnCanonical(b)),
+      func(b) = toBlockInfo(b, Chain.isOnCanonical(b)),
     );
     {
       tip = toBlockInfo(tipBlock, true);
@@ -588,7 +593,7 @@ persistent actor BlockExplorer {
   // Single-block lookup by hash (for the search box).
   public query func get_by_hash(hash_be_hex : Text) : async ?BlockInfo {
     switch (chain.byHashBE(hash_be_hex)) {
-      case (?b) ?toBlockInfo(b, chain.isOnCanonical(b));
+      case (?b) ?toBlockInfo(b, Chain.isOnCanonical(b));
       case null null;
     };
   };
@@ -657,7 +662,7 @@ persistent actor BlockExplorer {
       hashes.size(),
       func(i) {
         switch (chain.byHashInternal(hashes[i])) {
-          case (?b) toBlockInfo(b, chain.isOnCanonical(b));
+          case (?b) toBlockInfo(b, Chain.isOnCanonical(b));
           case null Runtime.trap(
             "blocks_by_uploader: hash " # debug_show hashes[i] # " missing"
           );

@@ -36,13 +36,13 @@ let ANON : Principal = Principal.fromText("2vxsx-fae");
 
 // Full 32-byte keys so synthetic (non-PoW) headers store without
 // tripping the production trailing-zero truncation invariant.
-func newChain() : Chain.Chain = Chain.emptyForTest();
+func newChain() : Chain.State = Chain.emptyForTest();
 
 func isErr(r : Result.Result<Chain.PushOk, Text>) : Bool {
   switch r { case (#err _) true; case _ false };
 };
 
-func push(c : Chain.Chain, raw : Blob) : Result.Result<Chain.PushOk, Text> =
+func push(c : Chain.State, raw : Blob) : Result.Result<Chain.PushOk, Text> =
   c.pushUnchecked(raw, FUTURE_NOW, UPLOADER);
 
 // --- Synthetic-header builder --------------------------------------------
@@ -100,7 +100,7 @@ func txids(bs : [Nat8]) : Blob {
   );
 };
 
-func canon0(c : Chain.Chain) : Chain.StoredBlock {
+func canon0(c : Chain.State) : Chain.StoredBlock {
   switch (c.canonicalAt(0)) {
     case (?b) b;
     case null Runtime.trap("no genesis");
@@ -321,7 +321,7 @@ suite(
 
         // exactly one canonical block at height 3
         var canon = 0;
-        for (b in c.allAt(3).vals()) if (c.isOnCanonical(b)) canon += 1;
+        for (b in c.allAt(3).vals()) if (Chain.isOnCanonical(b)) canon += 1;
         assert canon == 1;
 
         // Reorg log records the event.
