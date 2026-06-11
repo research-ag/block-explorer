@@ -22,8 +22,8 @@ import sys
 import tempfile
 
 HEADER_SIZE = 80
-DEFAULT_BATCH = 1000
-MAX_BATCH = 10_000  # must match MAX_PUSH_BATCH in src/block_explorer/main.mo
+DEFAULT_BATCH = 12_500
+MAX_BATCH = 20_000  # must match MAX_PUSH_BATCH in src/block_explorer/main.mo
 
 
 def run_icp(args, capture=True):

@@ -214,8 +214,9 @@ persistent actor BlockExplorer {
   };
 
   // Maximum headers per push_headers call.
-  // 10_000 * 80 = 800_000 bytes of raw header data.
-  let MAX_PUSH_BATCH : Nat = 10_000;
+  // 20_000 * 80 = 1_600_000 bytes of raw header data (under the 2 MB
+  // ingress message limit).
+  let MAX_PUSH_BATCH : Nat = 20_000;
 
   // Standard single push: raw 80-byte header in, raw hash out.
   public shared ({ caller }) func push_header(raw_header : Blob) : async Result.Result<Chain.PushOk, Text> {
