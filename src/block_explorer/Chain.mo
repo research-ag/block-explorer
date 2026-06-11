@@ -145,9 +145,10 @@ module {
   public let TX_ROOT_ARIDITY : Nat = 268_435_456;
 
   // Header trie: 28-byte (or 32 for tests) keys -> 76-byte HeaderValue blobs;
-  // root_aridity 4^9 (~1 MB root).
+  // root_aridity 4^9 (root region 262144 x 3 = 768 KB). pointer_size 3 caps
+  // the trie at 2^23 ≈ 8.4 M headers — ~140 years of blocks at 144/day.
   public func newHeaderTrie(keySize : Nat) : StableTrie.Enumeration = StableTrie.empty({
-    pointer_size = 4;
+    pointer_size = 3;
     aridity = 4;
     root_aridity = ?262144; // = 4^9
     key_size = keySize;
