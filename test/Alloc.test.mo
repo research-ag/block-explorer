@@ -12,6 +12,8 @@ import Chain "../src/block_explorer/Chain";
 import Header "../src/block_explorer/Header";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Sha256 "mo:sha2/Sha256";
+import Headers_ "../src/block_explorer/Headers";
+import Uploaders_ "../src/block_explorer/Uploaders";
 
 let SHA = Sha256.Digest(#sha256);
 
@@ -223,4 +225,33 @@ do {
   measure("writeBlob(80B) on reused  ", 1000, func(_) { d.reset(); d.writeBlob(raw) });
   measure("reset+write+sum on reused ", 1000, func(_) { d.reset(); d.writeBlob(raw); ignore d.sum() });
   measure("fromBlob (fresh Digest)   ", 1000, func(_) { ignore Sha256.fromBlob(#sha256, raw) });
+};
+
+// ---- remaining push components: trie add, uploader, lookups, result hex ----
+do {
+  // Headers.add into a growing trie (32-byte keys so synthetic keys work)
+  let trie = Chain.newHeaderTrie(32);
+  let val76 = HeaderValue.encode({
+    version = 2; firstTxIndex = 0; merkle = hash0; time = 1; bits = 0x1d00ffff;
+    nonce = 0; height = 1; cumWork = 0x7000_0000_0000_0000_0000_0000; firstSeen = 0;
+  });
+  var seed : Nat32 = 1;
+  func synthKey() : Blob {
+    seed +%= 0x9e3779b9;
+    let d2 = Sha256.Digest(#sha256);
+    d2.writeBlob(Prim.encodeUtf8(debug_show seed));
+    d2.sum();
+  };
+  // pre-generate keys outside the measurement
+  let keys = Prim.Array_tabulate<Blob>(1000, func(_) = synthKey());
+  let missKeys = Prim.Array_tabulate<Blob>(1000, func(_) = synthKey());
+  measure("Headers.add (trie insert)", 1000, func(i) { ignore Headers_.add(trie, keys[i], val76) });
+  measure("Headers.lookup MISS (dup check)", 1000, func(i) { ignore Headers_.lookup(trie, missKeys[i]) });
+  measure("Headers.lookup HIT       ", 1000, func(i) { ignore Headers_.lookup(trie, keys[i]) });
+
+  let ups = Uploaders_.empty();
+  let P = Principal.fromText("5yxw4-okdhg-twoqv-qjshi-uammo-kn5yg-guwus-r3u4m-codgm-3lle6-oae");
+  measure("Uploaders.record         ", 1000, func(i) { Uploaders_.record(ups, keys[i], P) });
+
+  measure("bytesToHexBE (PushOk hex)", 1000, func(_) { ignore Header.bytesToHex(Header.reverse32(hash0)) });
 };
