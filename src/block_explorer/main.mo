@@ -71,7 +71,7 @@ persistent actor BlockExplorer {
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
   // next message. Callers learn how far the batch got from the result's
   // accepted/duplicate counts and retry the rest later.
-  let HEAP_LIMIT : Nat = 2_147_483_648; // 2 GiB
+  let HEAP_LIMIT : Nat = 1_073_741_824; // 1 GiB
 
   func heapExceeded() : Bool = Prim.rts_heap_size() >= HEAP_LIMIT;
 
@@ -686,7 +686,7 @@ persistent actor BlockExplorer {
   public query func header_db_memory_stats() : async StableTrieStats {
     let m = chain.memoryStats();
     {
-      byte_size = m.byte_size;
+      byte_size = m.total_bytes; // renamed in stable-trie 0.1.4; candid field kept
       leaf_count = m.used_leaf_count;
       node_count = m.used_node_count;
     };
