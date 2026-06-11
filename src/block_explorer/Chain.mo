@@ -137,7 +137,20 @@ module {
     // sync on every canonical append / reorg so the per-push MTP check never
     // reads the header trie.
     var recentTimes : [Nat32];
+    // Single-entry memo of the nBits -> (target, per-block work) conversion.
+    // bits is constant within a 2016-block difficulty period, so this hits
+    // on every push except the first of each period, avoiding a 2^256
+    // bignum division (chainWork) and an nBitsToTarget per header. The
+    // initial { bits = 0; ... } sentinel is itself semantically correct
+    // (nBitsToTarget(0) == 0, chainWork(0) == 0).
+    var workMemo : WorkMemo;
     var initialized : Bool;
+  };
+
+  public type WorkMemo = {
+    bits : Nat32;
+    target : Nat; // nBitsToTarget(bits)
+    work : Nat; // chainWork(bits) = 2^256 / (target + 1)
   };
 
   // ---------------------------------------------------------------------
@@ -183,6 +196,7 @@ module {
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var recentTimes = [];
+    var workMemo = { bits = 0 : Nat32; target = 0; work = 0 };
     var initialized = false;
   };
 
@@ -242,7 +256,7 @@ module {
       case null Runtime.trap("root header invalid");
     };
     let hash = Header.headerHashBlob(raw);
-    let work = Header.chainWork(parsed.bits);
+    let work = targetWorkFor(self, parsed.bits).1;
     let value = HeaderValue.encode({
       version = parsed.version;
       firstTxIndex = 0;
@@ -309,6 +323,18 @@ module {
     let tip = tipHeight(self);
     let count = if (tip + 1 < MTP_WINDOW) tip + 1 else MTP_WINDOW;
     self.recentTimes := Array.tabulate<Nat32>(count, func(i) = canonTimeAt(self, tip - i));
+  };
+
+  // (target, per-block work) for `bits`, via the single-entry memo. bits is
+  // constant within a difficulty period, so the 2^256 division happens once
+  // per 2016 blocks instead of once per header.
+  func targetWorkFor(self : State, bits : Nat32) : (Nat, Nat) {
+    let memo = self.workMemo;
+    if (bits == memo.bits) return (memo.target, memo.work);
+    let target = Header.nBitsToTarget(bits);
+    let work = if (target == 0) 0 else Header.TWO_POW_256 / (target + 1);
+    self.workMemo := { bits; target; work };
+    (target, work);
   };
 
   func storedCanonAt(self : State, idx : Nat) : StoredBlock {
@@ -710,7 +736,7 @@ module {
     now : Int,
   ) : PushOk {
     let newHeight = parent.height + 1;
-    let cumWork = parent.cumWork + Header.chainWork(parsed.bits);
+    let cumWork = parent.cumWork + targetWorkFor(self, parsed.bits).1;
 
     Uploaders.record(self.uploaders, hash, uploader);
 
@@ -794,7 +820,10 @@ module {
     let stamps = lastTimestampsFrom(self, parent.hash, parent.height, parent.isCanonical, if (newHeight < MTP_WINDOW) newHeight else MTP_WINDOW);
     let mtp = Header.medianTimePast(stamps);
 
-    switch (Header.validateParsed(parsed, hash, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
+    // Decode the header's own target once via the memo (bits is constant
+    // within a difficulty period); the PoW check reuses it.
+    let (target, _) = targetWorkFor(self, parsed.bits);
+    switch (Header.validateParsed(parsed, hash, target, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };

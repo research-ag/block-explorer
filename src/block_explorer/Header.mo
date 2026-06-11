@@ -297,8 +297,9 @@ module {
     if (parsed.prev_hash == prevHash) #ok() else #err("prev_block_hash mismatch");
   };
 
-  public func checkPoW(headerHashLE : Blob, bits : Nat32) : Result.Result<(), Text> {
-    let target = nBitsToTarget(bits);
+  // PoW check against an already-decoded target (callers with a per-period
+  // bits -> target memo avoid re-running nBitsToTarget per header).
+  public func checkPoWTarget(headerHashLE : Blob, target : Nat) : Result.Result<(), Text> {
     if (target == 0 or target > POW_LIMIT_TARGET) {
       return #err("nBits out of range");
     };
@@ -306,6 +307,10 @@ module {
       return #err("proof-of-work failed");
     };
     #ok();
+  };
+
+  public func checkPoW(headerHashLE : Blob, bits : Nat32) : Result.Result<(), Text> {
+    checkPoWTarget(headerHashLE, nBitsToTarget(bits));
   };
 
   public func checkBits(actualBits : Nat32, expectedBits : Nat32) : Result.Result<(), Text> {
@@ -328,11 +333,13 @@ module {
   //
   // `expectedBits` is precomputed by the caller (either prev.bits, or
   // computeRetargetNBits at a 2016-boundary). Takes the already-parsed
-  // header and its already-computed hash so hot callers don't parse or
-  // sha256d the same 80 bytes twice.
+  // header, its already-computed hash, and the already-decoded target of
+  // parsed.bits, so hot callers don't parse, sha256d, or nBitsToTarget the
+  // same header twice.
   public func validateParsed(
     parsed : Parsed,
     headerHashLE : Blob,
+    target : Nat, // = nBitsToTarget(parsed.bits)
     expectedBits : Nat32,
     prevHashLE : Blob,
     mtp : Nat32,
@@ -346,7 +353,7 @@ module {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
-    switch (checkPoW(headerHashLE, parsed.bits)) {
+    switch (checkPoWTarget(headerHashLE, target)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
@@ -375,7 +382,7 @@ module {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    validateParsed(parsed, headerHashBlob(header), expectedBits, prevHashLE, mtp, nowSecs);
+    validateParsed(parsed, headerHashBlob(header), nBitsToTarget(parsed.bits), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };
