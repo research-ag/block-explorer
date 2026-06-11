@@ -1,20 +1,25 @@
-// 76-byte value blob stored in the canonical header trie.
+// 80-byte value blob stored in the canonical header trie.
 //
-// Layout (all integers little-endian):
+// The layout IS the raw 80-byte Bitcoin header, except the 32-byte
+// prev_hash window (raw bytes [4..36)) is repurposed for our computed
+// fields — so encoding is "copy the raw header, patch one window", and
+// reconstructing the raw header is the inverse patch.
 //
-//   off | bytes | field
-//  -----+-------+-----------------------------------------------
-//     0 |     4 | version          (Nat32)
-//     4 |     4 | firstTxIndex (F) (Nat32)
-//     8 |    32 | merkle root      (raw, internal LE order)
-//    40 |     4 | time             (Nat32)
-//    44 |     4 | bits             (Nat32)
-//    48 |     4 | nonce            (Nat32)
-//    52 |     4 | height           (Nat32)
-//    56 |    16 | cumWork          (Nat128, LE)
-//    72 |     4 | first seen       (Nat32, unix seconds; wraps in 2106)
+//   off | bytes | field                              | source
+//  -----+-------+------------------------------------+------------------
+//     0 |     4 | version          (Nat32, LE)       | raw, byte-identical
+//     4 |     4 | firstTxIndex (F) (Nat32, LE)       | computed
+//     8 |     4 | height           (Nat32, LE)       | computed
+//    12 |    16 | cumWork          (Nat128, LE)      | computed
+//    28 |     4 | first seen       (Nat32, LE; wraps | computed
+//       |       |   in 2106)                         |
+//    32 |     4 | reserved (zeros)                   | computed
+//    36 |    32 | merkle root (internal LE order)    | raw, byte-identical
+//    68 |     4 | time             (Nat32, LE)       | raw, byte-identical
+//    72 |     4 | bits             (Nat32, LE)       | raw, byte-identical
+//    76 |     4 | nonce            (Nat32, LE)       | raw, byte-identical
 //  -----+-------+
-//    76 total
+//    80 total
 //
 // No prev_hash / parent pointer is stored: the trie holds ONLY the
 // canonical chain, so the parent of the block at trie index `i` is the
@@ -39,7 +44,7 @@ import Prim "mo:⛔";
 
 module {
 
-  public let SIZE : Nat = 76;
+  public let SIZE : Nat = 80;
 
   public type Fields = {
     version : Nat32;
@@ -124,31 +129,41 @@ module {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
     writeLE32(mut, 0, f.version);
     writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
-    writeBlob32(mut, 8, f.merkle);
-    writeLE32(mut, 40, f.time);
-    writeLE32(mut, 44, f.bits);
-    writeLE32(mut, 48, f.nonce);
-    writeLE32(mut, 52, Nat32.fromNat(f.height));
-    writeLE128(mut, 56, f.cumWork);
-    writeLE32(mut, 72, f.firstSeen);
+    writeLE32(mut, 8, Nat32.fromNat(f.height));
+    writeLE128(mut, 12, f.cumWork);
+    writeLE32(mut, 28, f.firstSeen);
+    // bytes 32..36 reserved, already zero
+    writeBlob32(mut, 36, f.merkle);
+    writeLE32(mut, 68, f.time);
+    writeLE32(mut, 72, f.bits);
+    writeLE32(mut, 76, f.nonce);
     Blob.fromVarArray(mut);
   };
 
-  // Encode straight from the raw 80-byte header: version (raw[0..4)) and
-  // the contiguous merkle|time|bits|nonce run (raw[36..80)) are copied as
-  // bytes — no parse, no Nat32 round trips. Only the computed fields
-  // (firstTxIndex, height, cumWork, firstSeen) are serialized. The value
-  // layout was chosen to make these two copies possible.
+  // Encode straight from the raw 80-byte header: copy all 80 bytes, then
+  // patch the prev_hash window [4..36) with the computed fields — no parse,
+  // no field round trips. The reserved bytes [32..36) are explicitly
+  // zeroed (the copy left prev_hash bytes there).
   public func encodeFromRaw(raw : Blob, firstTxIndex : Nat, height : Nat, cumWork : Nat, firstSeen : Nat32) : Blob {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
     var i = 0;
-    while (i < 4) { mut[i] := raw[i]; i += 1 }; // version
+    while (i < SIZE) { mut[i] := raw[i]; i += 1 };
     writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
+    writeLE32(mut, 8, Nat32.fromNat(height));
+    writeLE128(mut, 12, cumWork);
+    writeLE32(mut, 28, firstSeen);
+    mut[32] := 0; mut[33] := 0; mut[34] := 0; mut[35] := 0; // reserved
+    Blob.fromVarArray(mut);
+  };
+
+  // Inverse patch: rebuild the raw 80-byte header from a value blob and the
+  // block's prev_hash (the trie key of index - 1).
+  public func toRawHeader(b : Blob, prevHash : Blob) : Blob {
+    let mut = VarArray.repeat<Nat8>(0, SIZE);
+    var i = 0;
+    while (i < SIZE) { mut[i] := b[i]; i += 1 };
     var j = 0;
-    while (j < 44) { mut[8 + j] := raw[36 + j]; j += 1 }; // merkle|time|bits|nonce
-    writeLE32(mut, 52, Nat32.fromNat(height));
-    writeLE128(mut, 56, cumWork);
-    writeLE32(mut, 72, firstSeen);
+    while (j < 32) { mut[4 + j] := prevHash[j]; j += 1 };
     Blob.fromVarArray(mut);
   };
 
@@ -177,13 +192,13 @@ module {
     {
       version = readLE32(b, 0);
       firstTxIndex = readLE32(b, 4).toNat();
-      merkle = sliceBlob32(b, 8);
-      time = readLE32(b, 40);
-      bits = readLE32(b, 44);
-      nonce = readLE32(b, 48);
-      height = readLE32(b, 52).toNat();
-      cumWork = readLE128(b, 56);
-      firstSeen = readLE32(b, 72);
+      height = readLE32(b, 8).toNat();
+      cumWork = readLE128(b, 12);
+      firstSeen = readLE32(b, 28);
+      merkle = sliceBlob32(b, 36);
+      time = readLE32(b, 68);
+      bits = readLE32(b, 72);
+      nonce = readLE32(b, 76);
     };
   };
 
@@ -194,15 +209,13 @@ module {
 
   public func versionOf(b : Blob) : Nat32 = readLE32(b, 0);
   public func firstTxIndexOf(b : Blob) : Nat = readLE32(b, 4).toNat();
-  public func timeOf(b : Blob) : Nat32 = readLE32(b, 40);
-  public func bitsOf(b : Blob) : Nat32 = readLE32(b, 44);
-  public func nonceOf(b : Blob) : Nat32 = readLE32(b, 48);
-  public func heightOf(b : Blob) : Nat = readLE32(b, 52).toNat();
-  public func cumWorkOf(b : Blob) : Nat = readLE128(b, 56);
-  public func firstSeenOf(b : Blob) : Nat32 = readLE32(b, 72);
-
-  // 32-byte merkle root copy (small allocation, only used by /metrics
-  // and BlockInfo construction).
-  public func merkleOf(b : Blob) : Blob = sliceBlob32(b, 8);
+  public func heightOf(b : Blob) : Nat = readLE32(b, 8).toNat();
+  public func cumWorkOf(b : Blob) : Nat = readLE128(b, 12);
+  public func firstSeenOf(b : Blob) : Nat32 = readLE32(b, 28);
+  // Raw-identical region: same offsets as the wire header.
+  public func merkleOf(b : Blob) : Blob = sliceBlob32(b, 36);
+  public func timeOf(b : Blob) : Nat32 = readLE32(b, 68);
+  public func bitsOf(b : Blob) : Nat32 = readLE32(b, 72);
+  public func nonceOf(b : Blob) : Nat32 = readLE32(b, 76);
 
 };

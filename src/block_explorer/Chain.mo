@@ -167,15 +167,16 @@ module {
   // value to avoid the upfront allocation).
   public let TX_ROOT_ARIDITY : Nat = 268_435_456;
 
-  // Header trie: 28-byte (or 32 for tests) keys -> 76-byte HeaderValue blobs;
-  // root_aridity 4^9 (root region 262144 x 3 = 768 KB). pointer_size 3 caps
-  // the trie at 2^23 ≈ 8.4 M headers — ~140 years of blocks at 144/day.
+  // Header trie: 28-byte (or 32 for tests) keys -> 80-byte HeaderValue blobs
+  // (raw-header-mirroring layout, see HeaderValue.mo); root_aridity 4^9
+  // (root region 262144 x 3 = 768 KB). pointer_size 3 caps the trie at
+  // 2^23 ≈ 8.4 M headers — ~140 years of blocks at 144/day.
   public func newHeaderTrie(keySize : Nat) : StableTrie.Enumeration = StableTrie.empty({
     pointer_size = 3;
     aridity = 4;
     root_aridity = ?262144; // = 4^9
+    value_size = HeaderValue.SIZE;
     key_size = keySize;
-    value_size = 76;
   });
 
   // Txid trie: 32-byte txids -> 3-byte LE height. See sizing notes on
@@ -897,23 +898,9 @@ module {
     sorted[sorted.size() / 2];
   };
 
-  // Reconstruct the canonical 80-byte raw header from stored data.
-  public func rawHeaderOf(b : StoredBlock) : Blob {
-    let v = b.value;
-    let version = HeaderValue.versionOf(v);
-    let time = HeaderValue.timeOf(v);
-    let bits = HeaderValue.bitsOf(v);
-    let nonce = HeaderValue.nonceOf(v);
-    let prevA = Blob.toArray(b.prevHash);
-    let merkleA = Blob.toArray(HeaderValue.merkleOf(v));
-    let buf = Array.tabulate<Nat8>(
-      80,
-      func(i) {
-        if (i < 4) le32Byte(version, i) else if (i < 36) prevA[i - 4 : Nat] else if (i < 68) merkleA[i - 36 : Nat] else if (i < 72) le32Byte(time, i - 68 : Nat) else if (i < 76) le32Byte(bits, i - 72 : Nat) else le32Byte(nonce, i - 76 : Nat);
-      },
-    );
-    Blob.fromArray(buf);
-  };
+  // Reconstruct the canonical 80-byte raw header: the stored value IS the
+  // raw header with the prev_hash window repurposed — patch it back in.
+  public func rawHeaderOf(b : StoredBlock) : Blob = HeaderValue.toRawHeader(b.value, b.prevHash);
 
   // All current forks (non-canonical branches), one entry per tip.
   public func forks(self : State) : [Fork] {
