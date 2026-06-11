@@ -57,12 +57,12 @@ persistent actor BlockExplorer {
   renderer.addValue(PT.Tracker.toValue(tracker));
   // Heap size (rts_heap_size) sampled at the end of each batch — including
   // batches stopped early by the heap limit.
-  transient let headersBatchHeap = PT.Tracker.newGauge(tracker, "headers_batch_heap_size", [], []);
-  transient let txidsBatchHeap = PT.Tracker.newGauge(tracker, "txids_batch_heap_size", [], []);
+  transient let heapAfterHeadersBatch = PT.Tracker.newGauge(tracker, "heap_size_after_headers_batch", [], []);
+  transient let heapAfterTxidsBatch = PT.Tracker.newGauge(tracker, "heap_size_after_txids_batch", [], []);
   // Number of batch entries actually processed (may be less than submitted
   // when the batch halts on an error or the heap limit).
-  transient let headersBatchProcessed = PT.Tracker.newGauge(tracker, "headers_batch_processed", [], []);
-  transient let txidsBatchProcessed = PT.Tracker.newGauge(tracker, "txids_batch_processed", [], []);
+  transient let batchSizeHeaders = PT.Tracker.newGauge(tracker, "batch_size_headers", [], []);
+  transient let batchSizeTxids = PT.Tracker.newGauge(tracker, "batch_size_txids", [], []);
 
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
@@ -225,8 +225,8 @@ persistent actor BlockExplorer {
         break loopH;
       };
     };
-    PT.Gauge.update(headersBatchHeap, Prim.rts_heap_size());
-    PT.Gauge.update(headersBatchProcessed, accepted);
+    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeHeaders, accepted);
     {
       accepted;
       new_tip = toBlockInfo(chain.tipBlock(), true);
@@ -291,8 +291,8 @@ persistent actor BlockExplorer {
         break loopB;
       };
     };
-    PT.Gauge.update(txidsBatchHeap, Prim.rts_heap_size());
-    PT.Gauge.update(txidsBatchProcessed, accepted + duplicate);
+    PT.Gauge.update(heapAfterTxidsBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeTxids, accepted + duplicate);
     #ok({ accepted; duplicate; last_error = lastErr });
   };
 
@@ -582,8 +582,8 @@ persistent actor BlockExplorer {
       };
       if (heapExceeded()) break loopH;
     };
-    PT.Gauge.update(headersBatchHeap, Prim.rts_heap_size());
-    PT.Gauge.update(headersBatchProcessed, imported);
+    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeHeaders, imported);
     switch (firstErr) {
       case (?msg) if (imported == 0) return #err(msg);
       case null {};
