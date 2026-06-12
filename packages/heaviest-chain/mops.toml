@@ -1,0 +1,17 @@
+[package]
+name = "heaviest-chain"
+version = "0.1.0"
+description = "Fork-choice for heaviest-chain protocols: a generic fork store and the reorg algorithm (common-ancestor search, rollback, promotion) over an abstract append-only canonical chain."
+repository = "https://github.com/research-ag/block-explorer"
+keywords = ["blockchain", "reorg", "fork-choice", "chain"]
+license = "MIT"
+
+[toolchain]
+moc = "1.7.0"
+wasmtime = "36.0.9"
+
+[dependencies]
+core = "2.5.0"
+
+[dev-dependencies]
+test = "2.1.2"

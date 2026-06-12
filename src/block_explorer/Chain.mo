@@ -42,11 +42,13 @@ import Set "mo:core/Set";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
+import ForkStore "mo:heaviest-chain/ForkStore";
+import Reorg "mo:heaviest-chain/Reorg";
+
 import Header "mo:btc-light/Header";
 import HeaderValue "HeaderValue";
 import Merkle "mo:btc-light/Merkle";
 import Headers "Headers";
-import ForkStore "ForkStore";
 import Uploaders "Uploaders";
 
 module {
@@ -55,9 +57,28 @@ module {
   // Public types.
   // ---------------------------------------------------------------------
 
-  // Fork-block types are owned by ForkStore; re-exported for convenience.
-  public type ForkBody = ForkStore.ForkBody;
-  public type ForkBlock = ForkStore.ForkBlock;
+  // The body of a fork block: its transaction ids (flat 32-byte blob, in
+  // block order) plus its first-tx serial number F in the would-be canonical
+  // ordering. Present only once all ancestors' bodies are known (see pushBody).
+  public type ForkBody = {
+    txids : Blob;
+    firstTxIndex : Nat;
+  };
+
+  // A non-canonical block, stored in full in the generic fork store.
+  public type ForkBlock = {
+    hash : Blob; // internal LE order, 32 bytes
+    prevHash : Blob; // internal LE order, 32 bytes
+    version : Nat32;
+    merkle : Blob; // internal LE order, 32 bytes
+    time : Nat32;
+    bits : Nat32;
+    nonce : Nat32;
+    height : Nat;
+    cumWork : Nat;
+    firstSeen : Nat32;
+    body : ?ForkBody;
+  };
 
   // A "stored block" view returned by queries. Built on demand from the
   // canonical trie or the fork store; not persisted in this shape.
@@ -131,7 +152,7 @@ module {
   public type State = {
     headerTrie : StableTrie.Enumeration; // canonical chain, index == height
     txTrie : StableTrie.Enumeration; // txid -> height, canonical tx order
-    forks : ForkStore.ForkStore;
+    forks : ForkStore.ForkStore<ForkBlock>;
     uploaders : Uploaders.Uploaders;
     reorgLog : List.List<ReorgEvent>;
     txCountOverride : Map.Map<Nat, Nat>; // BIP30 duplicate-coinbase heights
@@ -195,7 +216,7 @@ module {
   public func newState(headerTrie : StableTrie.Enumeration, txTrie : StableTrie.Enumeration) : State = {
     headerTrie;
     txTrie;
-    forks = ForkStore.empty();
+    forks = ForkStore.empty<ForkBlock>();
     uploaders = Uploaders.empty();
     reorgLog = List.empty<ReorgEvent>();
     txCountOverride = Map.empty<Nat, Nat>();
@@ -576,152 +597,146 @@ module {
 
   // Switch the canonical chain to the heavier branch ending at `newTipHash`
   // if it outweighs the current tip. Returns the number of canonical blocks
-  // displaced (0 if no reorg happened).
+  // displaced (0 if no reorg happened). The fork-choice algorithm itself
+  // lives in mo:heaviest-chain/Reorg — this function provides the world:
+  // how blocks are stored (trie encode/decode), the body demotion/
+  // re-indexing, and the timestamp-cache maintenance.
   func maybeReorg(self : State, newTipHash : Blob, newWork : Nat, now : Int) : Nat {
     if (newWork <= self.tipWork) return 0;
-
-    // 1. Walk the new branch from its tip down to the common ancestor (the
-    //    first canonical block we hit). `branch` is tip-first.
-    let branch = List.empty<ForkBlock>();
-    var curHash = newTipHash;
-    var commonHeight : Nat = 0;
-    let tipIdx = tipHeight(self);
-    label findCommon loop {
-      let fb = switch (ForkStore.get(self.forks, curHash)) {
-        case (?x) x;
-        case null Runtime.trap("maybeReorg: branch block missing from fork store");
-      };
-      List.add(branch, fb);
-      // The branch block's parent is canonical iff the canonical entry at
-      // its known height matches — an INDEX read, not a trie descend.
-      if (fb.height >= 1 and (fb.height - 1 : Nat) <= tipIdx) {
-        switch (Headers.get(self.headerTrie, fb.height - 1 : Nat)) {
-          case (?(h, _)) if (h == fb.prevHash) {
-            commonHeight := fb.height - 1 : Nat;
-            break findCommon;
-          };
-          case _ {};
-        };
-      };
-      curHash := fb.prevHash;
-    };
 
     let oldTipHeight = tipHeight(self);
     let oldTipHash = switch (Headers.get(self.headerTrie, oldTipHeight)) {
       case (?(h, _)) h;
       case null Runtime.trap("maybeReorg: missing old tip");
     };
-    let displaced : Nat = oldTipHeight - commonHeight;
 
-    // Bodies: before removing any header, extract each displaced canonical
-    // block's transactions (with its F) from the txid trie so they travel with
-    // the block into the fork store, then truncate the trie to the common
-    // ancestor.
+    // Bodies extracted from the txid trie in beforeRollback travel into the
+    // demoted ForkBlocks via this map (shared by the two closures).
     let demotedBodies = Map.empty<Nat, ForkBody>();
-    if (self.bodiesNextHeight > commonHeight + 1) {
-      let truncPoint = switch (Headers.get(self.headerTrie, commonHeight + 1)) {
-        case (?(_, v)) HeaderValue.firstTxIndexOf(v);
-        case null Runtime.trap("maybeReorg: missing first displaced block");
-      };
-      var h = commonHeight + 1;
-      while (h < self.bodiesNextHeight) {
-        let value = switch (Headers.get(self.headerTrie, h)) {
-          case (?(_, v)) v;
-          case null Runtime.trap("maybeReorg: missing displaced body block");
+
+    let acc : Reorg.Accessors<ForkBlock> = {
+      id = func(b : ForkBlock) : Blob = b.hash;
+      parent = func(b : ForkBlock) : Blob = b.prevHash;
+      height = func(b : ForkBlock) : Nat = b.height;
+    };
+
+    let canon : Reorg.Canonical<ForkBlock> = {
+      tipHeight = func() : Nat = tipHeight(self);
+      idAt = func(h : Nat) : ?Blob {
+        switch (Headers.get(self.headerTrie, h)) {
+          case (?(k, _)) ?k;
+          case null null;
         };
-        let lo = HeaderValue.firstTxIndexOf(value);
-        let hi = if (h + 1 < self.bodiesNextHeight) {
-          switch (Headers.get(self.headerTrie, h + 1)) {
-            case (?(_, v)) HeaderValue.firstTxIndexOf(v);
-            case null Runtime.trap("maybeReorg: missing displaced body block");
+      };
+      // Promote a branch block: encode and append its value, keep the
+      // timestamp cache current, and re-index its body if known (the
+      // all-ancestors-known invariant keeps fork bodies contiguous from the
+      // common ancestor, so the frontier advances without gaps).
+      append = func(fb : ForkBlock) {
+        let value = HeaderValue.encode({
+          version = fb.version;
+          firstTxIndex = 0;
+          merkle = fb.merkle;
+          time = fb.time;
+          bits = fb.bits;
+          nonce = fb.nonce;
+          height = fb.height;
+          cumWork = fb.cumWork;
+          firstSeen = fb.firstSeen;
+        });
+        ignore Headers.add(self.headerTrie, fb.hash, value);
+        pushRecentTime(self, fb.time);
+        switch (fb.body) {
+          case (?b) if (fb.height == self.bodiesNextHeight) {
+            appendCanonicalBody(self, fb.height, value, b.txids);
+            self.bodiesNextHeight += 1;
           };
-        } else StableTrie.size(self.txTrie);
-        Map.add<Nat, ForkBody>(demotedBodies, Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
-        Map.remove<Nat, Nat>(self.txCountOverride, Nat.compare, h);
-        h += 1;
-      };
-      StableTrie.truncate(self.txTrie, truncPoint);
-      self.bodiesNextHeight := commonHeight + 1;
-    };
-
-    // 2. Roll back the canonical tip into the fork store, one block at a time.
-    while (tipHeight(self) > commonHeight) {
-      let h = tipHeight(self);
-      let (rmHash, rmValue) = switch (Headers.removeLast(self.headerTrie)) {
-        case (?x) x;
-        case null Runtime.trap("maybeReorg: removeLast on empty trie");
-      };
-      let prevH = switch (Headers.get(self.headerTrie, h - 1)) {
-        case (?(ph, _)) ph;
-        case null Runtime.trap("maybeReorg: missing parent of displaced block");
-      };
-      ForkStore.add(self.forks, {
-        hash = rmHash;
-        prevHash = prevH;
-        version = HeaderValue.versionOf(rmValue);
-        merkle = HeaderValue.merkleOf(rmValue);
-        time = HeaderValue.timeOf(rmValue);
-        bits = HeaderValue.bitsOf(rmValue);
-        nonce = HeaderValue.nonceOf(rmValue);
-        height = h;
-        cumWork = HeaderValue.cumWorkOf(rmValue);
-        firstSeen = HeaderValue.firstSeenOf(rmValue);
-        body = Map.get<Nat, ForkBody>(demotedBodies, Nat.compare, h);
-      });
-    };
-
-    // The rollback moved the tip below the old window — refill the
-    // timestamp cache from the surviving canonical tail (narrow index
-    // reads); the promoted branch's timestamps then come from the heap
-    // ForkBlock records as they are appended below.
-    rebuildRecentTimes(self);
-
-    // 3. Append the new branch (ancestor-first) into the canonical trie.
-    var k = List.size(branch);
-    while (k > 0) {
-      k -= 1;
-      let fb = switch (List.get(branch, k)) {
-        case (?x) x;
-        case null Runtime.trap("maybeReorg: branch index out of range");
-      };
-      ForkStore.removeFork(self.forks, fb.hash, fb.height);
-      let value = HeaderValue.encode({
-        version = fb.version;
-        firstTxIndex = 0;
-        merkle = fb.merkle;
-        time = fb.time;
-        bits = fb.bits;
-        nonce = fb.nonce;
-        height = fb.height;
-        cumWork = fb.cumWork;
-        firstSeen = fb.firstSeen;
-      });
-      ignore Headers.add(self.headerTrie, fb.hash, value);
-      pushRecentTime(self, fb.time);
-      // If the promoted block's body is known, re-index it in chain order.
-      switch (fb.body) {
-        case (?b) if (fb.height == self.bodiesNextHeight) {
-          appendCanonicalBody(self, fb.height, value, b.txids);
-          self.bodiesNextHeight += 1;
+          case null {};
         };
-        case null {};
+      };
+      // Demote the canonical tip into a full ForkBlock, attaching the body
+      // extracted in beforeRollback (if any).
+      demoteTip = func() : ForkBlock {
+        let h = tipHeight(self);
+        let (rmHash, rmValue) = switch (Headers.removeLast(self.headerTrie)) {
+          case (?x) x;
+          case null Runtime.trap("maybeReorg: removeLast on empty trie");
+        };
+        let prevH = switch (Headers.get(self.headerTrie, h - 1)) {
+          case (?(ph, _)) ph;
+          case null Runtime.trap("maybeReorg: missing parent of displaced block");
+        };
+        {
+          hash = rmHash;
+          prevHash = prevH;
+          version = HeaderValue.versionOf(rmValue);
+          merkle = HeaderValue.merkleOf(rmValue);
+          time = HeaderValue.timeOf(rmValue);
+          bits = HeaderValue.bitsOf(rmValue);
+          nonce = HeaderValue.nonceOf(rmValue);
+          height = h;
+          cumWork = HeaderValue.cumWorkOf(rmValue);
+          firstSeen = HeaderValue.firstSeenOf(rmValue);
+          body = Map.get<Nat, ForkBody>(demotedBodies, Nat.compare, h);
+        };
       };
     };
 
-    self.tipWork := newWork;
+    let hooks : Reorg.Hooks = {
+      // Before any header is removed: extract each displaced canonical
+      // block's transactions (with its F) from the txid trie so they travel
+      // with the block into the fork store, then truncate the trie to the
+      // common ancestor.
+      beforeRollback = func(commonHeight : Nat) {
+        if (self.bodiesNextHeight > commonHeight + 1) {
+          let truncPoint = switch (Headers.get(self.headerTrie, commonHeight + 1)) {
+            case (?(_, v)) HeaderValue.firstTxIndexOf(v);
+            case null Runtime.trap("maybeReorg: missing first displaced block");
+          };
+          var h = commonHeight + 1;
+          while (h < self.bodiesNextHeight) {
+            let value = switch (Headers.get(self.headerTrie, h)) {
+              case (?(_, v)) v;
+              case null Runtime.trap("maybeReorg: missing displaced body block");
+            };
+            let lo = HeaderValue.firstTxIndexOf(value);
+            let hi = if (h + 1 < self.bodiesNextHeight) {
+              switch (Headers.get(self.headerTrie, h + 1)) {
+                case (?(_, v)) HeaderValue.firstTxIndexOf(v);
+                case null Runtime.trap("maybeReorg: missing displaced body block");
+              };
+            } else StableTrie.size(self.txTrie);
+            Map.add<Nat, ForkBody>(demotedBodies, Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
+            Map.remove<Nat, Nat>(self.txCountOverride, Nat.compare, h);
+            h += 1;
+          };
+          StableTrie.truncate(self.txTrie, truncPoint);
+          self.bodiesNextHeight := commonHeight + 1;
+        };
+      };
+      // The rollback moved the tip below the old window — refill the
+      // timestamp cache from the surviving canonical tail; the promoted
+      // branch's timestamps then come from the ForkBlocks in append.
+      afterRollback = func() = rebuildRecentTimes(self);
+    };
 
-    List.add(self.reorgLog, {
-      time = now;
-      common_height = commonHeight;
-      fork_length = List.size(branch);
-      displaced;
-      old_tip_hash_be_hex = bytesToHexBE(oldTipHash);
-      old_tip_height = oldTipHeight;
-      new_tip_hash_be_hex = bytesToHexBE(newTipHash);
-      new_tip_height = tipHeight(self);
-    });
-
-    displaced;
+    switch (Reorg.maybeReorg(self.forks, acc, canon, hooks, newTipHash, newWork, self.tipWork)) {
+      case null 0;
+      case (?ev) {
+        self.tipWork := newWork;
+        List.add(self.reorgLog, {
+          time = now;
+          common_height = ev.commonHeight;
+          fork_length = ev.promoted;
+          displaced = ev.displaced;
+          old_tip_hash_be_hex = bytesToHexBE(oldTipHash);
+          old_tip_height = oldTipHeight;
+          new_tip_hash_be_hex = bytesToHexBE(newTipHash);
+          new_tip_height = tipHeight(self);
+        });
+        ev.displaced;
+      };
+    };
   };
 
   func storeAndMaybeReorg(
@@ -751,7 +766,7 @@ module {
       self.tipWork := cumWork;
       isCanonical := true;
     } else {
-      ForkStore.add(self.forks, {
+      ForkStore.add(self.forks, hash, newHeight, {
         hash;
         prevHash = parsed.prev_hash;
         version = parsed.version;
@@ -1113,7 +1128,7 @@ module {
         case (?x) x;
         case null return #err("fork block missing from store");
       };
-      ForkStore.updateBlock(self.forks, { fb with body = ?{ txids = hashes; firstTxIndex = f } });
+      ForkStore.update(self.forks, b.hash, { fb with body = ?{ txids = hashes; firstTxIndex = f } });
       #ok(bodyResult(self, b, false));
     };
   };
