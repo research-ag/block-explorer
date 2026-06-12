@@ -1,7 +1,7 @@
 // Round-trip and edge-case tests for hex helpers.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 
 suite(
   "Hex helpers",

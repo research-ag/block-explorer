@@ -1,7 +1,7 @@
 // Tests for medianTimePast.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 
 suite(
   "medianTimePast",

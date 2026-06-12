@@ -1,0 +1,18 @@
+[package]
+name = "btc-light"
+version = "0.1.0"
+description = "Bitcoin light-client primitives: header parsing and consensus validation, compact-difficulty math, chain work, median-time-past, retargeting, double-SHA256 and merkle roots. Storage-agnostic."
+repository = "https://github.com/research-ag/block-explorer"
+keywords = ["bitcoin", "spv", "header", "merkle", "consensus"]
+license = "MIT"
+
+[toolchain]
+moc = "1.7.0"
+wasmtime = "36.0.9"
+
+[dependencies]
+core = "2.5.0"
+sha2 = "0.1.14"
+
+[dev-dependencies]
+test = "2.1.2"

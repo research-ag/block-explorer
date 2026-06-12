@@ -9,7 +9,7 @@ import Principal "mo:core/Principal";
 import Nat32 "mo:core/Nat32";
 
 import Chain "../src/block_explorer/Chain";
-import Header "../src/block_explorer/Header";
+import Header "mo:btc-light/Header";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Sha256 "mo:sha2/Sha256";
 import Headers_ "../src/block_explorer/Headers";

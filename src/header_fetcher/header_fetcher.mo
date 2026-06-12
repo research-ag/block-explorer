@@ -88,7 +88,7 @@ import Http "mo:promtracker/mixins/http";
 
 import Prim "mo:⛔";
 
-import BEHeader "../block_explorer/Header";
+import BEHeader "mo:btc-light/Header";
 
 persistent actor HeaderFetcher {
 

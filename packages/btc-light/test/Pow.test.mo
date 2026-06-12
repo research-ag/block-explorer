@@ -8,7 +8,7 @@ import Result "mo:core/Result";
 import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 import F "fixtures/Fixtures";
 
 let SHA = Sha256.Digest(#sha256);

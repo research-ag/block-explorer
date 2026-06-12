@@ -9,9 +9,9 @@ import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
 
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 import Sha256 "mo:sha2/Sha256";
-import Merkle "../src/block_explorer/Merkle";
+import Merkle "../src/Merkle";
 
 let SHA = Sha256.Digest(#sha256);
 

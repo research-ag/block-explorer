@@ -26,7 +26,7 @@ import Text "mo:core/Text";
 import Prim "mo:⛔";
 
 import Chain "Chain";
-import Header "Header";
+import Header "mo:btc-light/Header";
 import HeaderValue "HeaderValue";
 
 module {

@@ -42,9 +42,9 @@ import Set "mo:core/Set";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
-import Header "Header";
+import Header "mo:btc-light/Header";
 import HeaderValue "HeaderValue";
-import Merkle "Merkle";
+import Merkle "mo:btc-light/Merkle";
 import Headers "Headers";
 import ForkStore "ForkStore";
 import Uploaders "Uploaders";
