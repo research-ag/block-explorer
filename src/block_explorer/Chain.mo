@@ -1021,7 +1021,7 @@ module {
     let hv = encodeHeight(height);
     var i = 0;
     while (i < n) { ignore StableTrie.add(self.txTrie, txidAt(body, i), hv); i += 1 };
-    if (StableTrie.size(self.txTrie) - f < n) Map.add<Nat, Nat>(self.txCountOverride, Nat.compare, height, n);
+    if (StableTrie.size(self.txTrie) < f + n) Map.add<Nat, Nat>(self.txCountOverride, Nat.compare, height, n);
   };
 
   // Body stored in a fork block's record, if any.
