@@ -36,6 +36,7 @@ module {
     if (hash.size() != HASH_SIZE) {
       Runtime.trap("Headers: hash size " # debug_show hash.size() # " != 32");
     };
+    if (keySize == HASH_SIZE) return hash; // identity mode: no copy
     var i = keySize;
     while (i < HASH_SIZE) {
       if (hash[i] != (0 : Nat8)) {
@@ -49,6 +50,7 @@ module {
   // Re-pad a stored key back to a 32-byte hash with zero bytes.
   func expand(trie : Enumeration.Enumeration, key : Blob) : Blob {
     let keySize = trie.key_size;
+    if (keySize == HASH_SIZE) return key; // identity mode: no copy
     Blob.fromArray(
       Array.tabulate<Nat8>(HASH_SIZE, func(i) = if (i < keySize) key[i] else (0 : Nat8))
     );
