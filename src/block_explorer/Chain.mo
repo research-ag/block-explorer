@@ -155,7 +155,6 @@ module {
     forks : ForkStore.ForkStore<ForkBlock>;
     uploaders : Uploaders.Uploaders;
     reorgLog : List.List<ReorgEvent>;
-    txCountOverride : Map.Map<Nat, Nat>; // BIP30 duplicate-coinbase heights
     var tipWork : Nat; // cumulative work of the canonical tip
     var bodiesNextHeight : Nat; // canonical bodies known for [0, this)
     // Timestamps of the canonical tip and its ancestors, newest first, at
@@ -182,6 +181,20 @@ module {
   // ---------------------------------------------------------------------
   // Construction.
   // ---------------------------------------------------------------------
+
+  // BIP30 duplicate-coinbase handling. Two early blocks repeated an
+  // existing coinbase txid (91722's was repeated by 91880; 91812's by
+  // 91842). A keyed txid trie cannot hold the same txid twice, so the
+  // SINGLE-TX block of each pair is stored "compressed": verified normally,
+  // then recorded with an empty txid segment (length 0 by F-arithmetic).
+  // Since every real block has >= 1 transaction (the coinbase), a
+  // zero-length segment unambiguously means "compressed single-tx block",
+  // and its only txid is recovered from the header's merkle root (txid ==
+  // merkle root for single-tx blocks). This makes txid attribution match
+  // Esplora on both pairs (91812 and 91880 win) and keeps F exact
+  // everywhere. The heights are consensus history; BIP30 + BIP34 guarantee
+  // no further duplicates can occur.
+  func isCompressedBodyHeight(height : Nat) : Bool = height == 91_722 or height == 91_842;
 
   // Production root_aridity for the txid trie (= 4^14). Allocates a ~1 GB
   // flat root region at trie creation (fine on the IC; tests pass a small
@@ -219,7 +232,6 @@ module {
     forks = ForkStore.empty<ForkBlock>();
     uploaders = Uploaders.empty();
     reorgLog = List.empty<ReorgEvent>();
-    txCountOverride = Map.empty<Nat, Nat>();
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var recentTimes = [];
@@ -707,7 +719,6 @@ module {
               };
             } else StableTrie.size(self.txTrie);
             Map.add<Nat, ForkBody>(demotedBodies, Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
-            Map.remove<Nat, Nat>(self.txCountOverride, Nat.compare, h);
             h += 1;
           };
           StableTrie.truncate(self.txTrie, truncPoint);
@@ -1027,16 +1038,22 @@ module {
     Blob.fromArray(Array.tabulate<Nat8>((hi - lo : Nat) * 32, func(j) = keys[j / 32][j % 32]));
   };
 
-  // Append one block's body (flat txid blob) to the tail of the canonical txid
-  // trie, setting its F and recording a BIP30 override on cross-block dup txids.
+  // Append one block's body (flat txid blob) to the tail of the canonical
+  // txid trie, setting its F. The two BIP30 single-tx blocks are stored
+  // compressed (F set, no txids — see isCompressedBodyHeight); any other
+  // cross-block duplicate txid would silently corrupt the F-arithmetic, so
+  // it traps (impossible on mainnet post-BIP30/34).
   func appendCanonicalBody(self : State, height : Nat, value : Blob, body : Blob) {
     let f = StableTrie.size(self.txTrie);
     Headers.put(self.headerTrie, height, HeaderValue.withFirstTxIndex(value, f));
+    if (isCompressedBodyHeight(height)) return;
     let n = body.size() / 32;
     let hv = encodeHeight(height);
     var i = 0;
     while (i < n) { ignore StableTrie.add(self.txTrie, txidAt(body, i), hv); i += 1 };
-    if (StableTrie.size(self.txTrie) < f + n) Map.add<Nat, Nat>(self.txCountOverride, Nat.compare, height, n);
+    if (StableTrie.size(self.txTrie) != f + n) {
+      Runtime.trap("appendCanonicalBody: unexpected duplicate txid at height " # debug_show height);
+    };
   };
 
   // Body stored in a fork block's record, if any.
@@ -1065,17 +1082,21 @@ module {
     };
   };
 
-  // tx_count of a canonical block currently indexed in the trie.
-  func trieTxCount(self : State, height : Nat) : Nat {
-    switch (Map.get<Nat, Nat>(self.txCountOverride, Nat.compare, height)) {
-      case (?n) return n;
-      case null {};
-    };
+  // Width of a block's txid segment in the trie: [F(h), F(h+1)).
+  func segmentWidth(self : State, height : Nat) : Nat {
     let f = switch (Headers.get(self.headerTrie, height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
     let next = if (height + 1 < self.bodiesNextHeight) {
       switch (Headers.get(self.headerTrie, height + 1)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
     } else StableTrie.size(self.txTrie);
     next - f : Nat;
+  };
+
+  // tx_count of a canonical block whose body is indexed. A zero-width
+  // segment can only be a compressed single-tx block (every real block has
+  // a coinbase), so it counts as 1.
+  func trieTxCount(self : State, height : Nat) : Nat {
+    let w = segmentWidth(self, height);
+    if (w == 0) 1 else w;
   };
 
   func bodyResult(self : State, b : StoredBlock, duplicate : Bool) : PushBodyOk {
@@ -1228,6 +1249,12 @@ module {
       case null [];
       case (?b) {
         if (b.isCanonical and b.height < self.bodiesNextHeight) {
+          // A zero-width segment is a compressed single-tx block (BIP30
+          // pair member): its only txid is the header's merkle root.
+          if (segmentWidth(self, b.height) == 0) {
+            if (offset >= 1 or limit == 0) return [];
+            return [HeaderValue.merkleOf(b.value)];
+          };
           let f = HeaderValue.firstTxIndexOf(b.value);
           let n = trieTxCount(self, b.height);
           if (offset >= n) return [];
