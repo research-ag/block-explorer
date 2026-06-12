@@ -68,6 +68,8 @@ persistent actor BlockExplorer {
   // when the batch halts on an error or the heap limit).
   transient let batchSizeHeaders = PT.Tracker.newGauge(tracker, "headers_batch_processed_count", [], []);
   transient let batchSizeTxids = PT.Tracker.newGauge(tracker, "txids_batch_processed_count", [], []);
+  // Sum of the `n` arguments passed to rehash.
+  transient let rehashCounter = PT.Tracker.newCounter(tracker, "rehash_total", []);
 
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
@@ -674,9 +676,12 @@ persistent actor BlockExplorer {
   // Recompute the chain's hashes from stored headers, genesis up to height
   // n, and return the hash of block n (internal LE order; null if n is
   // beyond the tip). n = 0 is the genesis hash. A pure read-only integrity
-  // check — callable as a query or (for larger n, with more instruction
-  // budget) as an update call; it alters no state either way.
-  public query func rehash(n : Nat) : async ?Blob {
+  // check. An UPDATE method (not query): a query func's state changes are
+  // discarded in BOTH call modes — even replicated query execution never
+  // commits — so the rehash_total counter could never tick on a query func.
+  // Update mode also brings the larger instruction budget this walk wants.
+  public func rehash(n : Nat) : async ?Blob {
+    PT.Counter.add(rehashCounter, n);
     chain.rehashChain(sha, n);
   };
 
