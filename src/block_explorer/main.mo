@@ -680,7 +680,7 @@ persistent actor BlockExplorer {
   // discarded in BOTH call modes — even replicated query execution never
   // commits — so the rehash_total counter could never tick on a query func.
   // Update mode also brings the larger instruction budget this walk wants.
-  public func rehash(n : Nat) : async ?Blob {
+  public query func rehash(n : Nat) : async ?Blob {
     PT.Counter.add(rehashCounter, n);
     chain.rehashChain(sha, n);
   };
