@@ -68,8 +68,6 @@ persistent actor BlockExplorer {
   // when the batch halts on an error or the heap limit).
   transient let batchSizeHeaders = PT.Tracker.newGauge(tracker, "headers_batch_processed_count", [], []);
   transient let batchSizeTxids = PT.Tracker.newGauge(tracker, "txids_batch_processed_count", [], []);
-  // Sum of the `n` arguments passed to rehash.
-  transient let rehashCounter = PT.Tracker.newCounter(tracker, "rehash_total", []);
 
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
@@ -673,16 +671,15 @@ persistent actor BlockExplorer {
   // Batched membership check. Used by client-side pre-filters to avoid
   // shipping headers whose hash is already stored or whose parent is
   // unknown. Returns one Bool per input, in the same order.
-  // Recompute the chain's hashes from stored headers, genesis up to height
-  // n, and return the hash of block n (internal LE order; null if n is
-  // beyond the tip). n = 0 is the genesis hash. A pure read-only integrity
-  // check. An UPDATE method (not query): a query func's state changes are
-  // discarded in BOTH call modes — even replicated query execution never
-  // commits — so the rehash_total counter could never tick on a query func.
-  // Update mode also brings the larger instruction budget this walk wants.
-  public query func rehash(n : Nat) : async ?Blob {
-    PT.Counter.add(rehashCounter, n);
-    chain.rehashChain(sha, n);
+  // Recompute the chain's hashes from stored headers over heights start..n
+  // and return the hash of block n (internal LE order; null if n is beyond
+  // the tip or start > n). The walk is seeded at `start` with that block's
+  // stored prev_hash, so a sub-range can be verified without re-walking from
+  // genesis — handy for chunking the work under the query instruction budget.
+  // rehash(0, n) checks the whole chain up to n; rehash(n, n) checks block n
+  // alone against its stored parent. A pure read-only integrity check.
+  public query func rehash(start : Nat, n : Nat) : async ?Blob {
+    chain.rehashChain(sha, start, n);
   };
 
   transient let MAX_HAVE_HASHES : Nat = 50_000;

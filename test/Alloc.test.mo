@@ -304,10 +304,16 @@ do {
   // (RAWS in this file start at 300001, so read genesis-chain headers from fixtures:
   //  reuse Header.GENESIS_HEADER_HEX chain via pushUnchecked of real headers is not
   //  available here — instead assert on the genesis-only chain plus synthetic checks.)
-  switch (Chain.rehashChain(c, SHA, 0)) {
+  switch (Chain.rehashChain(c, SHA, 0, 0)) {
     case (?h) assert h == Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
     case null assert false;
   };
-  assert Chain.rehashChain(c, SHA, 1) == null; // beyond tip
+  // Single-block sub-range seeded from the stored parent: block 0 alone.
+  switch (Chain.rehashChain(c, SHA, 0, 0)) {
+    case (?h) assert h == Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
+    case null assert false;
+  };
+  assert Chain.rehashChain(c, SHA, 0, 1) == null; // beyond tip
+  assert Chain.rehashChain(c, SHA, 1, 0) == null; // start > n
   ignore i; ignore N;
 };

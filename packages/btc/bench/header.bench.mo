@@ -1,12 +1,15 @@
-// Benchmarks for raw block-header parsing and related primitives.
+// Benchmarks for raw block-header parsing and PoW checking.
 //
-// Rows are operations; columns are batch sizes (how many headers we
-// run the operation on per measured call).
+// Rows are operations; columns are batch sizes (how many headers we run the
+// operation on per measured call). The single 80-byte input — the Bitcoin
+// genesis header — is parsed/hashed N times so the per-call cost scales with
+// the column.
 
 import Array "mo:core/Array";
 import Bench "mo:bench-helper";
+import Sha256 "mo:sha2/Sha256";
 
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 
 module {
   public func init() : Bench.V1 {
@@ -17,8 +20,10 @@ module {
       cols = ["1", "10", "100"];
     };
 
-    // Single 80-byte input (Bitcoin genesis) reused by every routine.
+    // Single 80-byte input (Bitcoin genesis) reused by every routine, and one
+    // sha-256 engine reused across calls (headerHashBlob resets it).
     let header : Blob = Header.hexToBlob(Header.GENESIS_HEADER_HEX);
+    let sha = Sha256.Digest(#sha256);
     let counts : [Nat] = [1, 10, 100];
 
     func runParse(n : Nat) {
@@ -32,7 +37,7 @@ module {
     func runHash(n : Nat) {
       var i = 0;
       while (i < n) {
-        ignore Header.headerHashBlob(header);
+        ignore Header.headerHashBlob(sha, header);
         i += 1;
       };
     };
@@ -41,7 +46,7 @@ module {
       var i = 0;
       while (i < n) {
         ignore Header.parseHeader(header);
-        ignore Header.headerHashBlob(header);
+        ignore Header.headerHashBlob(sha, header);
         i += 1;
       };
     };
@@ -51,7 +56,7 @@ module {
       while (i < n) {
         switch (Header.parseHeader(header)) {
           case (?p) {
-            let h = Header.headerHashBlob(header);
+            let h = Header.headerHashBlob(sha, header);
             ignore Header.checkPoW(h, p.bits);
           };
           case null {};

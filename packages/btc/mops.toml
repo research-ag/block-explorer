@@ -16,3 +16,4 @@ sha2 = "0.1.14"
 
 [dev-dependencies]
 test = "2.1.2"
+bench-helper = "0.0.3"
