@@ -23,9 +23,9 @@ import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
 
-import Header "mo:btc-light/Header";
+import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
-import Merkle "mo:btc-light/Merkle";
+import Merkle "mo:btc/Merkle";
 import HeaderValue "../src/block_explorer/HeaderValue";
 
 // --- Test harness ---------------------------------------------------------

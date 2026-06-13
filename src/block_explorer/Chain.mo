@@ -45,9 +45,9 @@ import StableTrie "mo:stable-trie/Enumeration";
 import ForkStore "mo:heaviest-chain/ForkStore";
 import Reorg "mo:heaviest-chain/Reorg";
 
-import Header "mo:btc-light/Header";
+import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
-import Merkle "mo:btc-light/Merkle";
+import Merkle "mo:btc/Merkle";
 import Headers "Headers";
 import Uploaders "Uploaders";
 

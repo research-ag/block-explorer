@@ -2,6 +2,7 @@
 
 import { test; suite } "mo:test";
 import Header "../src/Header";
+import Hex "../src/internal/Hex";
 
 suite(
   "Hex helpers",
@@ -36,10 +37,10 @@ suite(
     test(
       "nat32Hex pads to 8 chars",
       func() {
-        assert Header.nat32Hex(0) == "00000000";
-        assert Header.nat32Hex(0x1d00ffff) == "1d00ffff";
-        assert Header.nat32Hex(0xffffffff) == "ffffffff";
-        assert Header.nat32Hex(0x1) == "00000001";
+        assert Hex.encodeNat32(0) == "00000000";
+        assert Hex.encodeNat32(0x1d00ffff) == "1d00ffff";
+        assert Hex.encodeNat32(0xffffffff) == "ffffffff";
+        assert Hex.encodeNat32(0x1) == "00000001";
       },
     );
   },

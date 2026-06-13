@@ -9,7 +9,8 @@ import Principal "mo:core/Principal";
 import Nat32 "mo:core/Nat32";
 
 import Chain "../src/block_explorer/Chain";
-import Header "mo:btc-light/Header";
+import Header "mo:btc/Header";
+import Bytes "mo:btc/internal/Bytes";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Sha256 "mo:sha2/Sha256";
 import Headers_ "../src/block_explorer/Headers";
@@ -174,7 +175,7 @@ measure("parseHeader          ", 1000, func(_) { ignore Header.parseHeader(raw0)
 measure("headerHashBlob(2xSHA)", 1000, func(_) { ignore Header.headerHashBlob(SHA, raw0) });
 measure("nBitsToTarget        ", 1000, func(_) { ignore Header.nBitsToTarget(bits0) });
 measure("chainWork            ", 1000, func(_) { ignore Header.chainWork(bits0) });
-measure("leBytesToNat(32B)    ", 1000, func(_) { ignore Header.leBytesToNat(hash0) });
+measure("Bytes.leToNat(32B)   ", 1000, func(_) { ignore Bytes.leToNat(hash0) });
 measure("reverse32            ", 1000, func(_) { ignore Header.reverse32(hash0) });
 measure("bytesToHex(32B)      ", 1000, func(_) { ignore Header.bytesToHex(hash0) });
 measure("medianTimePast(11)   ", 1000, func(_) { ignore Header.medianTimePast([1,2,3,4,5,6,7,8,9,10,11]) });

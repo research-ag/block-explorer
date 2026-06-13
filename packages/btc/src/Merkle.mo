@@ -9,10 +9,11 @@
 // rule, hashing concatenated 32-byte pairs with double-SHA256.
 
 import Blob "mo:core/Blob";
-import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
+
+import Bytes "internal/Bytes";
 
 module {
 
@@ -31,15 +32,6 @@ module {
     d.sum();
   };
 
-  // Slice a 32-byte hash out of a flat hashes blob at index `i`.
-  func leafAt(hashes : Blob, i : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, 32);
-    let off = i * 32;
-    var j = 0;
-    while (j < 32) { mut[j] := hashes[off + j]; j += 1 };
-    Blob.fromVarArray(mut);
-  };
-
   // Compute the Bitcoin merkle root for `txCount` leaves stored
   // contiguously in `hashes` at stride 32, using the caller's hash engine
   // (reset between hashes; left in a finished state). Returns the root in
@@ -55,7 +47,7 @@ module {
     };
 
     // Materialise level 0 as a mutable array of 32-byte Blobs.
-    var level = VarArray.tabulate<Blob>(txCount, func(i) = leafAt(hashes, i));
+    var level = VarArray.tabulate<Blob>(txCount, func(i) = Bytes.slice32(hashes, i * 32));
     var n = txCount;
 
     while (n > 1) {

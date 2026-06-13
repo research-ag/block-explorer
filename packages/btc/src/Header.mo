@@ -2,19 +2,18 @@
 // This module contains no actor state and is safe to import from tests.
 
 import Blob "mo:core/Blob";
-import Char "mo:core/Char";
 import Int "mo:core/Int";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
-import Nat64 "mo:core/Nat64";
 import Result "mo:core/Result";
-import Runtime "mo:core/Runtime";
-import Text "mo:core/Text";
 import VarArray "mo:core/VarArray";
 
 import Prim "mo:⛔";
 
 import Sha256 "mo:sha2/Sha256";
+
+import Bytes "internal/Bytes";
+import Hex "internal/Hex";
 
 module {
 
@@ -31,115 +30,22 @@ module {
   public let GENESIS_HEADER_HEX : Text = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
 
   // ---------------------------------------------------------------------
-  // Hex helpers.
+  // Hex helpers (generic; implementation in internal/Hex).
   // ---------------------------------------------------------------------
 
-  // Lowercase hex alphabet as ASCII bytes — hex Text is built as a byte
-  // buffer and decoded once (per-char Char.toText + `#=` measured ~5 KB
-  // per 32-byte hash; this is ~0.3 KB).
-  let HEX_CHARS : [Nat8] = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66];
-
-  func hexNibble(c : Char) : Nat8 {
-    let n = c.toNat32();
-    if (n >= 0x30 and n <= 0x39) Nat8.fromNat((n - 0x30).toNat()) else if (n >= 0x61 and n <= 0x66) Nat8.fromNat((n - 0x61 + 10).toNat()) else if (n >= 0x41 and n <= 0x46) Nat8.fromNat((n - 0x41 + 10).toNat()) else Runtime.trap("invalid hex char");
-  };
-
-  public func hexToBlob(t : Text) : Blob {
-    let size = t.size();
-    if (size % 2 != 0) Runtime.trap("odd-length hex");
-    let mut = VarArray.repeat<Nat8>(0, size / 2);
-    var i = 0;
-    var hi : Nat8 = 0;
-    var haveHi = false;
-    // Stream the chars — materializing them via Iter.toArray costs ~12 KB
-    // per 80-byte header.
-    for (c in t.chars()) {
-      let nib = hexNibble(c);
-      if (haveHi) {
-        mut[i] := (hi << 4) | nib;
-        i += 1;
-        haveHi := false;
-      } else {
-        hi := nib;
-        haveHi := true;
-      };
-    };
-    Blob.fromVarArray(mut);
-  };
-
-  // Hex-encode a byte sequence: emit ASCII into one buffer, decode once.
-  public func bytesToHex(bs : Blob) : Text {
-    let mut = VarArray.repeat<Nat8>(0, bs.size() * 2);
-    var i = 0;
-    for (b in bs.vals()) {
-      let n = b.toNat();
-      mut[i] := HEX_CHARS[n / 16];
-      mut[i + 1] := HEX_CHARS[n % 16];
-      i += 2;
-    };
-    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
-      case (?t) t;
-      case null Runtime.trap("bytesToHex: unreachable (pure ASCII)");
-    };
-  };
-
-  public func nat32Hex(v : Nat32) : Text {
-    let mut = VarArray.repeat<Nat8>(0, 8);
-    var i : Nat = 0;
-    while (i < 4) {
-      let shift = Nat32.fromNat(3 - i) * 8;
-      let byte = ((v >> shift) & 0xff).toNat();
-      mut[2 * i] := HEX_CHARS[byte / 16];
-      mut[2 * i + 1] := HEX_CHARS[byte % 16];
-      i += 1;
-    };
-    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
-      case (?t) t;
-      case null Runtime.trap("nat32Hex: unreachable (pure ASCII)");
-    };
-  };
+  public func hexToBlob(t : Text) : Blob = Hex.decode(t);
+  public func bytesToHex(bs : Blob) : Text = Hex.encode(bs);
 
   // ---------------------------------------------------------------------
   // Header parsing.
   // ---------------------------------------------------------------------
 
-  public func readLE32(bs : [Nat8], offset : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(bs[offset].toNat());
-    let b1 = Nat32.fromNat(bs[offset + 1].toNat());
-    let b2 = Nat32.fromNat(bs[offset + 2].toNat());
-    let b3 = Nat32.fromNat(bs[offset + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
-  // Same as readLE32 but reads directly from a Blob (no toArray copy).
-  public func readLE32Blob(b : Blob, offset : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(b[offset].toNat());
-    let b1 = Nat32.fromNat(b[offset + 1].toNat());
-    let b2 = Nat32.fromNat(b[offset + 2].toNat());
-    let b3 = Nat32.fromNat(b[offset + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
-  // Copy 32 bytes out of a Blob into a fresh Blob (used to hold
-  // prev_hash and merkle as Blob fields in `Parsed`).  Allocates one
-  // 32-byte VarArray and converts it to Blob with no extra copy.
-  public func slice32BlobOut(b : Blob, offset : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, 32);
-    var i = 0;
-    while (i < 32) {
-      mut[i] := b[offset + i];
-      i += 1;
-    };
-    Blob.fromVarArray(mut);
-  };
-
-  // Narrow accessors for hot validation paths: read a single Nat32
-  // field straight out of the raw 80-byte header without allocating
-  // anything. Caller must pass a 80-byte blob.
-  public func versionOf(raw : Blob) : Nat32 = readLE32Blob(raw, 0);
-  public func timeOf(raw : Blob) : Nat32 = readLE32Blob(raw, 68);
-  public func bitsOf(raw : Blob) : Nat32 = readLE32Blob(raw, 72);
-  public func nonceOf(raw : Blob) : Nat32 = readLE32Blob(raw, 76);
+  // Narrow accessors: read a single Nat32 field straight out of the raw
+  // 80-byte header without allocating. Caller must pass an 80-byte blob.
+  public func versionOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 0);
+  public func timeOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 68);
+  public func bitsOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 72);
+  public func nonceOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 76);
 
   public type Parsed = {
     version : Nat32;
@@ -153,12 +59,12 @@ module {
   public func parseHeader(b : Blob) : ?Parsed {
     if (b.size() != 80) return null;
     ?{
-      version = readLE32Blob(b, 0);
-      prev_hash = slice32BlobOut(b, 4);
-      merkle = slice32BlobOut(b, 36);
-      time = readLE32Blob(b, 68);
-      bits = readLE32Blob(b, 72);
-      nonce = readLE32Blob(b, 76);
+      version = Bytes.readLE32(b, 0);
+      prev_hash = Bytes.slice32(b, 4);
+      merkle = Bytes.slice32(b, 36);
+      time = Bytes.readLE32(b, 68);
+      bits = Bytes.readLE32(b, 72);
+      nonce = Bytes.readLE32(b, 76);
     };
   };
 
@@ -187,39 +93,6 @@ module {
       i += 1;
     };
     Blob.fromVarArray(mut);
-  };
-
-  // Removed: bytesEq([Nat8],[Nat8]).  Use Blob equality (==) instead.
-
-  // Interpret a little-endian Blob as a Nat. Assembles via Nat64 limbs:
-  // per-byte `acc * 256 + b` allocates a fresh, growing bignum every
-  // iteration (~7 KB for 32 bytes); limbs cut that to a handful of ops.
-  // (Nat32 limbs measured WORSE: full-range Nat32 values are heap-boxed
-  // just like Nat64 — compact scalars are 31-bit — and halving the limb
-  // width doubles the bignum combines.)
-  public func leBytesToNat(h : Blob) : Nat {
-    func limbAt(lo : Nat, width : Nat) : Nat64 {
-      var limb : Nat64 = 0;
-      var j = lo + width;
-      while (j > lo) {
-        j -= 1;
-        limb := (limb << 8) | Nat64.fromNat(h[j].toNat());
-      };
-      limb;
-    };
-    var acc : Nat = 0;
-    var i : Nat = h.size();
-    let rem = i % 8;
-    if (rem > 0) {
-      // top (most significant) partial limb first
-      acc := Nat64.toNat(limbAt(i - rem, rem));
-      i -= rem;
-    };
-    while (i > 0) {
-      acc := Prim.shiftLeft(acc, 64) + Nat64.toNat(limbAt(i - 8, 8));
-      i -= 8;
-    };
-    acc;
   };
 
   // ---------------------------------------------------------------------
@@ -344,7 +217,7 @@ module {
       return #err("nBits out of range"); // target > POW_LIMIT_TARGET
     };
     if (exp < 3) {
-      if (leBytesToNat(headerHashLE) > nBitsToTarget(bits)) {
+      if (Bytes.leToNat(headerHashLE) > nBitsToTarget(bits)) {
         return #err("proof-of-work failed");
       };
       return #ok();
@@ -356,9 +229,7 @@ module {
       i += 1;
     };
     // The 3-byte window vs the mantissa.
-    let w : Nat32 = (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 1])) << 16)
-                  | (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 2])) << 8)
-                  | Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 3]));
+    let w : Nat32 = (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 1])) << 16) | (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 2])) << 8) | Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 3]));
     if (w > mant) return #err("proof-of-work failed");
     if (w == mant) {
       // Exactly at the window: hash <= target only if every lower byte is 0.
@@ -373,8 +244,8 @@ module {
 
   public func checkBits(actualBits : Nat32, expectedBits : Nat32) : Result.Result<(), Text> {
     if (actualBits == expectedBits) #ok() else #err(
-      "nBits mismatch: got 0x" # nat32Hex(actualBits) #
-      " expected 0x" # nat32Hex(expectedBits)
+      "nBits mismatch: got 0x" # Hex.encodeNat32(actualBits) #
+      " expected 0x" # Hex.encodeNat32(expectedBits)
     );
   };
 

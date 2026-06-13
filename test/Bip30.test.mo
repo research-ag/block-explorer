@@ -13,8 +13,8 @@ import Principal "mo:core/Principal";
 import Sha256 "mo:sha2/Sha256";
 import VarArray "mo:core/VarArray";
 
-import Header "mo:btc-light/Header";
-import Merkle "mo:btc-light/Merkle";
+import Header "mo:btc/Header";
+import Merkle "mo:btc/Merkle";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Chain "../src/block_explorer/Chain";
 

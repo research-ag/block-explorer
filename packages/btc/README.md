@@ -1,8 +1,9 @@
-# btc-light
+# btc
 
-Bitcoin light-client (SPV) primitives for Motoko. Everything needed to
-handle block headers and verify data against them — with no opinion about
-how you store anything.
+Bitcoin primitives for Motoko. Everything needed to handle block headers and
+verify data against them — with no opinion about how you store anything.
+SPV-oriented today (light-client header validation); the package name leaves
+room for full-node pieces later.
 
 ## Modules
 
@@ -35,6 +36,13 @@ how you store anything.
   duplicate-last-node rule. Reuses the caller's hash engine across the
   whole tree.
 
+## Public API
+
+Everything documented above under `Header` and `Merkle` is the public
+surface. `src/internal/` (`Hex`, `Bytes`) holds generic, non-Bitcoin
+helpers used by the implementation — not part of the package API; don't
+import them directly.
+
 ## Conventions
 
 All 32-byte hashes are in Bitcoin's *internal* little-endian order (natural
@@ -50,13 +58,13 @@ leaves fixed-width arithmetic. Measured with `Prim.rts_total_allocation`;
 see the test suite.
 
 ```
-mops add btc-light
+mops add btc
 ```
 
 ```motoko
 import Sha256 "mo:sha2/Sha256";
-import Header "mo:btc-light/Header";
-import Merkle "mo:btc-light/Merkle";
+import Header "mo:btc/Header";
+import Merkle "mo:btc/Merkle";
 
 let sha = Sha256.Digest(#sha256);            // one engine, reuse forever
 let parsed = Header.parseHeader(raw80);

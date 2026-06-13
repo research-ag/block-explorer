@@ -9,6 +9,7 @@ import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
 import Header "../src/Header";
+import Bytes "../src/internal/Bytes";
 import F "fixtures/Fixtures";
 
 let SHA = Sha256.Digest(#sha256);
@@ -85,7 +86,7 @@ suite(
     func refCheck(h : Blob, bits : Nat32) : Bool {
       let t = Header.nBitsToTarget(bits);
       if (t == 0 or t > Header.POW_LIMIT_TARGET) return false;
-      Header.leBytesToNat(h) <= t;
+      Bytes.leToNat(h) <= t;
     };
     func mkHash(bytes : [(Nat, Nat8)]) : Blob {
       let mut = VarArray.repeat<Nat8>(0, 32);
@@ -93,7 +94,10 @@ suite(
       Blob.fromVarArray(mut);
     };
     func agree(h : Blob, bits : Nat32) {
-      let got = switch (Header.checkPoW(h, bits)) { case (#ok()) true; case _ false };
+      let got = switch (Header.checkPoW(h, bits)) {
+        case (#ok()) true;
+        case _ false;
+      };
       assert got == refCheck(h, bits);
     };
     test(

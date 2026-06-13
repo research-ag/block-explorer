@@ -1,7 +1,7 @@
 [package]
-name = "btc-light"
+name = "btc"
 version = "0.1.0"
-description = "Bitcoin light-client primitives: header parsing and consensus validation, compact-difficulty math, chain work, median-time-past, retargeting, double-SHA256 and merkle roots. Storage-agnostic."
+description = "Bitcoin primitives for Motoko: header parsing and consensus validation, compact-difficulty math, chain work, median-time-past, retargeting, double-SHA256 and merkle roots. Storage-agnostic; SPV today, room for full-node pieces later."
 repository = "https://github.com/research-ag/block-explorer"
 keywords = ["bitcoin", "spv", "header", "merkle", "consensus"]
 license = "MIT"

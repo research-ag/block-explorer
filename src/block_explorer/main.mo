@@ -32,7 +32,7 @@ import Sha256 "mo:sha2/Sha256";
 import PT "mo:promtracker";
 import StableTrie "mo:stable-trie/Enumeration";
 
-import Header "mo:btc-light/Header";
+import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";

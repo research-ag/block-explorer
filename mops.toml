@@ -8,7 +8,7 @@ sha2 = "0.1.14"
 promtracker = "1.0.1"
 stable-trie = "https://github.com/research-ag/stable-trie#main"
 enumeration = "0.2.0"
-btc-light = "./packages/btc-light"
+btc = "./packages/btc"
 heaviest-chain = "./packages/heaviest-chain"
 
 [dev-dependencies]
