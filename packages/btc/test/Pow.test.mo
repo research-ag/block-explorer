@@ -9,7 +9,6 @@ import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
 import Header "../src/Header";
-import Bytes "../src/internal/Bytes";
 import F "fixtures/Fixtures";
 
 let SHA = Sha256.Digest(#sha256);
@@ -83,10 +82,20 @@ suite(
 suite(
   "checkPoW bits-direct equivalence",
   func() {
+    // Reference oracle: interpret the 32-byte LE hash as a Nat and compare
+    // against the target. Mirrors checkPoW, including its rejection of
+    // exp < 3 (unreachably hard targets).
+    func leToNat(h : Blob) : Nat {
+      var acc : Nat = 0;
+      var i = h.size();
+      while (i > 0) { i -= 1; acc := acc * 256 + Nat8.toNat(h[i]) };
+      acc;
+    };
     func refCheck(h : Blob, bits : Nat32) : Bool {
+      if (bits >> 24 < 3) return false; // exp < 3 -> rejected
       let t = Header.nBitsToTarget(bits);
       if (t == 0 or t > Header.POW_LIMIT_TARGET) return false;
-      Bytes.leToNat(h) <= t;
+      leToNat(h) <= t;
     };
     func mkHash(bytes : [(Nat, Nat8)]) : Blob {
       let mut = VarArray.repeat<Nat8>(0, 32);
@@ -138,11 +147,15 @@ suite(
       },
     );
     test(
-      "exp < 3 fallback agrees",
+      "exp < 3 is rejected (target unreachably hard; not supported)",
       func() {
-        agree(mkHash([]), 0x0200_ffff); // tiny target, zero hash
-        agree(mkHash([(0, 1)]), 0x0200_ffff);
-        agree(mkHash([(1, 0xff), (0, 0xff)]), 0x0200_ffff);
+        // Even a hash that would satisfy the tiny target is rejected: checkPoW
+        // refuses exp < 3 outright rather than carry bignum comparison code.
+        assert not isOk(Header.checkPoW(mkHash([]), 0x0200_ffff));
+        assert not isOk(Header.checkPoW(mkHash([(0, 1)]), 0x0200_ffff));
+        assert not isOk(Header.checkPoW(mkHash([(1, 0xff), (0, 0xff)]), 0x0100_ffff));
+        // Boundary: exp == 3 is still handled normally (general window path).
+        agree(mkHash([]), 0x0300_ffff);
       },
     );
   },

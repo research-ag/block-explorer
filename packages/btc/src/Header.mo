@@ -217,10 +217,12 @@ module {
       return #err("nBits out of range"); // target > POW_LIMIT_TARGET
     };
     if (exp < 3) {
-      if (Bytes.leToNat(headerHashLE) > nBitsToTarget(bits)) {
-        return #err("proof-of-work failed");
-      };
-      return #ok();
+      // Targets with exp < 3 are below ~2^15 — roughly 2^160x harder than
+      // today's difficulty, i.e. unreachable for many decades and bounded by
+      // physics well before then. We reject such headers rather than carry a
+      // bignum hash-vs-target comparison for a case real chain data will
+      // never present. Revisit if Bitcoin difficulty ever approaches it.
+      return #err("nBits out of range");
     };
     // Bytes above the mantissa window must be zero (LE indices exp..31).
     var i = exp;
