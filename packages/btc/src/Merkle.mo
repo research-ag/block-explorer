@@ -13,7 +13,7 @@ import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
 
-import Bytes "internal/Bytes";
+import Bytes "Bytes";
 
 module {
 

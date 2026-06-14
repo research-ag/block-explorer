@@ -1,4 +1,4 @@
-// Benchmarks for the internal byte helpers (src/internal/Bytes).
+// Benchmarks for the byte helpers (src/Bytes).
 //
 // Rows are operations; columns are batch sizes. Inputs come from a real
 // 80-byte header blob: readLE32 pulls the 4-byte timestamp, slice32 carves a
@@ -8,12 +8,12 @@ import Array "mo:core/Array";
 import Bench "mo:bench-helper";
 
 import Header "../src/Header";
-import Bytes "../src/internal/Bytes";
+import Bytes "../src/Bytes";
 
 module {
   public func init() : Bench.V1 {
     let schema : Bench.Schema = {
-      name = "Internal byte helpers";
+      name = "Byte helpers";
       description = "readLE32 and slice32 over a header blob, batched";
       rows = ["readLE32", "slice32"];
       cols = ["1", "100"];

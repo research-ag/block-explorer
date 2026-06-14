@@ -38,10 +38,11 @@ room for full-node pieces later.
 
 ## Public API
 
-Everything documented above under `Header` and `Merkle` is the public
-surface. `src/internal/` (`Hex`, `Bytes`) holds generic, non-Bitcoin
-helpers used by the implementation — not part of the package API; don't
-import them directly.
+`Header`, `Merkle`, and `Bytes` are the public surface. `Bytes` holds
+generic little-endian byte helpers (`readLE32`, `writeLE32`, `slice32`) —
+public because consumers that mirror raw headers in their own storage reuse
+them. `src/internal/` (`Hex`) holds generic helpers used only by the
+implementation — not part of the package API; don't import it directly.
 
 ## Conventions
 

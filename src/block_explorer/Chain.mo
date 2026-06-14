@@ -33,6 +33,7 @@ import List "mo:core/List";
 import Map "mo:core/Map";
 import Nat "mo:core/Nat";
 import Nat8 "mo:core/Nat8";
+import Nat16 "mo:core/Nat16";
 import Nat32 "mo:core/Nat32";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
@@ -45,6 +46,7 @@ import StableTrie "mo:stable-trie/Enumeration";
 import ForkStore "mo:heaviest-chain/ForkStore";
 import Reorg "mo:heaviest-chain/Reorg";
 
+import Bytes "mo:btc/Bytes";
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 import Merkle "mo:btc/Merkle";
@@ -254,9 +256,10 @@ module {
   // One year in seconds (365 days). Freshness check on pushed headers.
   let ONE_YEAR_SECS : Nat = 31_536_000;
 
-  // Byte at little-endian position `i` (0..3) of a Nat32.
+  // Byte at little-endian position `i` (0..3) of a Nat32. Narrow the masked
+  // byte Nat32 -> Nat16 -> Nat8 via `let` Prim aliases (no Nat detour).
   func le32Byte(v : Nat32, i : Nat) : Nat8 {
-    Nat8.fromNat(Nat32.toNat((v >> (Nat32.fromNat(i) * 8)) & 0xff));
+    ((v >> (Nat32.fromNat(i) * 8)) & 0xff).toNat16().toNat8();
   };
 
   // Encode a block height as a 3-byte little-endian blob (txid-trie value).
@@ -270,14 +273,11 @@ module {
     Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000;
   };
 
-  // Slice the 32-byte txid at index `i` out of a flat hashes blob, indexing
-  // the Blob directly. (A Blob.toArray here converts the ENTIRE flat blob
-  // per extracted txid — quadratic: ~512 MB of churn to index one 4000-tx
-  // body.)
-  func txidAt(hashes : Blob, i : Nat) : Blob {
-    let off = i * 32;
-    Blob.fromArray(Array.tabulate<Nat8>(32, func(j) = hashes[off + j]));
-  };
+  // Slice the 32-byte txid at index `i` out of a flat hashes blob.
+  // Bytes.slice32 indexes the Blob directly — a Blob.toArray here would
+  // convert the ENTIRE flat blob per txid (quadratic: ~512 MB of churn to
+  // index one 4000-tx body).
+  func txidAt(hashes : Blob, i : Nat) : Blob = Bytes.slice32(hashes, i * 32);
 
   // ---------------------------------------------------------------------
   // Initialization.

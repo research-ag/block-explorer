@@ -40,6 +40,8 @@ import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
 import VarArray "mo:core/VarArray";
 
+import Bytes "mo:btc/Bytes";
+
 import Prim "mo:⛔";
 
 module {
@@ -61,13 +63,6 @@ module {
   // ---------------------------------------------------------------------
   // Blob writers (used only at encode time; reads use direct b[i]).
   // ---------------------------------------------------------------------
-
-  func writeLE32(buf : [var Nat8], off : Nat, v : Nat32) {
-    buf[off] := Nat8.fromNat((v & 0xff).toNat());
-    buf[off + 1] := Nat8.fromNat(((v >> 8) & 0xff).toNat());
-    buf[off + 2] := Nat8.fromNat(((v >> 16) & 0xff).toNat());
-    buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
-  };
 
   // Split into two Nat64 limbs WITHOUT bignum division: Nat64.fromIntWrap
   // takes the value mod 2^64 (= the low limb, exact for Nat) and
@@ -99,14 +94,6 @@ module {
   // Blob readers (direct, no toArray).
   // ---------------------------------------------------------------------
 
-  func readLE32(b : Blob, off : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(b[off].toNat());
-    let b1 = Nat32.fromNat(b[off + 1].toNat());
-    let b2 = Nat32.fromNat(b[off + 2].toNat());
-    let b3 = Nat32.fromNat(b[off + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
   // Assemble via two Nat64 limbs (3 bignum ops total) — per-byte
   // `acc * 256 + b` allocates a fresh, growing bignum every iteration.
   func readLE128(b : Blob, off : Nat) : Nat {
@@ -127,16 +114,16 @@ module {
 
   public func encode(f : Fields) : Blob {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
-    writeLE32(mut, 0, f.version);
-    writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
-    writeLE32(mut, 8, Nat32.fromNat(f.height));
+    Bytes.writeLE32(mut, 0, f.version);
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
+    Bytes.writeLE32(mut, 8, Nat32.fromNat(f.height));
     writeLE128(mut, 12, f.cumWork);
-    writeLE32(mut, 28, f.firstSeen);
+    Bytes.writeLE32(mut, 28, f.firstSeen);
     // bytes 32..36 reserved, already zero
     writeBlob32(mut, 36, f.merkle);
-    writeLE32(mut, 68, f.time);
-    writeLE32(mut, 72, f.bits);
-    writeLE32(mut, 76, f.nonce);
+    Bytes.writeLE32(mut, 68, f.time);
+    Bytes.writeLE32(mut, 72, f.bits);
+    Bytes.writeLE32(mut, 76, f.nonce);
     Blob.fromVarArray(mut);
   };
 
@@ -145,13 +132,11 @@ module {
   // no field round trips. The reserved bytes [32..36) are explicitly
   // zeroed (the copy left prev_hash bytes there).
   public func encodeFromRaw(raw : Blob, firstTxIndex : Nat, height : Nat, cumWork : Nat, firstSeen : Nat32) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, SIZE);
-    var i = 0;
-    while (i < SIZE) { mut[i] := raw[i]; i += 1 };
-    writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
-    writeLE32(mut, 8, Nat32.fromNat(height));
+    let mut = Blob.toVarArray(raw); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
+    Bytes.writeLE32(mut, 8, Nat32.fromNat(height));
     writeLE128(mut, 12, cumWork);
-    writeLE32(mut, 28, firstSeen);
+    Bytes.writeLE32(mut, 28, firstSeen);
     mut[32] := 0; mut[33] := 0; mut[34] := 0; mut[35] := 0; // reserved
     Blob.fromVarArray(mut);
   };
@@ -159,9 +144,7 @@ module {
   // Inverse patch: rebuild the raw 80-byte header from a value blob and the
   // block's prev_hash (the trie key of index - 1).
   public func toRawHeader(b : Blob, prevHash : Blob) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, SIZE);
-    var i = 0;
-    while (i < SIZE) { mut[i] := b[i]; i += 1 };
+    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
     var j = 0;
     while (j < 32) { mut[4 + j] := prevHash[j]; j += 1 };
     Blob.fromVarArray(mut);
@@ -170,35 +153,22 @@ module {
   // Copy of `b` with only firstTxIndex (bytes 4..8) replaced — a byte-level
   // patch, not a decode/re-encode of all nine fields.
   public func withFirstTxIndex(b : Blob, f : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, SIZE);
-    var i = 0;
-    while (i < SIZE) { mut[i] := b[i]; i += 1 };
-    writeLE32(mut, 4, Nat32.fromNat(f));
-    Blob.fromVarArray(mut);
-  };
-
-  // Slice 32 bytes out of a Blob into a fresh Blob without going via [Nat8].
-  func sliceBlob32(b : Blob, off : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, 32);
-    var i = 0;
-    while (i < 32) {
-      mut[i] := b[off + i];
-      i += 1;
-    };
+    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(f));
     Blob.fromVarArray(mut);
   };
 
   public func decode(b : Blob) : Fields {
     {
-      version = readLE32(b, 0);
-      firstTxIndex = readLE32(b, 4).toNat();
-      height = readLE32(b, 8).toNat();
+      version = Bytes.readLE32(b, 0);
+      firstTxIndex = Bytes.readLE32(b, 4).toNat();
+      height = Bytes.readLE32(b, 8).toNat();
       cumWork = readLE128(b, 12);
-      firstSeen = readLE32(b, 28);
-      merkle = sliceBlob32(b, 36);
-      time = readLE32(b, 68);
-      bits = readLE32(b, 72);
-      nonce = readLE32(b, 76);
+      firstSeen = Bytes.readLE32(b, 28);
+      merkle = Bytes.slice32(b, 36);
+      time = Bytes.readLE32(b, 68);
+      bits = Bytes.readLE32(b, 72);
+      nonce = Bytes.readLE32(b, 76);
     };
   };
 
@@ -207,15 +177,15 @@ module {
   // without allocating. Caller must pass a 76-byte blob (SIZE).
   // ---------------------------------------------------------------------
 
-  public func versionOf(b : Blob) : Nat32 = readLE32(b, 0);
-  public func firstTxIndexOf(b : Blob) : Nat = readLE32(b, 4).toNat();
-  public func heightOf(b : Blob) : Nat = readLE32(b, 8).toNat();
+  public func versionOf(b : Blob) : Nat32 = Bytes.readLE32(b, 0);
+  public func firstTxIndexOf(b : Blob) : Nat = Bytes.readLE32(b, 4).toNat();
+  public func heightOf(b : Blob) : Nat = Bytes.readLE32(b, 8).toNat();
   public func cumWorkOf(b : Blob) : Nat = readLE128(b, 12);
-  public func firstSeenOf(b : Blob) : Nat32 = readLE32(b, 28);
+  public func firstSeenOf(b : Blob) : Nat32 = Bytes.readLE32(b, 28);
   // Raw-identical region: same offsets as the wire header.
-  public func merkleOf(b : Blob) : Blob = sliceBlob32(b, 36);
-  public func timeOf(b : Blob) : Nat32 = readLE32(b, 68);
-  public func bitsOf(b : Blob) : Nat32 = readLE32(b, 72);
-  public func nonceOf(b : Blob) : Nat32 = readLE32(b, 76);
+  public func merkleOf(b : Blob) : Blob = Bytes.slice32(b, 36);
+  public func timeOf(b : Blob) : Nat32 = Bytes.readLE32(b, 68);
+  public func bitsOf(b : Blob) : Nat32 = Bytes.readLE32(b, 72);
+  public func nonceOf(b : Blob) : Nat32 = Bytes.readLE32(b, 76);
 
 };

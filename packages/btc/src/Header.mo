@@ -12,7 +12,7 @@ import Prim "mo:⛔";
 
 import Sha256 "mo:sha2/Sha256";
 
-import Bytes "internal/Bytes";
+import Bytes "Bytes";
 import Hex "internal/Hex";
 
 module {
