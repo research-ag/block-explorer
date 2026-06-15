@@ -22,7 +22,7 @@ module {
     };
 
     let counts : [Nat] = [1, 16, 256, 2048];
-    let sha = Sha256.Digest(#sha256);
+    let sha = Sha256.new(#sha256);
 
     // hashes[ci]: `counts[ci]` leaves concatenated; each leaf byte derived from
     // its index so no two leaves collide.

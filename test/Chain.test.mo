@@ -38,7 +38,7 @@ let ANON : Principal = Principal.fromText("2vxsx-fae");
 
 // Full 32-byte keys so synthetic (non-PoW) headers store without
 // tripping the production trailing-zero truncation invariant.
-let SHA = Sha256.Digest(#sha256);
+let SHA = Sha256.new(#sha256);
 
 func newChain() : Chain.State = Chain.emptyForTest();
 

@@ -18,7 +18,7 @@ import Merkle "mo:btc/Merkle";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Chain "../src/block_explorer/Chain";
 
-let SHA = Sha256.Digest(#sha256);
+let SHA = Sha256.new(#sha256);
 let NOW : Int = 9_999_999_999;
 let UP = Principal.fromText("aaaaa-aa");
 let EASY : Nat32 = 0x207fffff;

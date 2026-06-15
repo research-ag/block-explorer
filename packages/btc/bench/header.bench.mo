@@ -23,7 +23,7 @@ module {
     // Single 80-byte input (Bitcoin genesis) reused by every routine, and one
     // sha-256 engine reused across calls (headerHashBlob resets it).
     let header : Blob = Header.hexToBlob(Header.GENESIS_HEADER_HEX);
-    let sha = Sha256.Digest(#sha256);
+    let sha = Sha256.new(#sha256);
     let counts : [Nat] = [1, 10, 100];
 
     func runParse(n : Nat) {

@@ -86,7 +86,7 @@ persistent actor BlockExplorer {
   // ~3.3 KB of heap, reuse via reset() is ~0.4 KB per hash. A module-level
   // instance is impossible (M0014), so the actor owns it. Safe to share:
   // each use is synchronous within one message, never held across an await.
-  transient let sha = Sha256.Digest(#sha256);
+  transient let sha = Sha256.new(#sha256);
 
   // ---------------------------------------------------------------------
   // Bitcoin canister interface (ghsi2-tqaaa-aaaan-aaaca-cai).

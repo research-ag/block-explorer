@@ -15,7 +15,7 @@ import Sha256 "mo:sha2/Sha256";
 import Headers_ "../src/block_explorer/Headers";
 import Uploaders_ "../src/block_explorer/Uploaders";
 
-let SHA = Sha256.Digest(#sha256);
+let SHA = Sha256.new(#sha256);
 
 // Real mainnet headers 300000..300100 (no retarget boundary inside).
 let ROOT_HEX = "020000007ef055e1674d2e6551dba41cd214debbee34aeb544c7ec670000000000000000d3998963f80c5bab43fe8c26228e98d030edf4dcbe48a666f5c39e2d7a885c9102c86d536c890019593a470d";
@@ -219,8 +219,8 @@ do {
 // ---- sha2 internals: where do headerHashBlob's bytes go? ----
 do {
   let raw = raws[0];
-  measure("Sha256 Digest() construct", 1000, func(_) { ignore Sha256.Digest(#sha256) });
-  let d = Sha256.Digest(#sha256);
+  measure("Sha256 Digest() construct", 1000, func(_) { ignore Sha256.new(#sha256) });
+  let d = Sha256.new(#sha256);
   measure("writeBlob(80B) on reused  ", 1000, func(_) { d.reset(); d.writeBlob(raw) });
   measure("reset+write+sum on reused ", 1000, func(_) { d.reset(); d.writeBlob(raw); ignore d.sum() });
   measure("fromBlob (fresh Digest)   ", 1000, func(_) { ignore Sha256.fromBlob(#sha256, raw) });
@@ -237,7 +237,7 @@ do {
   var seed : Nat32 = 1;
   func synthKey() : Blob {
     seed +%= 0x9e3779b9;
-    let d2 = Sha256.Digest(#sha256);
+    let d2 = Sha256.new(#sha256);
     d2.writeBlob(Prim.encodeUtf8(debug_show seed));
     d2.sum();
   };

@@ -312,7 +312,7 @@ module {
       case (?p) p;
       case null return #err("could not parse header");
     };
-    validateParsed(parsed, headerHashBlob(Sha256.Digest(#sha256), header), expectedBits, prevHashLE, mtp, nowSecs);
+    validateParsed(parsed, headerHashBlob(Sha256.new(#sha256), header), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };

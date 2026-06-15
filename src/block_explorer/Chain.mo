@@ -1334,7 +1334,7 @@ module {
   // headers store without tripping the trailing-zero truncation invariant).
   public func emptyForTest() : State {
     let s = newState(newHeaderTrie(Headers.HASH_SIZE), newTxTrie(TEST_TX_ROOT_ARIDITY));
-    initGenesis(s, Sha256.Digest(#sha256), 0, Principal.fromText("aaaaa-aa"));
+    initGenesis(s, Sha256.new(#sha256), 0, Principal.fromText("aaaaa-aa"));
     s;
   };
 
@@ -1343,7 +1343,7 @@ module {
   // truncation path with real PoW headers.
   public func fromRootHex(rawHex : Text, keySize : Nat) : State {
     let s = newState(newHeaderTrie(keySize), newTxTrie(TEST_TX_ROOT_ARIDITY));
-    initRoot(s, Sha256.Digest(#sha256), Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
+    initRoot(s, Sha256.new(#sha256), Header.hexToBlob(rawHex), 0, Principal.fromText("aaaaa-aa"));
     s;
   };
 

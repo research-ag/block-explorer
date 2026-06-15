@@ -11,7 +11,7 @@ import Sha256 "mo:sha2/Sha256";
 import Header "../src/Header";
 import F "fixtures/Fixtures";
 
-let SHA = Sha256.Digest(#sha256);
+let SHA = Sha256.new(#sha256);
 
 func isOk<E>(r : Result.Result<(), E>) : Bool {
   switch r { case (#ok()) true; case (#err _) false };

@@ -13,7 +13,7 @@ import Header "../src/Header";
 import Sha256 "mo:sha2/Sha256";
 import Merkle "../src/Merkle";
 
-let SHA = Sha256.Digest(#sha256);
+let SHA = Sha256.new(#sha256);
 
 // Pack BE-hex hashes into a single flat LE-byte hashes blob, the
 // shape that `Merkle.root` consumes.

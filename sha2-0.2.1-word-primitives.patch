@@ -1,0 +1,115 @@
+--- a/src/Sha256.mo
++++ b/src/Sha256.mo
+@@ -13,7 +13,7 @@
+ /// ```
+ 
+ import { type Iter } "mo:core/Types";
+-import { arrayToBlob } "mo:prim";
++import { arrayToBlob; nat8ToNat; nat8ToNat16 } "mo:prim";
+ 
+ import Buffer "sha256/buffer";
+ import State "sha256/state";
+@@ -237,6 +237,103 @@
+     return stateBlob(self);
+   };
+ 
++  // --- Word-level primitives (experimental: hashing without Blob round-trips)
++
++  /// Move a CLOSED digest's state (its 32-byte sum) straight into a cleared
++  /// message buffer and re-seed the state to the IV, leaving the digest OPEN —
++  /// the sum becomes the first 32 bytes of a fresh message. Used as the "left"
++  /// half when combining two hashes (a merkle tree). `#sha256` only.
++  public func loadStateToMsg(self : Digest) {
++    assert self.algo == #sha256;
++    let s = self.state;
++    let buf = self.buffer;
++    let msg = buf.msg;
++    // state -> message buffer (unrolled; a loop adds counter/compare/branch
++    // overhead per half-word on top of the bounds checks)
++    msg[0] := s[0]; msg[1] := s[1]; msg[2] := s[2]; msg[3] := s[3];
++    msg[4] := s[4]; msg[5] := s[5]; msg[6] := s[6]; msg[7] := s[7];
++    msg[8] := s[8]; msg[9] := s[9]; msg[10] := s[10]; msg[11] := s[11];
++    msg[12] := s[12]; msg[13] := s[13]; msg[14] := s[14]; msg[15] := s[15];
++    s[0] := 0x6a09; s[1] := 0xe667; s[2] := 0xbb67; s[3] := 0xae85; // re-seed IV
++    s[4] := 0x3c6e; s[5] := 0xf372; s[6] := 0xa54f; s[7] := 0xf53a;
++    s[8] := 0x510e; s[9] := 0x527f; s[10] := 0x9b05; s[11] := 0x688c;
++    s[12] := 0x1f83; s[13] := 0xd9ab; s[14] := 0x5be0; s[15] := 0xcd19;
++    buf.i_msg := 16; // a 32-byte message now sits in msg[0..16)
++    buf.i_block := 0;
++    buf.high := true;
++    buf.word := 0;
++    self.closed := false;
++  };
++
++  /// Append another (closed) digest's state — its 32-byte sum, read directly as
++  /// 16 `Nat16` half-words — to `self`'s message buffer. `self` must be open at
++  /// a half-word boundary. Processes a block as soon as the buffer fills, like
++  /// the byte writers. Used as the "right" half when combining two hashes.
++  public func writeSum(self : Digest, other : Digest) {
++    let src = other.state;
++    let buf = self.buffer;
++    let msg = buf.msg;
++    var i_msg = buf.i_msg;
++    var k = 0;
++    while (k < 16) {
++      msg[nat8ToNat(i_msg)] := src[k];
++      i_msg +%= 1;
++      k += 1;
++      if (i_msg == 32) {
++        State.process_block_from_msg(self.state, msg);
++        i_msg := 0;
++        buf.i_block +%= 1;
++      };
++    };
++    buf.i_msg := i_msg;
++  };
++
++  /// Finalize the current message and reopen with it reloaded as the start of a
++  /// fresh message (`close` + `loadStateToMsg`). Stays OPEN.
++  public func reloadSum(self : Digest) {
++    _Digest.close(self);
++    loadStateToMsg(self);
++  };
++
++  /// `sha256(sha256(data))` in place, leaving the result in the state and the
++  /// digest CLOSED — no readout, no allocation. Read it later with `readSum`,
++  /// or feed it into another digest with `writeSum`.
++  public func closeDouble(self : Digest) {
++    reloadSum(self);
++    _Digest.close(self);
++  };
++
++  /// `sha256(sha256(data))` in place, returned as a Blob.
++  public func sumDouble(self : Digest) : Blob {
++    reloadSum(self);
++    sum(self);
++  };
++
++  /// Write 32 bytes from `blob` at byte offset `off` into the message buffer as
++  /// 16 half-words (high byte first) — no slice, no closure, unlike
++  /// `writeBlob`. Processes a block when the buffer fills. For feeding a 32-byte
++  /// leaf straight from a flat hashes blob.
++  public func writeBlob32(self : Digest, blob : Blob, off : Nat) {
++    let buf = self.buffer;
++    let msg = buf.msg;
++    var i_msg = buf.i_msg;
++    var j = 0;
++    while (j < 16) {
++      msg[nat8ToNat(i_msg)] := nat8ToNat16(blob[off + 2 * j]) << 8 | nat8ToNat16(blob[off + 2 * j + 1]);
++      i_msg +%= 1;
++      j += 1;
++      if (i_msg == 32) {
++        State.process_block_from_msg(self.state, msg);
++        i_msg := 0;
++        buf.i_block +%= 1;
++      };
++    };
++    buf.i_msg := i_msg;
++  };
++
++  /// The sum of a CLOSED digest, as a Blob.
++  public func readSum(self : Digest) : Blob = stateBlob(self);
++
+   /// Get the current hash value without finalizing the digest.
+   /// This internally clones the digest, finalizes the clone, and returns the hash.
+   /// The purpose is to allow obtaining intermediate hash values without closing the original digest.
