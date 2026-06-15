@@ -6,12 +6,18 @@ every deploy (the git history of this directory is the deploy log).
 
 | field | value |
 |---|---|
-| commit | `a1bc103a4a802a565d3c864223cb98b6dd9becf2` (`a1bc103`) |
+| commit | `571ddf7f27ef8ac795100651affa7df8ad50f8cd` (`571ddf7`) |
 | date | 2026-06-15 |
 | moc | 1.7.0 |
+| moc flags | `--max-stable-pages 2097152` (128 GiB) — block_explorer only |
 | block_explorer | `5alk6-kyaaa-aaaag-ay2sq-cai` |
 | header_fetcher | `5hkmk-haaaa-aaaag-ay2sa-cai` |
 | frontend (assets) | `5jibc-4qaaa-aaaag-ay2ta-cai` |
+
+> Stable layout is **unchanged** from the previous deploy (`a1bc103`): both
+> `.most` files are byte-identical. The only difference is the
+> `--max-stable-pages` flag (a runtime growth cap, not a stable type), which
+> raised the txid trie's ceiling from 4 GiB to 128 GiB.
 
 ## Dependency versions baked into the stable layout
 
