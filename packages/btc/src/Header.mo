@@ -69,19 +69,15 @@ module {
   };
 
   // doubleSHA256 of an 80-byte header, in internal LE order, on a
-  // caller-provided engine. Constructing a Sha256.Digest costs ~3.3 KB of
-  // heap (object + method closures + buffers) while reuse via reset() is
-  // ~0.4 KB per hash — so the actor holds ONE transient engine for its whole
-  // lifetime and threads it through (a module-level instance is impossible:
-  // M0014, non-static expression in library). Resets the engine first;
-  // leaves it in a finished state.
+  // caller-provided engine (reused across calls via reset()). `sumDouble`
+  // does the second hash in place — the first digest stays in the engine's
+  // state and is reloaded into the message buffer, skipping the 32-byte
+  // intermediate Blob and the byte-by-byte re-parse a `writeBlob(first); sum()`
+  // would do. Leaves the engine finished.
   public func headerHashBlob(d : Sha256.Digest, b : Blob) : Blob {
     d.reset();
     d.writeBlob(b);
-    let first = d.sum();
-    d.reset();
-    d.writeBlob(first);
-    d.sum();
+    d.sumDouble();
   };
 
   // Reverse the byte order of a 32-byte Blob (LE <-> BE display).
