@@ -418,6 +418,12 @@ async function main(): Promise<number> {
       saveState(state);
     } catch (e) {
       logErr(`iteration failed: ${e instanceof Error ? e.message : e}`);
+      // A flush may have advanced the on-disk state (saveState after each
+      // successful batch) before the throw. Re-sync the in-memory state from
+      // disk — otherwise the next iteration resumes from this run's stale
+      // STARTING height, re-sending already-accepted batches as duplicates and
+      // overwriting the file back down to that height.
+      state = loadState();
     }
     if (oneShot) break;
     await sleep(POLL_INTERVAL_S * 1000);

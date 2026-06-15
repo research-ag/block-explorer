@@ -24,8 +24,8 @@
  *        b. `getblock <hash> 1`          — txid list in chain order
  *        c. Convert hash + each txid from BE display → 32-byte internal LE
  *        d. Concatenate txids into one Uint8Array (tx_count * 32 bytes)
- *        e. Call `bodies.put_body(blockHashLE, BigInt(tx_count), hashesBlob)`
- *           - On `{ ok: PutOk }`         : log accepted / duplicate
+ *        e. Call `push_body(blockHashLE, BigInt(tx_count), hashesBlob)`
+ *           - On `{ ok: PushBodyOk }`    : log accepted / duplicate
  *           - On `{ err: text }`         : log error and stop (keep state)
  *      Persist `next = h + 1` after each successful put.
  *   4. Repeat after POLL_INTERVAL seconds (or one-shot when `--once`).
@@ -277,7 +277,7 @@ async function processOneIteration(actor, state) {
                 return state;
         }
         // Single block bigger than the per-batch txid cap — can't be sent
-        // even as its own batch via put_bodies. Fall back to put_body
+        // even as its own batch via push_bodies. Fall back to push_body
         // (single, no batch cap on the canister side).
         if (txCount > MAX_BATCH_TXIDS) {
             const blockHashLE = hexReverse32(hashHex);
@@ -348,6 +348,12 @@ async function main() {
         }
         catch (e) {
             logErr(`iteration failed: ${e instanceof Error ? e.message : e}`);
+            // A flush may have advanced the on-disk state (saveState after each
+            // successful batch) before the throw. Re-sync the in-memory state from
+            // disk — otherwise the next iteration resumes from this run's stale
+            // STARTING height, re-sending already-accepted batches as duplicates and
+            // overwriting the file back down to that height.
+            state = loadState();
         }
         if (oneShot)
             break;
