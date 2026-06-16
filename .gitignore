@@ -15,3 +15,12 @@ mops.lock
 dfx.json
 icp.yaml
 build/
+
+# Local runtime data / scratch (root-anchored so they don't match the tracked
+# packages/sha2/.../state/process/blocks/ source dir).
+/blocks/
+/blockchain_headers
+/out*.raw
+/logs
+/stale_headers.csv
+__pycache__/
