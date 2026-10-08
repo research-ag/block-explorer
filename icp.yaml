@@ -1,3 +1,9 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 8001
+
 canisters:
   - name: block_explorer
     recipe:
@@ -17,6 +23,6 @@ canisters:
         idl: .icp/cache/artifacts/header_fetcher.did
   - name: frontend
     recipe:
-      type: "@dfinity/asset-canister@v2.1.0"
+      type: "@dfinity/static-site@v0.4.1"
       configuration:
         dir: frontend
