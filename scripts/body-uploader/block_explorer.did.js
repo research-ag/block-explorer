@@ -18,6 +18,11 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'bodies_next_height' : IDL.Func([], [IDL.Nat], ['query']),
+    'have_hashes' : IDL.Func(
+        [IDL.Vec(IDL.Text)],
+        [IDL.Vec(IDL.Bool)],
+        ['query'],
+      ),
     'push_bodies' : IDL.Func(
         [IDL.Vec(IDL.Tuple(IDL.Vec(IDL.Nat8), IDL.Nat, IDL.Vec(IDL.Nat8)))],
         [BodyBatchResultR],

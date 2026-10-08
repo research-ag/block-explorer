@@ -17,6 +17,7 @@ export interface BodyBatchResult {
 export type BodyBatchResultR = { 'ok' : BodyBatchResult } | { 'err' : string };
 export interface _SERVICE {
   'bodies_next_height' : ActorMethod<[], bigint>,
+  'have_hashes' : ActorMethod<[Array<string>], Array<boolean>>,
   'push_bodies' : ActorMethod<
     [Array<[Uint8Array | number[], bigint, Uint8Array | number[]]>],
     BodyBatchResultR

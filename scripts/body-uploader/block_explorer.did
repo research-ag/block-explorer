@@ -16,6 +16,10 @@ type BodyBatchResultR = variant { ok : BodyBatchResult; err : text };
 service : {
   // Next canonical height whose body is still missing (contiguous frontier).
   bodies_next_height : () -> (nat) query;
+  // For each big-endian display-hash, is the header for that block known?
+  // Used by body-uploader to skip push_body(ies) calls (which cost cycles)
+  // when the header relay hasn't reached the corresponding height yet.
+  have_hashes : (hashes_be_hex : vec text) -> (vec bool) query;
   // Index one block's body (block_hash internal LE, tx_count, concatenated
   // txids internal LE). Allowed for any known block whose body isn't known.
   push_body : (blob, nat, blob) -> (PushBodyResult);
