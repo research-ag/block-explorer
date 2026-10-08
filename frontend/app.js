@@ -177,6 +177,23 @@ function fmtTime(unixSecs) {
   return d.toISOString().replace("T", " ").replace(".000Z", "");
 }
 
+// Relative age of a unix-seconds timestamp, e.g. "(5:03 min. ago)" when
+// under an hour, "(1:05:03 ago)" otherwise. Clamped to zero for timestamps
+// that are (slightly) in the future, e.g. due to clock skew.
+function fmtAge(unixSecs) {
+  const totalSecs = Math.max(
+    0,
+    Math.floor(Date.now() / 1000 - Number(unixSecs)),
+  );
+  const h = Math.floor(totalSecs / 3600);
+  const m = Math.floor((totalSecs % 3600) / 60);
+  const s = totalSecs % 60;
+  if (h === 0) {
+    return `(${m}:${String(s).padStart(2, "0")} min. ago)`;
+  }
+  return `(${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")} ago)`;
+}
+
 function fmtDifficulty(x1e8) {
   const whole = x1e8 / 100000000n;
   const frac = x1e8 % 100000000n;
@@ -274,14 +291,40 @@ document.addEventListener("click", (e) => {
 let currentHeight = 0n;
 let tipHeight = 0n;
 
+// Raw unix-seconds timestamps backing the live-updating age lines next to
+// the tip time tiles. Populated whenever the underlying tile is rendered;
+// read once per second by the age ticker below — never refetched for it.
+let tipTimeSecs = null;
+let txidTipTimeSecs = null;
+
 function renderTip(tip, totalBlocks) {
   tipHeight = tip.height;
   $("tip-height").textContent = fmtNat(tip.height);
   $("tip-hash").textContent = tip.hash_be_hex;
   $("tip-time").textContent = fmtTime(tip.time);
+  tipTimeSecs = Number(tip.time);
+  $("tip-time-age").textContent = fmtAge(tipTimeSecs);
   $("tip-difficulty").textContent = fmtDifficultyShort(tip.difficulty_x1e8);
   $("tip-stored").textContent = fmtNat(totalBlocks);
 }
+
+// Equivalent of a useEffect(() => { const id = setInterval(...); return
+// () => clearInterval(id); }, []): ticks the two age lines once a second
+// from the timestamps already in tipTimeSecs/txidTipTimeSecs, and tears the
+// interval down on page unload (there being no component unmount here).
+function setupAgeTicker() {
+  const tick = () => {
+    if (tipTimeSecs !== null) {
+      $("tip-time-age").textContent = fmtAge(tipTimeSecs);
+    }
+    if (txidTipTimeSecs !== null) {
+      $("tip-txid-time-age").textContent = fmtAge(txidTipTimeSecs);
+    }
+  };
+  const id = setInterval(tick, 1000);
+  window.addEventListener("pagehide", () => clearInterval(id));
+}
+setupAgeTicker();
 
 // Refresh the indexed-transaction summary panels (independent of the
 // current block; fired fire-and-forget alongside tip refreshes).
@@ -300,6 +343,9 @@ async function refreshTxidStatus() {
   $("tip-txid-time").textContent = s.txid_tip_time.length
     ? fmtTime(s.txid_tip_time[0])
     : "—";
+  txidTipTimeSecs = s.txid_tip_time.length ? Number(s.txid_tip_time[0]) : null;
+  $("tip-txid-time-age").textContent =
+    txidTipTimeSecs !== null ? fmtAge(txidTipTimeSecs) : "";
 }
 
 function renderBlock(bi) {

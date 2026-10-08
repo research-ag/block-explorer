@@ -20,8 +20,9 @@
           <button class="copy-btn" data-copy-target="tip-hash" title="Copy">⎘</button>
         </div>
         <div>
-          <span class="label">Tip time</span>
+          <span class="label">Tip time (UTC)</span>
           <span id="tip-time" class="value">…</span>
+          <span id="tip-time-age" class="age"></span>
         </div>
         <div>
           <span class="label">Difficulty</span>
@@ -40,8 +41,9 @@
           <span id="tip-txid-height" class="value">…</span>
         </div>
         <div>
-          <span class="label">Txid tip time</span>
+          <span class="label">Txid tip time (UTC)</span>
           <span id="tip-txid-time" class="value">…</span>
+          <span id="tip-txid-time-age" class="age"></span>
         </div>
         <div class="tip-refresh">
           <button id="btn-refresh" title="Refresh tip + current view">
