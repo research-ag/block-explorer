@@ -1,5 +1,5 @@
 [toolchain]
-moc = "1.7.0"
+moc = "2.0.0"
 wasmtime = "36.0.9"
 
 [dependencies]

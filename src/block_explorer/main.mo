@@ -328,7 +328,7 @@ persistent actor BlockExplorer {
 
   // tx_count of the canonical block at `height`, or null if its body
   // is not yet known.
-  public query func tx_count_of(height : Nat) : async ?Nat = async chain.txCountAt(height);
+  public query func tx_count_of(height : Nat) : async ?Nat = chain.txCountAt(height);
 
   // tx_count of any block (canonical or fork) by big-endian display hash,
   // or null if unknown / no body. Works for fork blocks whose bodies were
@@ -340,7 +340,7 @@ persistent actor BlockExplorer {
   };
 
   // Body summary (tx_count + first_tx_index) for a canonical block.
-  public query func get_body(height : Nat) : async ?Chain.BodyInfo = async chain.bodyAt(height);
+  public query func get_body(height : Nat) : async ?Chain.BodyInfo = chain.bodyAt(height);
 
   // All known blocks containing `txid` (32 bytes, internal LE): the
   // canonical block's height (if any) plus the big-endian display hashes of
@@ -363,10 +363,10 @@ persistent actor BlockExplorer {
   };
 
   // The next height whose body may be uploaded (= count of indexed bodies).
-  public query func bodies_next_height() : async Nat = async chain.bodiesHeight();
+  public query func bodies_next_height() : async Nat = chain.bodiesHeight();
 
   // Total transactions indexed across the canonical chain.
-  public query func total_indexed_txids() : async Nat = async chain.totalIndexedTxids();
+  public query func total_indexed_txids() : async Nat = chain.totalIndexedTxids();
 
   // Summary of the indexed-transaction frontier for the UI.
   public type TxidStatus = {
