@@ -547,14 +547,9 @@ async function processOneIteration(actor, state) {
         // (single, no batch cap on the canister side).
         if (txCount > MAX_BATCH_TXIDS) {
             const blockHashLE = hexReverse32(hashHex);
-            const firstTxidLE = hexReverse32(txids[0]);
-            const hashesBlob = new Uint8Array(txCount * 32);
-            hashesBlob.set(firstTxidLE, 0);
-            for (let i = 1; i < txCount; i += 1) {
-                hashesBlob.set(hexReverse32(txids[i]), i * 32);
-            }
-            const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
-            const result = await actor.push_body(blockHashLE, BigInt(txCount), hashesBlob, coinbaseTx);
+            const txidsLE = txids.map(hexReverse32);
+            const coinbaseTx = await fetchCoinbase(hashHex, txids[0], txidsLE[0]);
+            const result = await actor.push_body(blockHashLE, txidsLE, coinbaseTx);
             if ("ok" in result) {
                 const ok = result.ok;
                 log(`push_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
@@ -582,18 +577,13 @@ async function processOneIteration(actor, state) {
             return state;
         }
         const blockHashLE = hexReverse32(hashHex);
-        const firstTxidLE = hexReverse32(txids[0]);
-        const hashesBlob = new Uint8Array(txCount * 32);
-        hashesBlob.set(firstTxidLE, 0);
-        for (let i = 1; i < txCount; i += 1) {
-            hashesBlob.set(hexReverse32(txids[i]), i * 32);
-        }
-        const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
+        const txidsLE = txids.map(hexReverse32);
+        const coinbaseTx = await fetchCoinbase(hashHex, txids[0], txidsLE[0]);
         pending.push({
             height: h,
             hashHex,
             txCount,
-            entry: [blockHashLE, BigInt(txCount), hashesBlob, coinbaseTx],
+            entry: [blockHashLE, txidsLE, coinbaseTx],
         });
         pendingTxids += txCount;
     }

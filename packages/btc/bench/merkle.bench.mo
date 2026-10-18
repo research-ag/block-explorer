@@ -1,8 +1,8 @@
 // Benchmark for merkle-root construction.
 //
-// One row (root); columns are tx counts. Each column feeds Merkle.root a
-// concatenated blob of `count` distinct 32-byte leaves, so the per-call cost
-// tracks the O(n) hashing work as the block fills up.
+// One row (root); columns are tx counts. Each column feeds Merkle.root
+// `count` distinct 32-byte leaves, so the per-call cost tracks the O(n)
+// hashing work as the block fills up.
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
@@ -22,16 +22,21 @@ module {
 
     let counts : [Nat] = [1, 16, 256, 2048];
 
-    // hashes[ci]: `counts[ci]` leaves concatenated; each leaf byte derived from
-    // its index so no two leaves collide.
-    let hashes : [Blob] = Array.map<Nat, Blob>(
+    // txids[ci]: `counts[ci]` distinct 32-byte leaves. Each byte derived
+    // from a global index so no two leaves within a column collide.
+    let txids : [[Blob]] = Array.map<Nat, [Blob]>(
       counts,
-      func(n) = Blob.fromArray(Array.tabulate<Nat8>(n * 32, func(i) = Nat8.fromIntWrap(i))),
+      func(n) = Array.tabulate<Blob>(
+        n,
+        func(i) = Blob.fromArray(
+          Array.tabulate<Nat8>(32, func(j) = Nat8.fromIntWrap(i * 32 + j))
+        ),
+      ),
     );
 
     let routines : [() -> ()] = Array.tabulate<() -> ()>(
       schema.cols.size(),
-      func(ci) = func() = ignore Merkle.root(hashes[ci], counts[ci]),
+      func(ci) = func() = ignore Merkle.root(txids[ci]),
     );
 
     Bench.V1(schema, func(_ri : Nat, ci : Nat) = routines[ci]());

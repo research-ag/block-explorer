@@ -23,8 +23,7 @@ export interface _SERVICE {
       Array<
         [
           Uint8Array | number[],
-          bigint,
-          Uint8Array | number[],
+          Array<Uint8Array | number[]>,
           Uint8Array | number[],
         ]
       >,
@@ -34,8 +33,7 @@ export interface _SERVICE {
   'push_body' : ActorMethod<
     [
       Uint8Array | number[],
-      bigint,
-      Uint8Array | number[],
+      Array<Uint8Array | number[]>,
       Uint8Array | number[],
     ],
     PushBodyResult

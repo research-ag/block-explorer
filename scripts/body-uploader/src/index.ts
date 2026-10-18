@@ -434,8 +434,8 @@ async function makeActor(): Promise<_SERVICE> {
 // ---------------------------------------------------------------------------
 
 // Type aliases for readability — these match block_explorer.did.d.ts.
-// (block_hash_LE, tx_count, hashes_blob, coinbase_tx)
-type BatchEntry = [Uint8Array, bigint, Uint8Array, Uint8Array];
+// (block_hash_LE, txids_vec_blob, coinbase_tx)
+type BatchEntry = [Uint8Array, Uint8Array[], Uint8Array];
 
 interface PendingEntry {
   height: number;
@@ -634,17 +634,11 @@ async function processOneIteration(actor: _SERVICE, state: State): Promise<State
     // (single, no batch cap on the canister side).
     if (txCount > MAX_BATCH_TXIDS) {
       const blockHashLE = hexReverse32(hashHex);
-      const firstTxidLE = hexReverse32(txids[0]);
-      const hashesBlob = new Uint8Array(txCount * 32);
-      hashesBlob.set(firstTxidLE, 0);
-      for (let i = 1; i < txCount; i += 1) {
-        hashesBlob.set(hexReverse32(txids[i]), i * 32);
-      }
-      const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
+      const txidsLE = txids.map(hexReverse32);
+      const coinbaseTx = await fetchCoinbase(hashHex, txids[0], txidsLE[0]);
       const result = await actor.push_body(
         blockHashLE,
-        BigInt(txCount),
-        hashesBlob,
+        txidsLE,
         coinbaseTx,
       );
       if ("ok" in result) {
@@ -680,19 +674,14 @@ async function processOneIteration(actor: _SERVICE, state: State): Promise<State
     }
 
     const blockHashLE = hexReverse32(hashHex);
-    const firstTxidLE = hexReverse32(txids[0]);
-    const hashesBlob = new Uint8Array(txCount * 32);
-    hashesBlob.set(firstTxidLE, 0);
-    for (let i = 1; i < txCount; i += 1) {
-      hashesBlob.set(hexReverse32(txids[i]), i * 32);
-    }
-    const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
+    const txidsLE = txids.map(hexReverse32);
+    const coinbaseTx = await fetchCoinbase(hashHex, txids[0], txidsLE[0]);
 
     pending.push({
       height: h,
       hashHex,
       txCount,
-      entry: [blockHashLE, BigInt(txCount), hashesBlob, coinbaseTx],
+      entry: [blockHashLE, txidsLE, coinbaseTx],
     });
     pendingTxids += txCount;
   }

@@ -61,9 +61,6 @@ func dSha(b : Blob) : Blob {
   d.writeBlob(b);
   d.sumDouble();
 };
-func cat2(a : Blob, b : Blob) : Blob {
-  Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i-32]));
-};
 
 let c = Chain.emptyForTest();
 // Raw bytes shared across the BIP30 duplicate-coinbase pairs; the resulting
@@ -81,7 +78,7 @@ let GENESIS_COINBASE : Blob = Header.hexToBlob(
 );
 
 // genesis body
-ignore Chain.pushBody(c, Chain.tipBlock(c).hash, 1, HeaderValue.merkleOf(Chain.tipBlock(c).value), GENESIS_COINBASE);
+ignore Chain.pushBody(c, Chain.tipBlock(c).hash, [HeaderValue.merkleOf(Chain.tipBlock(c).value)], GENESIS_COINBASE);
 
 var h = 1;
 var prev = Chain.tipBlock(c).hash;
@@ -89,18 +86,18 @@ label build while (h <= 91_890) {
   // Pick the coinbase bytes and the body's txid list for this height. The
   // 2-tx heights are the real BIP30 cases where a duplicate-coinbase block
   // (91812/91880) also carries a second tx whose txid is height-unique.
-  let (cbTx, txs, count) : (Blob, Blob, Nat) = if (h == 91_722) (cbA, A, 1)
-    else if (h == 91_812) (cbB, cat2(B, txidFor(h)), 2)
-    else if (h == 91_842) (cbB, B, 1)
-    else if (h == 91_880) (cbA, cat2(A, txidFor(h)), 2)
-    else (rawCoinbaseFor(h), dSha(rawCoinbaseFor(h)), 1);
-  let merkle = Merkle.root(txs, count);
+  let (cbTx, txs) : (Blob, [Blob]) = if (h == 91_722) (cbA, [A])
+    else if (h == 91_812) (cbB, [B, txidFor(h)])
+    else if (h == 91_842) (cbB, [B])
+    else if (h == 91_880) (cbA, [A, txidFor(h)])
+    else (rawCoinbaseFor(h), [dSha(rawCoinbaseFor(h))]);
+  let merkle = Merkle.root(txs);
   let raw = mkHeader(prev, Nat32.fromNat(1_400_000_000 + h), merkle);
   switch (Chain.pushUnchecked(c, SHA, raw, NOW, UP)) {
     case (#ok ok) prev := ok.hash;
     case (#err e) { Debug.print("push failed at " # debug_show h # ": " # e); assert false };
   };
-  switch (Chain.pushBody(c, prev, count, txs, cbTx)) {
+  switch (Chain.pushBody(c, prev, txs, cbTx)) {
     case (#ok _) {};
     case (#err e) { Debug.print("body failed at " # debug_show h # ": " # e); assert false };
   };

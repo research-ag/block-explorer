@@ -5,6 +5,7 @@
 // on the on-the-wire byte order.
 
 import { test; suite } "mo:test";
+import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
@@ -12,25 +13,14 @@ import VarArray "mo:core/VarArray";
 import Header "../src/Header";
 import Merkle "../src/Merkle";
 
-// Pack BE-hex hashes into a single flat LE-byte hashes blob, the
-// shape that `Merkle.root` consumes.
-func leBlob(beHexes : [Text]) : Blob {
-  let n = beHexes.size();
-  let out = VarArray.repeat<Nat8>(0, n * 32);
-  var i = 0;
-  while (i < n) {
-    let le = Header.reverse32(Header.hexToBlob(beHexes[i]));
-    var j = 0;
-    while (j < 32) { out[i * 32 + j] := le[j]; j += 1 };
-    i += 1;
-  };
-  Blob.fromVarArray(out);
-};
+// Decode BE-hex hashes to the internal-LE `[Blob]` shape `Merkle.root` consumes.
+func leTxids(beHexes : [Text]) : [Blob] =
+  Array.map<Text, Blob>(beHexes, func(h) = Header.reverse32(Header.hexToBlob(h)));
 
 // Run Merkle.root and compare its output (LE) to the expected
 // big-endian hex.
 func rootBE(beHexes : [Text]) : Text {
-  let r = Merkle.root(leBlob(beHexes), beHexes.size());
+  let r = Merkle.root(leTxids(beHexes));
   Header.bytesToHex(Header.reverse32(r));
 };
 
@@ -68,12 +58,11 @@ suite(
         // rule the tree collapses to:
         //   L1 = [ sha256d(H||H), sha256d(H||H) ]
         //   root = sha256d(L1[0] || L1[1])
-        // i.e. it must equal Merkle.root([H,H,H,H], 4) for the same
+        // i.e. it must equal Merkle.root([H,H,H,H]) for the same
         // four-leaf tree of all-zero hashes. This exercises the
         // odd-count code path.
-        let zero96 = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 96));
-        let zero128 = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 128));
-        assert Merkle.root(zero96, 3) == Merkle.root(zero128, 4);
+        let zero : Blob = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 32));
+        assert Merkle.root([zero, zero, zero]) == Merkle.root([zero, zero, zero, zero]);
       },
     );
   },

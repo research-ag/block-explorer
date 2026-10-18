@@ -20,20 +20,20 @@ service : {
   // Used by body-uploader to skip push_body(ies) calls (which cost cycles)
   // when the header relay hasn't reached the corresponding height yet.
   have_hashes : (hashes_be_hex : vec text) -> (vec bool) query;
-  // Index one block's body (block_hash internal LE, tx_count, concatenated
-  // txids internal LE, raw coinbase tx bytes with any segwit witness
+  // Index one block's body: block hash (internal LE), txids (each a 32-byte
+  // internal LE blob, in block order), raw coinbase bytes (segwit witness
   // stripped). Allowed for any known block whose body isn't known. The
   // canister:
   //   1. verifies coinbase_tx.size() > 64 (every internal merkle node is
-  //      dSHA of exactly 64 bytes, so this pin forces hashes[0] to be a
+  //      dSHA of exactly 64 bytes, so this pin forces txids[0] to be a
   //      real leaf-level tx — no attacker can supply bytes of any other
   //      length that dSHA to an internal-node value without a SHA-256
   //      preimage),
-  //   2. recomputes dSHA(coinbase_tx) and checks it equals hashes[0..32]
+  //   2. recomputes dSHA(coinbase_tx) and checks it equals txids[0]
   //      (binds the uploaded coinbase to this body),
-  //   3. recomputes the full Merkle root against hashes and tx_count and
-  //      checks it against the block header's merkle_root.
-  push_body : (blob, nat, blob, blob) -> (PushBodyResult);
+  //   3. recomputes the full Merkle root over txids and checks it against
+  //      the block header's merkle_root.
+  push_body : (blob, vec blob, blob) -> (PushBodyResult);
   // Batched variant; processes in order, stops at the first real error.
-  push_bodies : (vec record { blob; nat; blob; blob }) -> (BodyBatchResultR);
+  push_bodies : (vec record { blob; vec blob; blob }) -> (BodyBatchResultR);
 };

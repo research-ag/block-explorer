@@ -46,7 +46,6 @@ import StableTrie "mo:stable-trie/Enumeration";
 import ForkStore "mo:heaviest-chain/ForkStore";
 import Reorg "mo:heaviest-chain/Reorg";
 
-import Bytes "mo:btc/Bytes";
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 import Merkle "mo:btc/Merkle";
@@ -59,11 +58,12 @@ module {
   // Public types.
   // ---------------------------------------------------------------------
 
-  // The body of a fork block: its transaction ids (flat 32-byte blob, in
-  // block order) plus its first-tx serial number F in the would-be canonical
-  // ordering. Present only once all ancestors' bodies are known (see pushBody).
+  // The body of a fork block: its transaction ids (each a 32-byte Blob in
+  // internal LE order, in block order) plus its first-tx serial number F in
+  // the would-be canonical ordering. Present only once all ancestors' bodies
+  // are known (see pushBody).
   public type ForkBody = {
-    txids : Blob;
+    txids : [Blob];
     firstTxIndex : Nat;
   };
 
@@ -272,12 +272,6 @@ module {
   func decodeHeight(b : Blob) : Nat {
     Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000;
   };
-
-  // Slice the 32-byte txid at index `i` out of a flat hashes blob.
-  // Bytes.slice32 indexes the Blob directly — a Blob.toArray here would
-  // convert the ENTIRE flat blob per txid (quadratic: ~512 MB of churn to
-  // index one 4000-tx body).
-  func txidAt(hashes : Blob, i : Nat) : Blob = Bytes.slice32(hashes, i * 32);
 
   // ---------------------------------------------------------------------
   // Initialization.
@@ -1027,32 +1021,31 @@ module {
     n;
   };
 
-  // Read txids stored in the canonical trie at indices [lo, hi) into a flat
-  // blob (moves a demoted block's body into the fork store).
-  func extractTxids(self : State, lo : Nat, hi : Nat) : Blob {
-    let keys = Array.tabulate<Blob>(
+  // Read txids stored in the canonical trie at indices [lo, hi) into a
+  // `[Blob]` (moves a demoted block's body into the fork store).
+  func extractTxids(self : State, lo : Nat, hi : Nat) : [Blob] {
+    Array.tabulate<Blob>(
       hi - lo : Nat,
       func(k) = switch (StableTrie.get(self.txTrie, lo + k)) {
         case (?(key, _)) key;
         case null Runtime.trap("extractTxids: missing txid " # debug_show(lo + k));
       },
     );
-    Blob.fromArray(Array.tabulate<Nat8>((hi - lo : Nat) * 32, func(j) = keys[j / 32][j % 32]));
   };
 
-  // Append one block's body (flat txid blob) to the tail of the canonical
-  // txid trie, setting its F. The two BIP30 single-tx blocks are stored
-  // compressed (F set, no txids — see isCompressedBodyHeight); any other
-  // cross-block duplicate txid would silently corrupt the F-arithmetic, so
-  // it traps (impossible on mainnet post-BIP30/34).
-  func appendCanonicalBody(self : State, height : Nat, value : Blob, body : Blob) {
+  // Append one block's body (its `[Blob]` of txids) to the tail of the
+  // canonical txid trie, setting its F. The two BIP30 single-tx blocks are
+  // stored compressed (F set, no txids — see isCompressedBodyHeight); any
+  // other cross-block duplicate txid would silently corrupt the F-arithmetic,
+  // so it traps (impossible on mainnet post-BIP30/34).
+  func appendCanonicalBody(self : State, height : Nat, value : Blob, body : [Blob]) {
     let f = StableTrie.size(self.txTrie);
     Headers.put(self.headerTrie, height, HeaderValue.withFirstTxIndex(value, f));
     if (isCompressedBodyHeight(height)) return;
-    let n = body.size() / 32;
+    let n = body.size();
     let hv = encodeHeight(height);
     var i = 0;
-    while (i < n) { ignore StableTrie.add(self.txTrie, txidAt(body, i), hv); i += 1 };
+    while (i < n) { ignore StableTrie.add(self.txTrie, body[i], hv); i += 1 };
     if (StableTrie.size(self.txTrie) != f + n) {
       Runtime.trap("appendCanonicalBody: unexpected duplicate txid at height " # debug_show height);
     };
@@ -1079,7 +1072,7 @@ module {
         ?(HeaderValue.firstTxIndexOf(parent.value) + trieTxCount(self, parent.height));
       } else null;
     } else switch (forkBodyOf(self, parent.hash)) {
-      case (?body) ?(body.firstTxIndex + body.txids.size() / 32);
+      case (?body) ?(body.firstTxIndex + body.txids.size());
       case null null;
     };
   };
@@ -1107,7 +1100,7 @@ module {
       return { height = b.height; tx_count = trieTxCount(self, b.height); first_tx_index = f; canonical_indexed = true; duplicate };
     };
     switch (forkBodyOf(self, b.hash)) {
-      case (?body) ({ height = b.height; tx_count = body.txids.size() / 32; first_tx_index = body.firstTxIndex; canonical_indexed = false; duplicate });
+      case (?body) ({ height = b.height; tx_count = body.txids.size(); first_tx_index = body.firstTxIndex; canonical_indexed = false; duplicate });
       case null ({ height = b.height; tx_count = 0; first_tx_index = 0; canonical_indexed = false; duplicate });
     };
   };
@@ -1118,25 +1111,29 @@ module {
   public func pushBody(
     self : State,
     blockHashInternal : Blob,
-    txCount : Nat,
-    hashes : Blob,
+    txids : [Blob],
     coinbaseTx : Blob,
   ) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
-    if (txCount == 0) return #err("tx_count must be >= 1");
-    if (hashes.size() != txCount * 32) {
-      return #err("hashes length " # debug_show hashes.size() # " != tx_count*32");
+    let txCount = txids.size();
+    if (txCount == 0) return #err("txids must be non-empty");
+    var i = 0;
+    while (i < txCount) {
+      if (txids[i].size() != 32) {
+        return #err("txids[" # debug_show i # "] is " # debug_show txids[i].size() # " bytes, want 32");
+      };
+      i += 1;
     };
     // Depth-of-tree binding (no inclusion proof needed). Every internal merkle
     // node is `dSHA256(32-byte || 32-byte) = dSHA256(exactly 64 bytes)`, so an
     // uploader passing `coinbase_tx` of any length other than 64 cannot have
     // their `dSHA256(coinbase_tx)` equal an internal node's value except by
     // SHA-256 preimage — infeasible. Rejecting the single length that would
-    // let the attack through pins `hashes[0..32]` to a real leaf-level tx,
-    // which (combined with the merkle recompute below) forces the whole body
-    // to be real leaves. Real Bitcoin coinbases are always well above this
-    // (minimum ~90 bytes pre-BIP34, 150+ with the segwit commitment); this
-    // check is only tight at the attack boundary.
+    // let the attack through pins `txids[0]` to a real leaf-level tx, which
+    // (combined with the merkle recompute below) forces the whole body to be
+    // real leaves. Real Bitcoin coinbases are always well above this (minimum
+    // ~90 bytes pre-BIP34, 150+ with the segwit commitment); this check is
+    // only tight at the attack boundary.
     if (coinbaseTx.size() <= 64) {
       return #err("coinbase_tx must be > 64 bytes (depth-of-tree binding)");
     };
@@ -1151,10 +1148,10 @@ module {
     // block onto this body.
     let cbSha = Sha256.new(#sha256);
     cbSha.writeBlob(coinbaseTx);
-    if (cbSha.sumDouble() != Bytes.slice32(hashes, 0)) {
-      return #err("coinbase_tx hash does not match first txid in hashes");
+    if (cbSha.sumDouble() != txids[0]) {
+      return #err("coinbase_tx hash does not match first txid");
     };
-    if (Merkle.root(hashes, txCount) != merkleRoot) return #err("merkle root mismatch");
+    if (Merkle.root(txids) != merkleRoot) return #err("merkle root mismatch");
 
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {
@@ -1163,7 +1160,7 @@ module {
           debug_show self.bodiesNextHeight # ", got " # debug_show b.height
         );
       };
-      appendCanonicalBody(self, b.height, b.value, hashes);
+      appendCanonicalBody(self, b.height, b.value, txids);
       self.bodiesNextHeight += 1;
       #ok(bodyResult(self, b, false));
     } else {
@@ -1179,7 +1176,7 @@ module {
         case (?x) x;
         case null return #err("fork block missing from store");
       };
-      ForkStore.update(self.forks, b.hash, { fb with body = ?{ txids = hashes; firstTxIndex = f } });
+      ForkStore.update(self.forks, b.hash, { fb with body = ?{ txids = txids; firstTxIndex = f } });
       #ok(bodyResult(self, b, false));
     };
   };
@@ -1190,7 +1187,7 @@ module {
       case null null;
       case (?b) {
         if (b.isCanonical and b.height < self.bodiesNextHeight) ?trieTxCount(self, b.height) else switch (forkBodyOf(self, b.hash)) {
-          case (?body) ?(body.txids.size() / 32);
+          case (?body) ?body.txids.size();
           case null null;
         };
       };
@@ -1208,11 +1205,11 @@ module {
     ?{ height; tx_count = trieTxCount(self, height); first_tx_index = f; canonical_indexed = true };
   };
 
-  // Does the flat txid blob `body` contain `txid`?
-  func bodyContains(body : Blob, txid : Blob) : Bool {
-    let n = body.size() / 32;
+  // Does the fork body `body` contain `txid`?
+  func bodyContains(body : [Blob], txid : Blob) : Bool {
+    let n = body.size();
     var i = 0;
-    while (i < n) { if (txidAt(body, i) == txid) return true; i += 1 };
+    while (i < n) { if (body[i] == txid) return true; i += 1 };
     false;
   };
 
@@ -1239,11 +1236,11 @@ module {
     switch (StableTrie.get(self.txTrie, index)) { case (?(k, _)) ?k; case null null };
   };
 
-  // Position of `txid` within `body` (flat txid blob), or null.
-  func bodyPositionOf(body : Blob, txid : Blob) : ?Nat {
-    let n = body.size() / 32;
+  // Position of `txid` within fork body `body`, or null.
+  func bodyPositionOf(body : [Blob], txid : Blob) : ?Nat {
+    let n = body.size();
     var i = 0;
-    while (i < n) { if (txidAt(body, i) == txid) return ?i; i += 1 };
+    while (i < n) { if (body[i] == txid) return ?i; i += 1 };
     null;
   };
 
@@ -1299,11 +1296,11 @@ module {
           );
         } else switch (forkBodyOf(self, b.hash)) {
           case (?body) {
-            let n = body.txids.size() / 32;
+            let n = body.txids.size();
             if (offset >= n) return [];
             let rem : Nat = n - offset;
             let take = if (limit < rem) limit else rem;
-            Array.tabulate<Blob>(take, func(i) = txidAt(body.txids, offset + i));
+            Array.tabulate<Blob>(take, func(i) = body.txids[offset + i]);
           };
           case null [];
         };
