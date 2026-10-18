@@ -8,7 +8,6 @@ import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import Bench "mo:bench-helper";
-import Sha256 "mo:sha2/Sha256";
 
 import Merkle "../src/Merkle";
 
@@ -22,7 +21,6 @@ module {
     };
 
     let counts : [Nat] = [1, 16, 256, 2048];
-    let sha = Sha256.new(#sha256);
 
     // hashes[ci]: `counts[ci]` leaves concatenated; each leaf byte derived from
     // its index so no two leaves collide.
@@ -33,7 +31,7 @@ module {
 
     let routines : [() -> ()] = Array.tabulate<() -> ()>(
       schema.cols.size(),
-      func(ci) = func() = ignore Merkle.root(sha, hashes[ci], counts[ci]),
+      func(ci) = func() = ignore Merkle.root(hashes[ci], counts[ci]),
     );
 
     Bench.V1(schema, func(_ri : Nat, ci : Nat) = routines[ci]());

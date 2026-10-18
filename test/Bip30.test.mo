@@ -55,7 +55,7 @@ let A = txidFor(1_000_001); // dup pair A txid (91722 & 91880)
 let B = txidFor(1_000_002); // dup pair B txid (91812 & 91842)
 
 // genesis body
-ignore Chain.pushBody(c, SHA, Chain.tipBlock(c).hash, 1, HeaderValue.merkleOf(Chain.tipBlock(c).value));
+ignore Chain.pushBody(c, Chain.tipBlock(c).hash, 1, HeaderValue.merkleOf(Chain.tipBlock(c).value));
 
 var h = 1;
 var prev = Chain.tipBlock(c).hash;
@@ -65,13 +65,13 @@ label build while (h <= 91_890) {
     else if (h == 91_842) (B, 1)
     else if (h == 91_880) (cat2(A, txidFor(h)), 2)
     else (txidFor(h), 1);
-  let merkle = Merkle.root(SHA, txs, count);
+  let merkle = Merkle.root(txs, count);
   let raw = mkHeader(prev, Nat32.fromNat(1_400_000_000 + h), merkle);
   switch (Chain.pushUnchecked(c, SHA, raw, NOW, UP)) {
     case (#ok ok) prev := ok.hash;
     case (#err e) { Debug.print("push failed at " # debug_show h # ": " # e); assert false };
   };
-  switch (Chain.pushBody(c, SHA, prev, count, txs)) {
+  switch (Chain.pushBody(c, prev, count, txs)) {
     case (#ok _) {};
     case (#err e) { Debug.print("body failed at " # debug_show h # ": " # e); assert false };
   };

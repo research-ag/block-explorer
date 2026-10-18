@@ -1115,7 +1115,7 @@ module {
   // Index a block's body — allowed only when all ancestor bodies are known.
   // Canonical bodies go to the txid trie in chain order; fork bodies into the
   // ForkBlock record. Re-upload is a no-op.
-  public func pushBody(self : State, sha : Sha256.Digest, blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
+  public func pushBody(self : State, blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     if (txCount == 0) return #err("tx_count must be >= 1");
     if (hashes.size() != txCount * 32) {
@@ -1126,7 +1126,7 @@ module {
       case null return #err("unknown block header hash");
     };
     if (bodyKnown(self, b)) return #ok(bodyResult(self, b, true));
-    if (Merkle.root(sha, hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
+    if (Merkle.root(hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
 
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {

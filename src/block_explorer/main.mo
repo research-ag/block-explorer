@@ -300,7 +300,7 @@ persistent actor BlockExplorer {
   };
 
   public func push_body(block_hash_internal : Blob, tx_count : Nat, hashes : Blob) : async Result.Result<Chain.PushBodyOk, Text> {
-    chain.pushBody(sha, block_hash_internal, tx_count, hashes);
+    chain.pushBody(block_hash_internal, tx_count, hashes);
   };
 
   // Batched upload; processes entries in order, stopping at the first
@@ -312,7 +312,7 @@ persistent actor BlockExplorer {
     var duplicate = 0;
     var lastErr : ?Text = null;
     label loopB for ((block_hash, tx_count, hashes) in batch.vals()) {
-      switch (chain.pushBody(sha, block_hash, tx_count, hashes)) {
+      switch (chain.pushBody(block_hash, tx_count, hashes)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
