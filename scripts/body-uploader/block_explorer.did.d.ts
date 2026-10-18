@@ -19,11 +19,25 @@ export interface _SERVICE {
   'bodies_next_height' : ActorMethod<[], bigint>,
   'have_hashes' : ActorMethod<[Array<string>], Array<boolean>>,
   'push_bodies' : ActorMethod<
-    [Array<[Uint8Array | number[], bigint, Uint8Array | number[]]>],
+    [
+      Array<
+        [
+          Uint8Array | number[],
+          bigint,
+          Uint8Array | number[],
+          Uint8Array | number[],
+        ]
+      >,
+    ],
     BodyBatchResultR
   >,
   'push_body' : ActorMethod<
-    [Uint8Array | number[], bigint, Uint8Array | number[]],
+    [
+      Uint8Array | number[],
+      bigint,
+      Uint8Array | number[],
+      Uint8Array | number[],
+    ],
     PushBodyResult
   >,
 }

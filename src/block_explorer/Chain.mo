@@ -1115,18 +1115,46 @@ module {
   // Index a block's body — allowed only when all ancestor bodies are known.
   // Canonical bodies go to the txid trie in chain order; fork bodies into the
   // ForkBlock record. Re-upload is a no-op.
-  public func pushBody(self : State, blockHashInternal : Blob, txCount : Nat, hashes : Blob) : Result.Result<PushBodyOk, Text> {
+  public func pushBody(
+    self : State,
+    blockHashInternal : Blob,
+    txCount : Nat,
+    hashes : Blob,
+    coinbaseTx : Blob,
+  ) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     if (txCount == 0) return #err("tx_count must be >= 1");
     if (hashes.size() != txCount * 32) {
       return #err("hashes length " # debug_show hashes.size() # " != tx_count*32");
+    };
+    // Depth-of-tree binding (no inclusion proof needed). Every internal merkle
+    // node is `dSHA256(32-byte || 32-byte) = dSHA256(exactly 64 bytes)`, so an
+    // uploader passing `coinbase_tx` of any length other than 64 cannot have
+    // their `dSHA256(coinbase_tx)` equal an internal node's value except by
+    // SHA-256 preimage — infeasible. Rejecting the single length that would
+    // let the attack through pins `hashes[0..32]` to a real leaf-level tx,
+    // which (combined with the merkle recompute below) forces the whole body
+    // to be real leaves. Real Bitcoin coinbases are always well above this
+    // (minimum ~90 bytes pre-BIP34, 150+ with the segwit commitment); this
+    // check is only tight at the attack boundary.
+    if (coinbaseTx.size() <= 64) {
+      return #err("coinbase_tx must be > 64 bytes (depth-of-tree binding)");
     };
     let b = switch (byHashInternal(self, blockHashInternal)) {
       case (?b) b;
       case null return #err("unknown block header hash");
     };
     if (bodyKnown(self, b)) return #ok(bodyResult(self, b, true));
-    if (Merkle.root(hashes, txCount) != HeaderValue.merkleOf(b.value)) return #err("merkle root mismatch");
+    let merkleRoot = HeaderValue.merkleOf(b.value);
+    // Bind `coinbase_tx` to this body: its double-SHA must be the body's
+    // first txid. Keeps an attacker from stapling a coinbase from another
+    // block onto this body.
+    let cbSha = Sha256.new(#sha256);
+    cbSha.writeBlob(coinbaseTx);
+    if (cbSha.sumDouble() != Bytes.slice32(hashes, 0)) {
+      return #err("coinbase_tx hash does not match first txid in hashes");
+    };
+    if (Merkle.root(hashes, txCount) != merkleRoot) return #err("merkle root mismatch");
 
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {

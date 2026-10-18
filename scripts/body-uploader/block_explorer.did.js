@@ -24,12 +24,21 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'push_bodies' : IDL.Func(
-        [IDL.Vec(IDL.Tuple(IDL.Vec(IDL.Nat8), IDL.Nat, IDL.Vec(IDL.Nat8)))],
+        [
+          IDL.Vec(
+            IDL.Tuple(
+              IDL.Vec(IDL.Nat8),
+              IDL.Nat,
+              IDL.Vec(IDL.Nat8),
+              IDL.Vec(IDL.Nat8),
+            ),
+          ),
+        ],
         [BodyBatchResultR],
         [],
       ),
     'push_body' : IDL.Func(
-        [IDL.Vec(IDL.Nat8), IDL.Nat, IDL.Vec(IDL.Nat8)],
+        [IDL.Vec(IDL.Nat8), IDL.Nat, IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
         [PushBodyResult],
         [],
       ),

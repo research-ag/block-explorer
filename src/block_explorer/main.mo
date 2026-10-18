@@ -299,20 +299,25 @@ persistent actor BlockExplorer {
     last_error : ?Text; // first failure that halted the batch
   };
 
-  public func push_body(block_hash_internal : Blob, tx_count : Nat, hashes : Blob) : async Result.Result<Chain.PushBodyOk, Text> {
-    chain.pushBody(block_hash_internal, tx_count, hashes);
+  public func push_body(
+    block_hash_internal : Blob,
+    tx_count : Nat,
+    hashes : Blob,
+    coinbase_tx : Blob,
+  ) : async Result.Result<Chain.PushBodyOk, Text> {
+    chain.pushBody(block_hash_internal, tx_count, hashes, coinbase_tx);
   };
 
   // Batched upload; processes entries in order, stopping at the first
   // real failure (returned in last_error). Already-indexed bodies are
   // counted as duplicates and don't halt the batch.
-  public func push_bodies(batch : [(Blob, Nat, Blob)]) : async Result.Result<BodyBatchResult, Text> {
+  public func push_bodies(batch : [(Blob, Nat, Blob, Blob)]) : async Result.Result<BodyBatchResult, Text> {
     if (batch.size() == 0) return #err("empty batch");
     var accepted = 0;
     var duplicate = 0;
     var lastErr : ?Text = null;
-    label loopB for ((block_hash, tx_count, hashes) in batch.vals()) {
-      switch (chain.pushBody(block_hash, tx_count, hashes)) {
+    label loopB for ((block_hash, tx_count, hashes, coinbase_tx) in batch.vals()) {
+      switch (chain.pushBody(block_hash, tx_count, hashes, coinbase_tx)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
@@ -525,8 +530,8 @@ persistent actor BlockExplorer {
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
       #lookup_txid : () -> (txid : Blob);
-      #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob);
-      #push_bodies : () -> (batch : [(Blob, Nat, Blob)]);
+      #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob, coinbase_tx : Blob);
+      #push_bodies : () -> (batch : [(Blob, Nat, Blob, Blob)]);
       #push_header : () -> (raw_header : Blob);
       #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
