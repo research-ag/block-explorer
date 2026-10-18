@@ -7,7 +7,7 @@ core = "2.6.2"
 sha2 = "0.3.0"
 promtracker = "1.0.1"
 stable-trie = "0.2.0"
-enumeration = "0.2.0"
+enumeration = "0.2.1"
 btc = "./packages/btc"
 heaviest-chain = "./packages/heaviest-chain"
 
