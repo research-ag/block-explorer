@@ -35,6 +35,7 @@ import Nat "mo:core/Nat";
 import Nat8 "mo:core/Nat8";
 import Nat16 "mo:core/Nat16";
 import Nat32 "mo:core/Nat32";
+import Nat64 "mo:core/Nat64";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
@@ -49,6 +50,7 @@ import Reorg "mo:heaviest-chain/Reorg";
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 import Merkle "mo:btc/Merkle";
+import Coinbases "Coinbases";
 import Headers "Headers";
 import Uploaders "Uploaders";
 
@@ -62,9 +64,18 @@ module {
   // internal LE order, in block order) plus its first-tx serial number F in
   // the would-be canonical ordering. Present only once all ancestors' bodies
   // are known (see pushBody).
+  //
+  // `coinbase` holds the raw (witness-stripped) coinbase bytes if they have
+  // been supplied. Fork coinbases live on heap (not in the canonical
+  // coinbasesRegion), both so a fork pruning drops them cleanly and so the
+  // canonical region stays a deterministic log keyed by height. May be null
+  // when the fork body was uploaded before the coinbase storage feature
+  // existed (set to null by the migration) or when `push_fork_coinbase`
+  // hasn't been called yet for this fork.
   public type ForkBody = {
     txids : [Blob];
     firstTxIndex : Nat;
+    coinbase : ?Blob;
   };
 
   // A non-canonical block, stored in full in the generic fork store.
@@ -157,6 +168,22 @@ module {
     forks : ForkStore.ForkStore<ForkBlock>;
     uploaders : Uploaders.Uploaders;
     reorgLog : List.List<ReorgEvent>;
+    // Deterministic log of canonical coinbases, byte-identical across any
+    // ingest history. Each entry is `coinbaseEnd(h) - coinbaseEnd(h-1)`
+    // bytes at offset `coinbaseEnd(h-1)` (with the sentinel coinbaseEnd(-1)
+    // := 0). The per-height end-offset is stored inline in the HeaderValue
+    // (bytes 32..36). On reorg, the demoted bytes are moved onto the fork
+    // body's heap-side `coinbase` field and the region's write-tail is
+    // rewound — see Coinbases.mo for the mechanics.
+    coinbasesRegion : Coinbases.Store;
+    var coinbasesRegionSize : Nat64; // write-tail (next append offset)
+    // Smallest canonical height whose coinbase is NOT yet in `coinbasesRegion`.
+    // Equivalently: next height to backfill. Backfill advances it one block
+    // at a time; a reorg that demotes heights `[D, tip]` resets it to
+    // `min(cursor, D)` so the gap below is re-filled on resumption. The
+    // gated path in `pushBody` only stores when the arriving canonical
+    // height equals this cursor (= backfill has caught up to the tip).
+    var coinbaseBackfillCursor : Nat;
     var tipWork : Nat; // cumulative work of the canonical tip
     var bodiesNextHeight : Nat; // canonical bodies known for [0, this)
     // Timestamps of the canonical tip and its ancestors, newest first, at
@@ -234,6 +261,9 @@ module {
     forks = ForkStore.empty<ForkBlock>();
     uploaders = Uploaders.empty();
     reorgLog = List.empty<ReorgEvent>();
+    coinbasesRegion = Coinbases.newStore();
+    var coinbasesRegionSize : Nat64 = 0;
+    var coinbaseBackfillCursor = 0;
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var recentTimes = [];
@@ -655,6 +685,18 @@ module {
         switch (fb.body) {
           case (?b) if (fb.height == self.bodiesNextHeight) {
             appendCanonicalBody(self, fb.height, value, b.txids);
+            // If the promoted fork carried a coinbase and the backfill
+            // cursor is at this height, append it to the canonical region.
+            // Otherwise the coinbase stays on the fork body — `maybeReorg`
+            // doesn't drop fork bodies here, just marks the block
+            // canonical — and backfill (or a later promote) will have to
+            // fill the slot via `push_coinbases_backfill`.
+            switch (b.coinbase) {
+              case (?cb) if (fb.height == self.coinbaseBackfillCursor) {
+                storeCanonicalCoinbase(self, fb.height, cb);
+              };
+              case _ {};
+            };
             self.bodiesNextHeight += 1;
           };
           case null {};
@@ -712,11 +754,31 @@ module {
                 case null Runtime.trap("maybeReorg: missing displaced body block");
               };
             } else self.txTrie.size();
-            demotedBodies.add(Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
+            // Pull the demoted canonical coinbase (if stored) onto the
+            // heap fork body so it survives the reorg and travels with
+            // the block into the fork store. Heights at/above the cursor
+            // have no stored coinbase, so coinbase = null there.
+            let coinbase = if (h < self.coinbaseBackfillCursor) {
+              getCanonicalCoinbase(self, h);
+            } else null;
+            demotedBodies.add(Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo; coinbase = coinbase });
             h += 1;
           };
           self.txTrie.truncate(truncPoint);
           self.bodiesNextHeight := commonHeight + 1;
+        };
+        // Rewind the canonical coinbase region to the common ancestor's
+        // end-offset. The bytes beyond that tail have been copied onto
+        // the demoted fork bodies above; the region's page allocation
+        // doesn't shrink (Region.grow is one-way), but subsequent
+        // appends overwrite the orphaned bytes starting at the new tail.
+        if (self.coinbaseBackfillCursor > commonHeight + 1) {
+          let newEnd : Nat64 = switch (Headers.get(self.headerTrie, commonHeight)) {
+            case (?(_, v)) HeaderValue.coinbaseEndOf(v).toNat64();
+            case null 0;
+          };
+          self.coinbasesRegionSize := newEnd;
+          self.coinbaseBackfillCursor := commonHeight + 1;
         };
       };
       // The rollback moved the tip below the old window — refill the
@@ -1161,6 +1223,16 @@ module {
         );
       };
       appendCanonicalBody(self, b.height, b.value, txids);
+      // Gated canonical coinbase storage: only append + record the
+      // end-offset when the backfill cursor has reached this height.
+      // Otherwise the raw bytes are discarded — the dSHA + length checks
+      // above still prove the uploader held a valid coinbase, which is
+      // enough for the depth-of-tree binding. Once backfill catches up to
+      // the tip, this condition becomes a tautology and every new block's
+      // coinbase lands in the region.
+      if (b.height == self.coinbaseBackfillCursor) {
+        storeCanonicalCoinbase(self, b.height, coinbaseTx);
+      };
       self.bodiesNextHeight += 1;
       #ok(bodyResult(self, b, false));
     } else {
@@ -1176,9 +1248,200 @@ module {
         case (?x) x;
         case null return #err("fork block missing from store");
       };
-      self.forks.update(b.hash, { fb with body = ?{ txids = txids; firstTxIndex = f } });
+      // Fork bodies always stash the coinbase on heap — cheap, and we
+      // need it later for promotion. The canonical region is left
+      // untouched.
+      self.forks.update(b.hash, { fb with body = ?{ txids = txids; firstTxIndex = f; coinbase = ?coinbaseTx } });
       #ok(bodyResult(self, b, false));
     };
+  };
+
+  // --- Coinbase storage helpers ---------------------------------------
+  //
+  // `storeCanonicalCoinbase` appends to `coinbasesRegion`, writes the
+  // new end-offset into the HeaderValue for height `h` (bytes 32..36),
+  // and advances the backfill cursor. Caller must have verified the
+  // coinbase bytes match the stored first txid (dSHA check).
+
+  func storeCanonicalCoinbase(self : State, h : Nat, coinbase : Blob) {
+    let newEnd = Coinbases.append(self.coinbasesRegion, self.coinbasesRegionSize, coinbase);
+    self.coinbasesRegionSize := newEnd;
+    // Patch HeaderValue[h] with the new end-offset (bytes 32..36).
+    let v = switch (Headers.get(self.headerTrie, h)) {
+      case (?(_, value)) value;
+      case null Runtime.trap("storeCanonicalCoinbase: header missing for height " # debug_show h);
+    };
+    // Nat64 end offset fits in Nat32 for the realistic lifetime of this
+    // canister (4 GB region cap ≫ even a thousand years of coinbases),
+    // but trap defensively if it would overflow.
+    if (newEnd > 0xffff_ffff) {
+      Runtime.trap("storeCanonicalCoinbase: coinbasesRegion end-offset overflows Nat32 at height " # debug_show h);
+    };
+    Headers.put(self.headerTrie, h, HeaderValue.withCoinbaseEnd(v, newEnd.toNat32()));
+    self.coinbaseBackfillCursor := h + 1;
+  };
+
+  // Byte range `[start, end)` of a canonical height's coinbase in the
+  // region. Returns null if the coinbase isn't stored (end-offset is the
+  // 0 sentinel), the exceptional case being height 0 whose end-offset is
+  // never 0 after storage (any coinbase has non-zero length).
+  func coinbaseRangeOf(self : State, h : Nat) : ?(Nat32, Nat32) {
+    let v = switch (Headers.get(self.headerTrie, h)) {
+      case (?(_, value)) value;
+      case null return null;
+    };
+    let end = HeaderValue.coinbaseEndOf(v);
+    if (end == 0) return null;
+    let start : Nat32 = if (h == 0) 0 else {
+      let vp = switch (Headers.get(self.headerTrie, h - 1)) {
+        case (?(_, value)) value;
+        case null return null;
+      };
+      HeaderValue.coinbaseEndOf(vp);
+    };
+    ?(start, end);
+  };
+
+  // Load the raw coinbase bytes of canonical block `h`, or null if not
+  // stored.
+  public func getCanonicalCoinbase(self : State, h : Nat) : ?Blob {
+    switch (coinbaseRangeOf(self, h)) {
+      case null null;
+      case (?(start, end)) ?Coinbases.load(self.coinbasesRegion, start, end);
+    };
+  };
+
+  // Load the raw coinbase bytes of a fork block (`?Blob`-null if the
+  // block isn't a known fork, has no body, or its coinbase hasn't been
+  // uploaded yet).
+  public func getForkCoinbase(self : State, hashInternal : Blob) : ?Blob {
+    switch (self.forks.get(hashInternal)) {
+      case null null;
+      case (?fb) switch (fb.body) {
+        case null null;
+        case (?body) body.coinbase;
+      };
+    };
+  };
+
+  // Extract the scriptSig (miner's bytes) from any block's coinbase —
+  // canonical or fork, whichever route produces data. Returns null if
+  // the coinbase isn't stored.
+  public func getScriptSig(self : State, b : StoredBlock) : ?Blob {
+    let coinbase = if (b.isCanonical) {
+      getCanonicalCoinbase(self, b.height);
+    } else {
+      getForkCoinbase(self, b.hash);
+    };
+    switch (coinbase) {
+      case null null;
+      case (?cb) ?Coinbases.scriptSig(cb);
+    };
+  };
+
+  public type CoinbaseBackfillStatus = {
+    cursor : Nat;              // next canonical height to backfill
+    canonical_tip : Nat;       // current tip height
+    region_bytes : Nat64;      // write-tail of coinbasesRegion
+    complete : Bool;           // cursor > canonical_tip
+  };
+
+  public func coinbaseBackfillStatus(self : State) : CoinbaseBackfillStatus = {
+    cursor = self.coinbaseBackfillCursor;
+    canonical_tip = tipHeight(self);
+    region_bytes = self.coinbasesRegionSize;
+    complete = self.coinbaseBackfillCursor > tipHeight(self);
+  };
+
+  // Backfill a contiguous batch of canonical coinbases starting at
+  // `startHeight` (must equal `coinbaseBackfillCursor`). Each entry at
+  // height `startHeight + i` is validated against the stored first txid
+  // of the canonical block at that height and the > 64 byte depth pin,
+  // then appended. Stops on the first mismatch — any accepted entries
+  // before the failure stay in the region (region grows are permanent).
+  //
+  // Open to any caller: the hash check is self-authenticating, so a
+  // garbage upload simply bounces at verification.
+  public func pushCoinbasesBackfill(self : State, startHeight : Nat, coinbases : [Blob]) : Result.Result<{ accepted : Nat }, Text> {
+    if (startHeight != self.coinbaseBackfillCursor) {
+      return #err(
+        "startHeight " # debug_show startHeight #
+        " != coinbase_backfill_cursor " # debug_show self.coinbaseBackfillCursor
+      );
+    };
+    var i = 0;
+    let n = coinbases.size();
+    while (i < n) {
+      let h = startHeight + i;
+      let cb = coinbases[i];
+      if (cb.size() <= 64) {
+        return if (i == 0) #err("coinbases[" # debug_show i # "] must be > 64 bytes") else #ok({ accepted = i });
+      };
+      // Compute dSHA(cb) and compare to the canonical first txid at height h.
+      let cbSha = Sha256.new(#sha256);
+      cbSha.writeBlob(cb);
+      let cbTxid = cbSha.sumDouble();
+      let want = firstTxidAt(self, h);
+      switch (want) {
+        case null {
+          return if (i == 0) #err("no canonical block body at height " # debug_show h) else #ok({ accepted = i });
+        };
+        case (?w) {
+          if (cbTxid != w) {
+            return if (i == 0) #err("coinbases[" # debug_show i # "] does not match first txid at height " # debug_show h) else #ok({ accepted = i });
+          };
+        };
+      };
+      storeCanonicalCoinbase(self, h, cb);
+      i += 1;
+    };
+    #ok({ accepted = n });
+  };
+
+  // First txid at canonical height `h`, resolved from the body-side
+  // state. For a 1-tx block (either the only tx or a BIP30 compressed
+  // single-tx block), this is the header's merkle root. For a multi-tx
+  // block, it's the txid at trie index F(h). Null if the body hasn't
+  // been indexed yet.
+  func firstTxidAt(self : State, h : Nat) : ?Blob {
+    if (h >= self.bodiesNextHeight) return null;
+    let v = switch (Headers.get(self.headerTrie, h)) {
+      case (?(_, value)) value;
+      case null return null;
+    };
+    // BIP30 compressed single-tx block: body width 0 means the only txid
+    // IS the merkle root.
+    if (segmentWidth(self, h) == 0) return ?HeaderValue.merkleOf(v);
+    // Otherwise read the txid at the block's F(h).
+    let f = HeaderValue.firstTxIndexOf(v);
+    switch (self.txTrie.get(f)) {
+      case (?(k, _)) ?k;
+      case null null;
+    };
+  };
+
+  // Backfill one fork block's coinbase. Verifies against the fork body's
+  // first txid (the body must have been uploaded first) and the > 64
+  // byte depth pin. Idempotent: a second call with matching bytes
+  // succeeds; mismatched bytes fail.
+  public func pushForkCoinbase(self : State, hashInternal : Blob, coinbase : Blob) : Result.Result<(), Text> {
+    if (hashInternal.size() != 32) return #err("block hash must be 32 bytes");
+    if (coinbase.size() <= 64) return #err("coinbase must be > 64 bytes (depth-of-tree binding)");
+    let fb = switch (self.forks.get(hashInternal)) {
+      case (?x) x;
+      case null return #err("not a known fork block");
+    };
+    let body = switch (fb.body) {
+      case (?b) b;
+      case null return #err("fork body not yet uploaded");
+    };
+    let cbSha = Sha256.new(#sha256);
+    cbSha.writeBlob(coinbase);
+    if (cbSha.sumDouble() != body.txids[0]) {
+      return #err("coinbase hash does not match the fork body's first txid");
+    };
+    self.forks.update(hashInternal, { fb with body = ?{ body with coinbase = ?coinbase } });
+    #ok();
   };
 
   // tx_count of any block by internal hash, or null if its body is not known.

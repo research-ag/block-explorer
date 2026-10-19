@@ -37,7 +37,9 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
+import Migration "Migration";
 
+(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
@@ -178,6 +180,7 @@ actor BlockExplorer {
     is_canonical : Bool;
     first_seen : Nat32; // unix seconds when first stored
     uploader : Principal; // principal that pushed this header
+    coinbase_scriptsig : ?Blob; // 2-100 bytes miner data; null until coinbase stored
   };
 
   func toBlockInfo(b : Chain.StoredBlock, isCanonical_ : Bool) : BlockInfo {
@@ -201,6 +204,7 @@ actor BlockExplorer {
       is_canonical = isCanonical_;
       first_seen = HeaderValue.firstSeenOf(v);
       uploader = chain.uploaderOf(b.hash);
+      coinbase_scriptsig = chain.getScriptSig(b);
     };
   };
 
@@ -326,6 +330,45 @@ actor BlockExplorer {
     batchSizeTxids.update(accepted + duplicate);
     #ok({ accepted; duplicate; last_error = lastErr });
   };
+
+  // ---------------------------------------------------------------------
+  // Coinbase storage & backfill.
+  // ---------------------------------------------------------------------
+
+  // Backfill a contiguous batch of canonical coinbases starting at
+  // `start_height`, which must equal the current `coinbase_backfill_cursor`.
+  // Each coinbase is validated against the canonical first-txid of its
+  // height (self-authenticating — a wrong byte sequence bounces at the
+  // dSHA check) and against the > 64-byte depth-of-tree pin. Stops at
+  // the first failure; any entries verified before that point stay in
+  // the region. Returns the number accepted. Open to any caller.
+  public func push_coinbases_backfill(start_height : Nat, coinbases : [Blob]) : async Result.Result<{ accepted : Nat }, Text> {
+    chain.pushCoinbasesBackfill(start_height, coinbases);
+  };
+
+  // Backfill one fork block's coinbase (anytime, any order). Validated
+  // against the fork body's first txid and the length pin. Idempotent.
+  // Open to any caller.
+  public func push_fork_coinbase(block_hash_internal : Blob, coinbase : Blob) : async Result.Result<(), Text> {
+    chain.pushForkCoinbase(block_hash_internal, coinbase);
+  };
+
+  // Raw (witness-stripped) coinbase bytes of the canonical block at
+  // `height`. Null if the block isn't canonical, isn't known, or its
+  // coinbase hasn't been backfilled past this height yet.
+  public query func get_coinbase(height : Nat) : async ?Blob = chain.getCanonicalCoinbase(height);
+
+  // Raw coinbase bytes of a fork block (BE display hash). Null unless
+  // the fork body is known and its coinbase has been uploaded (either
+  // alongside the body or via `push_fork_coinbase`).
+  public query func get_fork_coinbase(block_hash_be_hex : Text) : async ?Blob {
+    let bytes = Header.hexToBlob(block_hash_be_hex);
+    if (bytes.size() != 32) return null;
+    chain.getForkCoinbase(Header.reverse32(bytes));
+  };
+
+  // Backfill progress for the UI / operators.
+  public query func coinbase_backfill_status() : async Chain.CoinbaseBackfillStatus = chain.coinbaseBackfillStatus();
 
   // tx_count of the canonical block at `height`, or null if its body
   // is not yet known.
@@ -519,6 +562,11 @@ actor BlockExplorer {
       #lookup_txid : () -> (txid : Blob);
       #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
       #push_bodies : () -> (batch : [(Blob, [Blob], Blob)]);
+      #push_coinbases_backfill : () -> (start_height : Nat, coinbases : [Blob]);
+      #push_fork_coinbase : () -> (block_hash_internal : Blob, coinbase : Blob);
+      #get_coinbase : () -> (height : Nat);
+      #get_fork_coinbase : () -> (block_hash_be_hex : Text);
+      #coinbase_backfill_status : () -> ();
       #push_header : () -> (raw_header : Blob);
       #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
