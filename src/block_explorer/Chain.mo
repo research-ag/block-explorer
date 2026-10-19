@@ -250,7 +250,7 @@ module {
   let ZERO_HASH_BLOB : Blob = "\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00";
 
   func nat32OfNowSecs(s : Int) : Nat32 {
-    if (s <= 0) 0 else Nat32.fromNat(Int.abs(s) % 0x1_0000_0000);
+    if (s <= 0) 0 else Nat.toNat32(Int.abs(s) % 0x1_0000_0000);
   };
 
   // One year in seconds (365 days). Freshness check on pushed headers.
@@ -259,18 +259,18 @@ module {
   // Byte at little-endian position `i` (0..3) of a Nat32. Narrow the masked
   // byte Nat32 -> Nat16 -> Nat8 via `let` Prim aliases (no Nat detour).
   func le32Byte(v : Nat32, i : Nat) : Nat8 {
-    ((v >> (Nat32.fromNat(i) * 8)) & 0xff).toNat16().toNat8();
+    ((v >> (i.toNat32() * 8)) & 0xff).toNat16().toNat8();
   };
 
   // Encode a block height as a 3-byte little-endian blob (txid-trie value).
   func encodeHeight(h : Nat) : Blob {
     if (h > 0xFF_FFFF) Runtime.trap("Chain: height overflow for txid trie value (> 2^24)");
-    let v = Nat32.fromNat(h);
-    Blob.fromArray([le32Byte(v, 0), le32Byte(v, 1), le32Byte(v, 2)]);
+    let v = h.toNat32();
+    [le32Byte(v, 0), le32Byte(v, 1), le32Byte(v, 2)].toBlob();
   };
 
   func decodeHeight(b : Blob) : Nat {
-    Nat8.toNat(b[0]) + Nat8.toNat(b[1]) * 0x100 + Nat8.toNat(b[2]) * 0x1_0000;
+    b[0].toNat() + b[1].toNat() * 0x100 + b[2].toNat() * 0x1_0000;
   };
 
   // ---------------------------------------------------------------------
@@ -295,7 +295,7 @@ module {
     let value = HeaderValue.encodeFromRaw(raw, 0, 0, work, firstSeenSecs);
     let idx = Headers.add(self.headerTrie, hash, value);
     assert idx == 0;
-    Uploaders.record(self.uploaders, hash, uploader);
+    self.uploaders.record(hash, uploader);
     self.tipWork := work;
     self.recentTimes := [parsed.time];
     self.initialized := true;
@@ -406,7 +406,7 @@ module {
 
   public func byHashInternal(self : State, hash : Blob) : ?StoredBlock {
     if (hash.size() != 32) return null;
-    switch (ForkStore.get(self.forks, hash)) {
+    switch (self.forks.get(hash)) {
       case (?fb) ?storedFork(fb);
       case null {
         switch (Headers.lookup(self.headerTrie, hash)) {
@@ -430,7 +430,7 @@ module {
     // Fork block: its parent is either another fork block (heap map) or the
     // canonical block at height b.height - 1 — check by INDEX and compare
     // hashes instead of descending the trie by hash.
-    switch (ForkStore.get(self.forks, b.prevHash)) {
+    switch (self.forks.get(b.prevHash)) {
       case (?fb) ?storedFork(fb);
       case null {
         let idx = b.height - 1 : Nat;
@@ -485,7 +485,7 @@ module {
       };
       case _ {};
     };
-    switch (ForkStore.get(self.forks, prevHash)) {
+    switch (self.forks.get(prevHash)) {
       case (?fb) {
         return ?{
           hash = fb.hash;
@@ -532,14 +532,14 @@ module {
     if (not startIsCanonical) {
       var curHash = startHash;
       label walk while (remaining > 0) {
-        switch (ForkStore.get(self.forks, curHash)) {
+        switch (self.forks.get(curHash)) {
           case (?fb) {
-            List.add(buf, fb.time);
+            buf.add(fb.time);
             remaining -= 1;
             if (fb.height == 0) break walk;
             curHash := fb.prevHash;
             // Parent not in the fork store => canonical at fb.height - 1.
-            if (not ForkStore.contains(self.forks, curHash)) {
+            if (not self.forks.contains(curHash)) {
               canonFrom := ?(fb.height - 1 : Nat);
               break walk;
             };
@@ -552,7 +552,7 @@ module {
       case (?h0) {
         var h = h0;
         label canon while (remaining > 0) {
-          List.add(buf, canonTimeAt(self, h));
+          buf.add(canonTimeAt(self, h));
           remaining -= 1;
           if (h == 0) break canon;
           h -= 1;
@@ -560,7 +560,7 @@ module {
       };
       case null {};
     };
-    List.toArray(buf);
+    buf.toArray();
   };
 
   // Timestamp of `parent`'s ancestor at `targetHeight` (for the retarget
@@ -572,7 +572,7 @@ module {
     if (targetHeight == parent.height) return ?parent.time;
     var curHash = parent.hash;
     loop {
-      switch (ForkStore.get(self.forks, curHash)) {
+      switch (self.forks.get(curHash)) {
         case (?fb) {
           if (fb.height == targetHeight) return ?fb.time;
           if (fb.height == 0) return null;
@@ -683,7 +683,7 @@ module {
           height = h;
           cumWork = HeaderValue.cumWorkOf(rmValue);
           firstSeen = HeaderValue.firstSeenOf(rmValue);
-          body = Map.get<Nat, ForkBody>(demotedBodies, Nat.compare, h);
+          body = demotedBodies.get(Nat.compare, h);
         };
       };
     };
@@ -711,11 +711,11 @@ module {
                 case (?(_, v)) HeaderValue.firstTxIndexOf(v);
                 case null Runtime.trap("maybeReorg: missing displaced body block");
               };
-            } else StableTrie.size(self.txTrie);
-            Map.add<Nat, ForkBody>(demotedBodies, Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
+            } else self.txTrie.size();
+            demotedBodies.add(Nat.compare, h, { txids = extractTxids(self, lo, hi); firstTxIndex = lo });
             h += 1;
           };
-          StableTrie.truncate(self.txTrie, truncPoint);
+          self.txTrie.truncate(truncPoint);
           self.bodiesNextHeight := commonHeight + 1;
         };
       };
@@ -729,7 +729,7 @@ module {
       case null 0;
       case (?ev) {
         self.tipWork := newWork;
-        List.add(self.reorgLog, {
+        self.reorgLog.add({
           time = now;
           common_height = ev.commonHeight;
           fork_length = ev.promoted;
@@ -757,7 +757,7 @@ module {
     let newHeight = parent.height + 1;
     let cumWork = parent.cumWork + targetWorkFor(self, parsed.bits).1;
 
-    Uploaders.record(self.uploaders, hash, uploader);
+    self.uploaders.record(hash, uploader);
 
     var isCanonical = false;
     var reorgDepth : Nat = 0;
@@ -771,7 +771,7 @@ module {
       self.tipWork := cumWork;
       isCanonical := true;
     } else {
-      ForkStore.add(self.forks, hash, newHeight, {
+      self.forks.add(hash, newHeight, {
         hash;
         prevHash = parsed.prev_hash;
         version = parsed.version;
@@ -817,8 +817,8 @@ module {
     };
     // Reject headers whose timestamp is more than ONE_YEAR_SECS before the
     // current canonical tip's timestamp (tip time from the cache).
-    let tipTimeNat = Nat32.toNat(self.recentTimes[0]);
-    let parsedTimeNat = Nat32.toNat(parsed.time);
+    let tipTimeNat = self.recentTimes[0].toNat();
+    let parsedTimeNat = parsed.time.toNat();
     if (parsedTimeNat + ONE_YEAR_SECS < tipTimeNat) {
       return #err(
         "header timestamp " # debug_show parsedTimeNat #
@@ -862,7 +862,7 @@ module {
   // ---------------------------------------------------------------------
 
   // Total headers ever stored (canonical + fork).
-  public func size(self : State) : Nat = Headers.size(self.headerTrie) + ForkStore.size(self.forks);
+  public func size(self : State) : Nat = Headers.size(self.headerTrie) + self.forks.size();
 
   public func memoryStats(self : State) : Headers.MemoryStats = Headers.memoryStats(self.headerTrie);
 
@@ -877,15 +877,15 @@ module {
   public func allAt(self : State, height : Nat) : [StoredBlock] {
     let out = List.empty<StoredBlock>();
     if (height <= tipHeight(self)) {
-      List.add(out, storedCanonAt(self, height));
+      out.add(storedCanonAt(self, height));
     };
-    for (h in ForkStore.at(self.forks, height).vals()) {
-      switch (ForkStore.get(self.forks, h)) {
-        case (?fb) List.add(out, storedFork(fb));
+    for (h in self.forks.at(height).values()) {
+      switch (self.forks.get(h)) {
+        case (?fb) out.add(storedFork(fb));
         case null {};
       };
     };
-    List.toArray(out);
+    out.toArray();
   };
 
   public func byHashBE(self : State, hex : Text) : ?StoredBlock {
@@ -898,7 +898,7 @@ module {
     let bytes = Header.hexToBlob(hex);
     if (bytes.size() != 32) return false;
     let internal = Header.reverse32(bytes);
-    if (ForkStore.contains(self.forks, internal)) return true;
+    if (self.forks.contains(internal)) return true;
     switch (Headers.lookup(self.headerTrie, internal)) {
       case (?_) true;
       case null false;
@@ -916,7 +916,7 @@ module {
   // Bitcoin-Core "median time past": median of `b` and its 10 ancestors.
   public func mediantimeOf(self : State, b : StoredBlock) : Nat32 {
     let stamps = lastTimestampsFrom(self, b.hash, b.height, b.isCanonical, MTP_WINDOW);
-    let sorted = Array.sort<Nat32>(stamps, Nat32.compare);
+    let sorted = stamps.sort(Nat32.compare);
     sorted[sorted.size() / 2];
   };
 
@@ -949,14 +949,14 @@ module {
   public func forks(self : State) : [Fork] {
     // A fork block is a tip iff no other fork block names it as parent.
     let referenced = Set.empty<Blob>();
-    for ((_, fb) in ForkStore.entries(self.forks)) {
-      if (ForkStore.contains(self.forks, fb.prevHash)) {
-        Set.add<Blob>(referenced, Blob.compare, fb.prevHash);
+    for ((_, fb) in self.forks.entries()) {
+      if (self.forks.contains(fb.prevHash)) {
+        referenced.add(Blob.compare, fb.prevHash);
       };
     };
     let out = List.empty<Fork>();
-    for ((hash, fb) in ForkStore.entries(self.forks)) {
-      if (not Set.contains<Blob>(referenced, Blob.compare, hash)) {
+    for ((hash, fb) in self.forks.entries()) {
+      if (not referenced.contains(Blob.compare, hash)) {
         // Walk down from the tip to the canonical branch point.
         var cur = storedFork(fb);
         var length : Nat = 0;
@@ -971,7 +971,7 @@ module {
             case null Runtime.trap("forks: walked past genesis");
           };
         };
-        List.add(out, {
+        out.add({
           tip_height = fb.height;
           tip_hash_be_hex = bytesToHexBE(fb.hash);
           length;
@@ -980,21 +980,21 @@ module {
         });
       };
     };
-    List.toArray(out);
+    out.toArray();
   };
 
-  public func reorgs(self : State) : [ReorgEvent] = List.toArray(self.reorgLog);
+  public func reorgs(self : State) : [ReorgEvent] = self.reorgLog.toArray();
 
   // ---------------------------------------------------------------------
   // Uploader queries (thin pass-throughs to the Uploaders module).
   // ---------------------------------------------------------------------
 
-  public func uploaderOf(self : State, hash : Blob) : Principal = Uploaders.of(self.uploaders, hash);
+  public func uploaderOf(self : State, hash : Blob) : Principal = self.uploaders.of(hash);
 
-  public func uploaderStats(self : State) : [(Principal, Nat)] = Uploaders.stats(self.uploaders);
+  public func uploaderStats(self : State) : [(Principal, Nat)] = self.uploaders.stats();
 
   public func blocksByUploader(self : State, p : Principal, offset : Nat, limit : Nat) : [Blob] =
-    Uploaders.blocksByUploader(self.uploaders, p, offset, limit);
+    self.uploaders.blocksByUploader(p, offset, limit);
 
   // ---------------------------------------------------------------------
   // Block bodies.
@@ -1010,12 +1010,12 @@ module {
 
   public func bodiesHeight(self : State) : Nat = self.bodiesNextHeight;
 
-  public func totalIndexedTxids(self : State) : Nat = StableTrie.size(self.txTrie);
+  public func totalIndexedTxids(self : State) : Nat = self.txTrie.size();
 
   // Number of fork blocks that currently carry a body.
   public func forkBodyCount(self : State) : Nat {
     var n = 0;
-    for ((_, fb) in ForkStore.entries(self.forks)) {
+    for ((_, fb) in self.forks.entries()) {
       switch (fb.body) { case (?_) n += 1; case null {} };
     };
     n;
@@ -1026,7 +1026,7 @@ module {
   func extractTxids(self : State, lo : Nat, hi : Nat) : [Blob] {
     Array.tabulate<Blob>(
       hi - lo : Nat,
-      func(k) = switch (StableTrie.get(self.txTrie, lo + k)) {
+      func(k) = switch (self.txTrie.get(lo + k)) {
         case (?(key, _)) key;
         case null Runtime.trap("extractTxids: missing txid " # debug_show(lo + k));
       },
@@ -1039,21 +1039,21 @@ module {
   // other cross-block duplicate txid would silently corrupt the F-arithmetic,
   // so it traps (impossible on mainnet post-BIP30/34).
   func appendCanonicalBody(self : State, height : Nat, value : Blob, body : [Blob]) {
-    let f = StableTrie.size(self.txTrie);
+    let f = self.txTrie.size();
     Headers.put(self.headerTrie, height, HeaderValue.withFirstTxIndex(value, f));
     if (isCompressedBodyHeight(height)) return;
     let n = body.size();
     let hv = encodeHeight(height);
     var i = 0;
-    while (i < n) { ignore StableTrie.add(self.txTrie, body[i], hv); i += 1 };
-    if (StableTrie.size(self.txTrie) != f + n) {
+    while (i < n) { ignore self.txTrie.add(body[i], hv); i += 1 };
+    if (self.txTrie.size() != f + n) {
       Runtime.trap("appendCanonicalBody: unexpected duplicate txid at height " # debug_show height);
     };
   };
 
   // Body stored in a fork block's record, if any.
   func forkBodyOf(self : State, hash : Blob) : ?ForkBody {
-    switch (ForkStore.get(self.forks, hash)) {
+    switch (self.forks.get(hash)) {
       case (?fb) fb.body;
       case null null;
     };
@@ -1082,7 +1082,7 @@ module {
     let f = switch (Headers.get(self.headerTrie, height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
     let next = if (height + 1 < self.bodiesNextHeight) {
       switch (Headers.get(self.headerTrie, height + 1)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
-    } else StableTrie.size(self.txTrie);
+    } else self.txTrie.size();
     next - f : Nat;
   };
 
@@ -1172,11 +1172,11 @@ module {
         case (?f) f;
         case null return #err("ancestor bodies unknown for this fork block");
       };
-      let fb = switch (ForkStore.get(self.forks, b.hash)) {
+      let fb = switch (self.forks.get(b.hash)) {
         case (?x) x;
         case null return #err("fork block missing from store");
       };
-      ForkStore.update(self.forks, b.hash, { fb with body = ?{ txids = txids; firstTxIndex = f } });
+      self.forks.update(b.hash, { fb with body = ?{ txids = txids; firstTxIndex = f } });
       #ok(bodyResult(self, b, false));
     };
   };
@@ -1217,23 +1217,23 @@ module {
   // (from the txid trie) plus all fork blocks whose stored body holds it.
   public func lookupTxid(self : State, txid : Blob) : { canonical : ?Nat; forks : [Blob] } {
     if (txid.size() != 32) return { canonical = null; forks = [] };
-    let canonical = switch (StableTrie.lookup(self.txTrie, txid)) {
+    let canonical = switch (self.txTrie.lookup(txid)) {
       case (?(v, _)) ?decodeHeight(v);
       case null null;
     };
     let fks = List.empty<Blob>();
-    for ((hash, fb) in ForkStore.entries(self.forks)) {
+    for ((hash, fb) in self.forks.entries()) {
       switch (fb.body) {
-        case (?body) if (bodyContains(body.txids, txid)) List.add(fks, hash);
+        case (?body) if (bodyContains(body.txids, txid)) fks.add(hash);
         case null {};
       };
     };
-    { canonical; forks = List.toArray(fks) };
+    { canonical; forks = fks.toArray() };
   };
 
   // txid (internal LE) at global canonical serial `index`, or null.
   public func txidAtIndex(self : State, index : Nat) : ?Blob {
-    switch (StableTrie.get(self.txTrie, index)) { case (?(k, _)) ?k; case null null };
+    switch (self.txTrie.get(index)) { case (?(k, _)) ?k; case null null };
   };
 
   // Position of `txid` within fork body `body`, or null.
@@ -1248,7 +1248,7 @@ module {
   // global serial index and in-block position) plus each fork block holding it.
   public func txLocations(self : State, txid : Blob) : { canonical : ?TxCanonLoc; forks : [TxForkLoc] } {
     if (txid.size() != 32) return { canonical = null; forks = [] };
-    let canonical : ?TxCanonLoc = switch (StableTrie.lookup(self.txTrie, txid)) {
+    let canonical : ?TxCanonLoc = switch (self.txTrie.lookup(txid)) {
       case (?(v, idx)) {
         let height = decodeHeight(v);
         let f = switch (Headers.get(self.headerTrie, height)) { case (?(_, hv)) HeaderValue.firstTxIndexOf(hv); case null 0 };
@@ -1257,16 +1257,16 @@ module {
       case null null;
     };
     let fks = List.empty<TxForkLoc>();
-    for ((hash, fb) in ForkStore.entries(self.forks)) {
+    for ((hash, fb) in self.forks.entries()) {
       switch (fb.body) {
         case (?body) switch (bodyPositionOf(body.txids, txid)) {
-          case (?pos) List.add(fks, { hash; height = fb.height; position = pos });
+          case (?pos) fks.add({ hash; height = fb.height; position = pos });
           case null {};
         };
         case null {};
       };
     };
-    { canonical; forks = List.toArray(fks) };
+    { canonical; forks = fks.toArray() };
   };
 
   // Txids of the block `hash` (canonical or fork) in block order, internal LE,
@@ -1289,7 +1289,7 @@ module {
           let take = if (limit < rem) limit else rem;
           Array.tabulate<Blob>(
             take,
-            func(i) = switch (StableTrie.get(self.txTrie, f + offset + i)) {
+            func(i) = switch (self.txTrie.get(f + offset + i)) {
               case (?(k, _)) k;
               case null Runtime.trap("blockTxids: missing txid");
             },
@@ -1319,7 +1319,7 @@ module {
       var longest : Nat = 0;
       var highestTip : Nat = 0;
       var highestTipCommon : Nat = 0;
-      for (f in fs.vals()) {
+      for (f in fs.values()) {
         if (f.length > longest) longest := f.length;
         if (f.tip_height > highestTip) {
           highestTip := f.tip_height;
@@ -1328,14 +1328,14 @@ module {
       };
       var reorgLastCommon : Nat = 0;
       var reorgMaxDisplaced : Nat = 0;
-      for (e in List.values(self.reorgLog)) {
+      for (e in self.reorgLog.values()) {
         reorgLastCommon := e.common_height;
         if (e.displaced > reorgMaxDisplaced) reorgMaxDisplaced := e.displaced;
       };
-      let nr = List.size(self.reorgLog);
+      let nr = self.reorgLog.size();
       [
         ("chain_fork_tips", "", fs.size()),
-        ("chain_fork_blocks", "", ForkStore.size(self.forks)),
+        ("chain_fork_blocks", "", self.forks.size()),
         ("chain_fork_bodies", "", forkBodyCount(self)),
         ("chain_fork_longest", "", longest),
         ("chain_fork_highest_tip_height", "", highestTip),

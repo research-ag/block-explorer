@@ -35,6 +35,7 @@
 // whose F is genuinely 0.
 
 import Blob "mo:core/Blob";
+import Nat "mo:core/Nat";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
@@ -102,10 +103,10 @@ module {
     var i = 8;
     while (i > 0) {
       i -= 1;
-      lo := (lo << 8) | Nat64.fromNat(b[off + i].toNat());
-      hi := (hi << 8) | Nat64.fromNat(b[off + 8 + i].toNat());
+      lo := (lo << 8) | b[off + i].toNat().toNat64();
+      hi := (hi << 8) | b[off + 8 + i].toNat().toNat64();
     };
-    Prim.shiftLeft(Nat64.toNat(hi), 64) + Nat64.toNat(lo);
+    Prim.shiftLeft(hi.toNat(), 64) + lo.toNat();
   };
 
   // ---------------------------------------------------------------------
@@ -115,8 +116,8 @@ module {
   public func encode(f : Fields) : Blob {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
     Bytes.writeLE32(mut, 0, f.version);
-    Bytes.writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
-    Bytes.writeLE32(mut, 8, Nat32.fromNat(f.height));
+    Bytes.writeLE32(mut, 4, f.firstTxIndex.toNat32());
+    Bytes.writeLE32(mut, 8, f.height.toNat32());
     writeLE128(mut, 12, f.cumWork);
     Bytes.writeLE32(mut, 28, f.firstSeen);
     // bytes 32..36 reserved, already zero
@@ -124,7 +125,7 @@ module {
     Bytes.writeLE32(mut, 68, f.time);
     Bytes.writeLE32(mut, 72, f.bits);
     Bytes.writeLE32(mut, 76, f.nonce);
-    Blob.fromVarArray(mut);
+    mut.toBlob();
   };
 
   // Encode straight from the raw 80-byte header: copy all 80 bytes, then
@@ -132,30 +133,30 @@ module {
   // no field round trips. The reserved bytes [32..36) are explicitly
   // zeroed (the copy left prev_hash bytes there).
   public func encodeFromRaw(raw : Blob, firstTxIndex : Nat, height : Nat, cumWork : Nat, firstSeen : Nat32) : Blob {
-    let mut = Blob.toVarArray(raw); // one prim copy; no zero-init pass
-    Bytes.writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
-    Bytes.writeLE32(mut, 8, Nat32.fromNat(height));
+    let mut = raw.toVarArray(); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, firstTxIndex.toNat32());
+    Bytes.writeLE32(mut, 8, height.toNat32());
     writeLE128(mut, 12, cumWork);
     Bytes.writeLE32(mut, 28, firstSeen);
     mut[32] := 0; mut[33] := 0; mut[34] := 0; mut[35] := 0; // reserved
-    Blob.fromVarArray(mut);
+    mut.toBlob();
   };
 
   // Inverse patch: rebuild the raw 80-byte header from a value blob and the
   // block's prev_hash (the trie key of index - 1).
   public func toRawHeader(b : Blob, prevHash : Blob) : Blob {
-    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
+    let mut = b.toVarArray(); // one prim copy; no zero-init pass
     var j = 0;
     while (j < 32) { mut[4 + j] := prevHash[j]; j += 1 };
-    Blob.fromVarArray(mut);
+    mut.toBlob();
   };
 
   // Copy of `b` with only firstTxIndex (bytes 4..8) replaced — a byte-level
   // patch, not a decode/re-encode of all nine fields.
   public func withFirstTxIndex(b : Blob, f : Nat) : Blob {
-    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
-    Bytes.writeLE32(mut, 4, Nat32.fromNat(f));
-    Blob.fromVarArray(mut);
+    let mut = b.toVarArray(); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, f.toNat32());
+    mut.toBlob();
   };
 
   public func decode(b : Blob) : Fields {

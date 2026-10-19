@@ -44,29 +44,27 @@ module {
       };
       i += 1;
     };
-    Blob.fromArray(Array.tabulate<Nat8>(keySize, func(j) = hash[j]));
+    Array.tabulate<Nat8>(keySize, func(j) = hash[j]).toBlob();
   };
 
   // Re-pad a stored key back to a 32-byte hash with zero bytes.
   func expand(trie : Enumeration.Enumeration, key : Blob) : Blob {
     let keySize = trie.key_size;
     if (keySize == HASH_SIZE) return key; // identity mode: no copy
-    Blob.fromArray(
-      Array.tabulate<Nat8>(HASH_SIZE, func(i) = if (i < keySize) key[i] else (0 : Nat8))
-    );
+    Array.tabulate<Nat8>(HASH_SIZE, func(i) = if (i < keySize) key[i] else (0 : Nat8)).toBlob();
   };
 
   // Append a (hash, value) pair at the next index (== its height); returns it.
   public func add(trie : Enumeration.Enumeration, hash : Blob, value : Blob) : Nat =
-    Enumeration.add(trie, truncateKey(trie, hash), value);
+    trie.add(truncateKey(trie, hash), value);
 
   // Look up by hash. Returns (value, index) or null.
   public func lookup(trie : Enumeration.Enumeration, hash : Blob) : ?(Blob, Nat) =
-    Enumeration.lookup(trie, truncateKey(trie, hash));
+    trie.lookup(truncateKey(trie, hash));
 
   // Read the (hash, value) at an index (hash re-expanded to 32 bytes).
   public func get(trie : Enumeration.Enumeration, index : Nat) : ?(Blob, Blob) {
-    switch (Enumeration.get(trie, index)) {
+    switch (trie.get(index)) {
       case null null;
       case (?(k, v)) ?(expand(trie, k), v);
     };
@@ -75,7 +73,7 @@ module {
   // Read only the value at an index — skips the key re-expansion. Use for
   // narrow field reads (e.g. a single timestamp via HeaderValue.timeOf).
   public func valueAt(trie : Enumeration.Enumeration, index : Nat) : ?Blob {
-    switch (Enumeration.get(trie, index)) {
+    switch (trie.get(index)) {
       case null null;
       case (?(_, v)) ?v;
     };
@@ -83,11 +81,11 @@ module {
 
   // Overwrite the value at an index in place (key unchanged). Traps on OOB.
   public func put(trie : Enumeration.Enumeration, index : Nat, value : Blob) =
-    Enumeration.put(trie, index, value);
+    trie.put(index, value);
 
   // Retract the tip (highest index); returns the removed (hash, value) or null.
   public func removeLast(trie : Enumeration.Enumeration) : ?(Blob, Blob) {
-    switch (Enumeration.removeLast(trie)) {
+    switch (trie.removeLast()) {
       case null null;
       case (?(k, v)) ?(expand(trie, k), v);
     };
@@ -95,14 +93,14 @@ module {
 
   // Drop all entries from `newSize` onwards (keeps indices 0..newSize-1).
   public func truncate(trie : Enumeration.Enumeration, newSize : Nat) =
-    Enumeration.truncate(trie, newSize);
+    trie.truncate(newSize);
 
-  public func size(trie : Enumeration.Enumeration) : Nat = Enumeration.size(trie);
+  public func size(trie : Enumeration.Enumeration) : Nat = trie.size();
 
   public func memoryStats(trie : Enumeration.Enumeration) : MemoryStats =
-    Enumeration.memoryStats(trie);
+    trie.memoryStats();
 
   public func toValue(trie : Enumeration.Enumeration) : { read : () -> [(Text, Text, Nat)] } =
-    Enumeration.toValue(trie);
+    trie.toValue();
 
 };

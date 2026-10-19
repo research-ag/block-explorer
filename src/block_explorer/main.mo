@@ -37,10 +37,8 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
-import Migration "Migration";
 
-(with migration = Migration.run)
-persistent actor BlockExplorer {
+actor BlockExplorer {
 
   // ---------------------------------------------------------------------
   // Prometheus metrics — exposed via the Esplora HTTP handler at
@@ -61,15 +59,15 @@ persistent actor BlockExplorer {
   // Hold-down 62 s (default is 302): gauge watermarks decay after roughly
   // one scrape interval instead of five minutes.
   transient let tracker = PT.Tracker.newWith([], 62);
-  renderer.addValue(PT.Tracker.toValue(tracker));
+  renderer.addValue(tracker.toValue());
   // Heap size (rts_heap_size) sampled at the end of each batch — including
   // batches stopped early by the heap limit.
-  transient let heapAfterHeadersBatch = PT.Tracker.newGauge(tracker, "headers_batch_max_heap_bytes", [], []);
-  transient let heapAfterTxidsBatch = PT.Tracker.newGauge(tracker, "txids_batch_max_heap_bytes", [], []);
+  transient let heapAfterHeadersBatch = tracker.newGauge("headers_batch_max_heap_bytes", [], []);
+  transient let heapAfterTxidsBatch = tracker.newGauge("txids_batch_max_heap_bytes", [], []);
   // Number of batch entries actually processed (may be less than submitted
   // when the batch halts on an error or the heap limit).
-  transient let batchSizeHeaders = PT.Tracker.newGauge(tracker, "headers_batch_processed_count", [], []);
-  transient let batchSizeTxids = PT.Tracker.newGauge(tracker, "txids_batch_processed_count", [], []);
+  transient let batchSizeHeaders = tracker.newGauge("headers_batch_processed_count", [], []);
+  transient let batchSizeTxids = tracker.newGauge("txids_batch_processed_count", [], []);
 
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
@@ -138,13 +136,13 @@ persistent actor BlockExplorer {
   func nowSecs() : Int { Time.now() / 1_000_000_000 };
   func nowSecsNat32() : Nat32 {
     let s = nowSecs();
-    if (s <= 0) 0 else Nat32.fromNat(Int.abs(s) % 0x1_0000_0000);
+    if (s <= 0) 0 else Nat.toNat32(Int.abs(s) % 0x1_0000_0000);
   };
 
   // Fresh install only: seed genesis. Runs on every actor start, but the
   // `initialized` guard (persisted) makes it a no-op after the first install.
   if (not chain.initialized) {
-    Chain.initGenesis(chain, sha, nowSecsNat32(), Principal.fromActor(BlockExplorer));
+    chain.initGenesis(sha, nowSecsNat32(), Principal.fromActor(BlockExplorer));
   };
 
   // Chain-level pull values, read from `chain` directly so the metric output
@@ -156,8 +154,8 @@ persistent actor BlockExplorer {
   // Memory stats of both stable-trie Enumerations (stable_trie_node_count /
   // _leaf_count / _byte_size families, with a kind="used"|"total" label),
   // distinguished by a `trie` label.
-  renderer.addValue(PT.bundle([StableTrie.toValue(chain.headerTrie)], [("trie", "headers")]));
-  renderer.addValue(PT.bundle([StableTrie.toValue(chain.txTrie)], [("trie", "txids")]));
+  renderer.addValue([chain.headerTrie.toValue()].bundle([("trie", "headers")]));
+  renderer.addValue([chain.txTrie.toValue()].bundle([("trie", "txids")]));
   // Heap data-structure stats: fork-store sizes and reorg history
   // (chain_fork_* / chain_reorg_* families), computed once per scrape.
   renderer.addValue(chain.heapStatsValue());
@@ -240,15 +238,12 @@ persistent actor BlockExplorer {
   };
 
   public shared ({ caller }) func push_header_hex(raw_hex : Text) : async Result.Result<PushOkHex, Text> {
-    Result.mapOk<Chain.PushOk, PushOkHex, Text>(
-      chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller),
-      func(ok) = {
+    chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller).mapOk(func(ok) = {
         height = ok.height;
         hash_be_hex = Header.bytesToHex(Header.reverse32(ok.hash));
         is_canonical = ok.is_canonical;
         reorg_depth = ok.reorg_depth;
-      },
-    );
+      }, );
   };
 
   // Loop body of push_headers, also reusable by inspect_message as a true
@@ -259,7 +254,7 @@ persistent actor BlockExplorer {
     let now = nowSecs();
     var accepted : Nat = 0;
     var lastErr : ?Text = null;
-    label loopH for (h in headers.vals()) {
+    label loopH for (h in headers.values()) {
       switch (chain.push(sha, h, now, caller)) {
         case (#ok _) accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopH };
@@ -269,8 +264,8 @@ persistent actor BlockExplorer {
         break loopH;
       };
     };
-    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
-    PT.Gauge.update(batchSizeHeaders, accepted);
+    heapAfterHeadersBatch.update(Prim.rts_heap_size());
+    batchSizeHeaders.update(accepted);
     {
       accepted;
       tip_height = chain.tipHeight();
@@ -317,7 +312,7 @@ persistent actor BlockExplorer {
     var accepted = 0;
     var duplicate = 0;
     var lastErr : ?Text = null;
-    label loopB for ((block_hash, txids, coinbase_tx) in batch.vals()) {
+    label loopB for ((block_hash, txids, coinbase_tx) in batch.values()) {
       switch (chain.pushBody(block_hash, txids, coinbase_tx)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
@@ -327,8 +322,8 @@ persistent actor BlockExplorer {
         break loopB;
       };
     };
-    PT.Gauge.update(heapAfterTxidsBatch, Prim.rts_heap_size());
-    PT.Gauge.update(batchSizeTxids, accepted + duplicate);
+    heapAfterTxidsBatch.update(Prim.rts_heap_size());
+    batchSizeTxids.update(accepted + duplicate);
     #ok({ accepted; duplicate; last_error = lastErr });
   };
 
@@ -361,10 +356,7 @@ persistent actor BlockExplorer {
     let r = chain.lookupTxid(txid);
     {
       canonical_height = r.canonical;
-      fork_block_hashes_be = Array.map<Blob, Text>(
-        r.forks,
-        func(h) = Header.bytesToHex(Header.reverse32(h)),
-      );
+      fork_block_hashes_be = r.forks.map(func(h) = Header.bytesToHex(Header.reverse32(h)), );
     };
   };
 
@@ -439,9 +431,7 @@ persistent actor BlockExplorer {
       };
       case null null;
     };
-    let forkOccs = Array.map<Chain.TxForkLoc, TxOccurrence>(
-      loc.forks,
-      func(f) {
+    let forkOccs = loc.forks.map(func(f) {
         let t = switch (chain.byHashInternal(f.hash)) {
           case (?b) HeaderValue.timeOf(b.value);
           case null (0 : Nat32);
@@ -453,8 +443,7 @@ persistent actor BlockExplorer {
           block_time = t;
           position = f.position;
         };
-      },
-    );
+      }, );
     let occurrences = switch (canonOcc) {
       case (?o) Array.tabulate<TxOccurrence>(forkOccs.size() + 1, func(i) = if (i == 0) o else forkOccs[i - 1]);
       case null forkOccs;
@@ -481,10 +470,7 @@ persistent actor BlockExplorer {
     let bytes = Header.hexToBlob(block_hash_be_hex);
     if (bytes.size() != 32) return [];
     let cap = if (limit > 1000) 1000 else limit;
-    Array.map<Blob, Text>(
-      chain.blockTxids(Header.reverse32(bytes), offset, cap),
-      func(t) = Header.bytesToHex(Header.reverse32(t)),
-    );
+    chain.blockTxids(Header.reverse32(bytes), offset, cap).map(func(t) = Header.bytesToHex(Header.reverse32(t)), );
   };
 
   // ---------------------------------------------------------------------
@@ -597,8 +583,8 @@ persistent actor BlockExplorer {
     let batch = if (max_batch == 0) 1 else if (max_batch > MAX_BATCH) MAX_BATCH else max_batch;
 
     let req : GetBlockHeadersRequest = {
-      start_height = Nat32.fromNat(nextHeight);
-      end_height = ?Nat32.fromNat(nextHeight + batch - 1 : Nat);
+      start_height = nextHeight.toNat32();
+      end_height = ?Nat.toNat32(nextHeight + batch - 1 : Nat);
       network = #mainnet;
     };
 
@@ -611,15 +597,15 @@ persistent actor BlockExplorer {
 
     var imported : Nat = 0;
     var firstErr : ?Text = null;
-    label loopH for (h in resp.block_headers.vals()) {
+    label loopH for (h in resp.block_headers.values()) {
       switch (chain.push(sha, h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
         case (#ok _) imported += 1;
         case (#err msg) { firstErr := ?msg; break loopH };
       };
       if (heapExceeded()) break loopH;
     };
-    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
-    PT.Gauge.update(batchSizeHeaders, imported);
+    heapAfterHeadersBatch.update(Prim.rts_heap_size());
+    batchSizeHeaders.update(imported);
     switch (firstErr) {
       case (?msg) if (imported == 0) return #err(msg);
       case null {};
@@ -653,10 +639,7 @@ persistent actor BlockExplorer {
       case (?b) ?toBlockInfo(b, true);
       case null null;
     };
-    let siblings_ : [BlockInfo] = Array.map<Chain.StoredBlock, BlockInfo>(
-      chain.allAt(h),
-      func(b) = toBlockInfo(b, Chain.isOnCanonical(b)),
-    );
+    let siblings_ : [BlockInfo] = chain.allAt(h).map(func(b) = toBlockInfo(b, Chain.isOnCanonical(b)), );
     {
       tip = toBlockInfo(tipBlock, true);
       total_blocks = chain.size();
@@ -727,10 +710,7 @@ persistent actor BlockExplorer {
   // Pass 0 to get the full list.
   public query func uploader_leaderboard(top : Nat) : async [UploaderEntry] {
     let stats = chain.uploaderStats();
-    let sorted = Array.sort<(Principal, Nat)>(
-      stats,
-      func(a, b) = Nat.compare(b.1, a.1),
-    );
+    let sorted = stats.sort<(Principal, Nat)>(func(a, b) = Nat.compare(b.1, a.1));
     let limit = if (top == 0 or top > sorted.size()) sorted.size() else top;
     Array.tabulate<UploaderEntry>(
       limit,
@@ -787,7 +767,7 @@ persistent actor BlockExplorer {
   public query func get_cycles_per_call() : async Nat { cyclesPerCall };
 
   public shared ({ caller }) func set_cycles_per_call(n : Nat) : async () {
-    if (not Principal.isController(caller)) {
+    if (not caller.isController()) {
       Runtime.trap("unauthorized: set_cycles_per_call is controller-only");
     };
     cyclesPerCall := n;
