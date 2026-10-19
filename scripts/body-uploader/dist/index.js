@@ -75,6 +75,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 import { HttpAgent, Actor, AnonymousIdentity } from "@icp-sdk/core/agent";
 import { Ed25519KeyIdentity } from "@icp-sdk/core/identity";
 import { idlFactory } from "../block_explorer.did.js";
@@ -156,6 +157,114 @@ async function getBlockVerbose(hash) {
     // (vs verbosity=2 which would return the full transaction objects).
     return await btcRpc("getblock", [hash, 1]);
 }
+async function getRawTransactionHex(txid, blockhash) {
+    // verbosity=0 returns the raw tx hex directly. Passing `blockhash`
+    // avoids needing `txindex=1` on bitcoind — Bitcoin Core can locate the
+    // tx within the block.
+    return await btcRpc("getrawtransaction", [txid, 0, blockhash]);
+}
+// ---------------------------------------------------------------------------
+// Bitcoin transaction parsing — strip segwit witness to get the serialization
+// the merkle tree commits to
+// ---------------------------------------------------------------------------
+// Read a Bitcoin varint from `buf` at `off`. Returns (value, byteLength).
+function readVarInt(buf, off) {
+    const b0 = buf[off];
+    if (b0 < 0xfd)
+        return [b0, 1];
+    if (b0 === 0xfd) {
+        return [buf[off + 1] | (buf[off + 2] << 8), 3];
+    }
+    if (b0 === 0xfe) {
+        return [
+            buf[off + 1] |
+                (buf[off + 2] << 8) |
+                (buf[off + 3] << 16) |
+                (buf[off + 4] * 0x1000000), // avoid sign bit on bit 31
+            5,
+        ];
+    }
+    // 0xff: 8-byte varint. Transaction fields that use varints
+    // (input/output/script counts, lengths) never approach 2^32 in practice;
+    // reject rather than silently losing high bits.
+    throw new Error(`varint too large at offset ${off}: 0xff`);
+}
+// Given raw transaction bytes (as returned by `getrawtransaction` verbosity=0,
+// which is the SEGWIT serialization for witness-bearing txs), return the
+// stripped (witness-less) serialization: the exact bytes whose double-SHA256
+// is the on-the-wire txid, which is what the block's merkle tree commits to.
+// For a non-segwit tx the input is already stripped and is returned unchanged.
+export function stripWitness(raw) {
+    if (raw.length < 10)
+        throw new Error(`raw tx too short: ${raw.length} bytes`);
+    let p = 0;
+    const chunks = [];
+    // version (4 bytes, LE)
+    chunks.push(raw.subarray(p, p + 4));
+    p += 4;
+    // segwit marker (0x00) + flag (0x01) — present iff the tx has a witness
+    const hasWitness = raw[p] === 0x00 && raw[p + 1] === 0x01;
+    if (hasWitness)
+        p += 2;
+    // input count varint
+    const [vinCount, vinLen] = readVarInt(raw, p);
+    chunks.push(raw.subarray(p, p + vinLen));
+    p += vinLen;
+    for (let i = 0; i < vinCount; i += 1) {
+        const start = p;
+        p += 32; // prev txid
+        p += 4; // prev vout
+        const [scriptLen, scriptLenSize] = readVarInt(raw, p);
+        p += scriptLenSize + scriptLen;
+        p += 4; // sequence
+        chunks.push(raw.subarray(start, p));
+    }
+    // output count varint
+    const [voutCount, voutLen] = readVarInt(raw, p);
+    chunks.push(raw.subarray(p, p + voutLen));
+    p += voutLen;
+    for (let i = 0; i < voutCount; i += 1) {
+        const start = p;
+        p += 8; // value (8 bytes, LE)
+        const [scriptLen, scriptLenSize] = readVarInt(raw, p);
+        p += scriptLenSize + scriptLen;
+        chunks.push(raw.subarray(start, p));
+    }
+    if (hasWitness) {
+        // Skip witnesses: for each input, read a stack of items (varint count,
+        // then each item as varint length + bytes). The stripped serialization
+        // omits all of this.
+        for (let i = 0; i < vinCount; i += 1) {
+            const [stackLen, stackLenSize] = readVarInt(raw, p);
+            p += stackLenSize;
+            for (let j = 0; j < stackLen; j += 1) {
+                const [itemLen, itemLenSize] = readVarInt(raw, p);
+                p += itemLenSize + itemLen;
+            }
+        }
+    }
+    // locktime (4 bytes, LE)
+    chunks.push(raw.subarray(p, p + 4));
+    p += 4;
+    // Reassemble
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const c of chunks) {
+        out.set(c, o);
+        o += c.length;
+    }
+    return out;
+}
+// ---------------------------------------------------------------------------
+// SHA-256 helpers
+// ---------------------------------------------------------------------------
+function sha256(b) {
+    return new Uint8Array(createHash("sha256").update(b).digest());
+}
+function sha256d(b) {
+    return sha256(sha256(b));
+}
 // ---------------------------------------------------------------------------
 // Hex helpers
 // ---------------------------------------------------------------------------
@@ -170,6 +279,53 @@ function hexReverse32(hex) {
         out[i] = parseInt(hex.slice(j * 2, j * 2 + 2), 16);
     }
     return out;
+}
+/** Decode a hex string of any length into its raw bytes. */
+function hexToBytes(hex) {
+    if (hex.length % 2 !== 0)
+        throw new Error(`odd-length hex: ${hex.length}`);
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i += 1) {
+        out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+}
+/** Encode a 32-byte internal-LE hash as a 64-char big-endian display hex. */
+function bytesReverseHex(b) {
+    let s = "";
+    for (let i = b.length - 1; i >= 0; i -= 1) {
+        s += b[i].toString(16).padStart(2, "0");
+    }
+    return s;
+}
+// ---------------------------------------------------------------------------
+// Per-block coinbase
+// ---------------------------------------------------------------------------
+/** Fetch the raw coinbase (first tx) for a block and strip any segwit witness
+ *  so its double-SHA matches the on-the-wire txid — the canister recomputes
+ *  dSHA(coinbase_tx) and compares it to `hashes[0..32]`, and only accepts a
+ *  coinbase whose length is > 64 bytes (every internal merkle node is dSHA of
+ *  exactly 64 bytes, so this length pin forces the first position to be a
+ *  real leaf-level tx; combined with the Merkle-root recompute the whole body
+ *  must be real leaves). Verifies that the stripped coinbase hashes to
+ *  `firstTxidLE` — if Bitcoin Core returned something unexpected we fail
+ *  loudly here instead of letting the canister reject the body downstream. */
+async function fetchCoinbase(blockHashHex, coinbaseTxidHex, firstTxidLE) {
+    const rawHex = await getRawTransactionHex(coinbaseTxidHex, blockHashHex);
+    const raw = hexToBytes(rawHex);
+    const stripped = stripWitness(raw);
+    if (stripped.length <= 64) {
+        // Should never happen for a real coinbase (minimum ~90 bytes); fail here
+        // so we don't ship bodies the canister would reject.
+        throw new Error(`coinbase of block ${blockHashHex} is ${stripped.length} bytes ` +
+            `after stripping — canister requires > 64`);
+    }
+    const got = sha256d(stripped);
+    if (got.length !== firstTxidLE.length || !got.every((b, i) => b === firstTxidLE[i])) {
+        throw new Error(`coinbase stripped-tx mismatch for block ${blockHashHex}: ` +
+            `got ${bytesReverseHex(got)} want ${bytesReverseHex(firstTxidLE)}`);
+    }
+    return stripped;
 }
 // ---------------------------------------------------------------------------
 // Reorg detection
@@ -391,11 +547,14 @@ async function processOneIteration(actor, state) {
         // (single, no batch cap on the canister side).
         if (txCount > MAX_BATCH_TXIDS) {
             const blockHashLE = hexReverse32(hashHex);
+            const firstTxidLE = hexReverse32(txids[0]);
             const hashesBlob = new Uint8Array(txCount * 32);
-            for (let i = 0; i < txCount; i += 1) {
+            hashesBlob.set(firstTxidLE, 0);
+            for (let i = 1; i < txCount; i += 1) {
                 hashesBlob.set(hexReverse32(txids[i]), i * 32);
             }
-            const result = await actor.push_body(blockHashLE, BigInt(txCount), hashesBlob);
+            const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
+            const result = await actor.push_body(blockHashLE, BigInt(txCount), hashesBlob, coinbaseTx);
             if ("ok" in result) {
                 const ok = result.ok;
                 log(`push_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
@@ -423,15 +582,18 @@ async function processOneIteration(actor, state) {
             return state;
         }
         const blockHashLE = hexReverse32(hashHex);
+        const firstTxidLE = hexReverse32(txids[0]);
         const hashesBlob = new Uint8Array(txCount * 32);
-        for (let i = 0; i < txCount; i += 1) {
+        hashesBlob.set(firstTxidLE, 0);
+        for (let i = 1; i < txCount; i += 1) {
             hashesBlob.set(hexReverse32(txids[i]), i * 32);
         }
+        const coinbaseTx = await fetchCoinbase(hashHex, txids[0], firstTxidLE);
         pending.push({
             height: h,
             hashHex,
             txCount,
-            entry: [blockHashLE, BigInt(txCount), hashesBlob],
+            entry: [blockHashLE, BigInt(txCount), hashesBlob, coinbaseTx],
         });
         pendingTxids += txCount;
     }

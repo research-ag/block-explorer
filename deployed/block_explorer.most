@@ -1,7 +1,7 @@
 // Version: 1.0.0
-type BlobEnum__494823798 = BlobEnumeration__1031154174;
-type BlobEnumeration__1031154174 =
-  {var array : [var Blob]; var size_ : Nat; var tree : Tree__447958514};
+type BlobEnum__494823798 = BlobEnumeration__373145820;
+type BlobEnumeration__373145820 =
+  {var array : [var Blob]; var size_ : Nat; var tree : Tree__1044591825};
 type Data__44217153<K, V> = {var count : Nat__227979830; kvs : [var ?(K, V)]};
 type Enumeration__286404848 = StableTrie__1059179783;
 type ForkBlock__550065393 =
@@ -96,7 +96,7 @@ type StableTrie__775205806 =
     value_size : Nat;
     zero_leaf : Blob
   };
-type Tree__447958514 = ?({#B; #R}, Tree__447958514, Nat, Tree__447958514);
+type Tree__1044591825 = ?({#B; #R}, Tree__1044591825, Nat, Tree__1044591825);
 type Uploaders__952700464 =
   {
     var anonymousCount : Nat;

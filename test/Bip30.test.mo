@@ -39,39 +39,68 @@ func mkHeader(prev : Blob, time : Nat32, merkle : Blob) : Blob {
   writeLE32(buf, 76, 0);
   Blob.fromVarArray(buf);
 };
-// unique 32-byte txid per height
-func txidFor(h : Nat) : Blob {
-  let buf = VarArray.repeat<Nat8>(0x55, 32);
+// Synthetic raw-coinbase payload per height — 65 bytes to clear the
+// canister's > 64-byte depth pin. The dSHA256 of this blob is the on-the-
+// wire coinbase txid at height h; two heights sharing the same raw bytes
+// thereby share a coinbase txid, which is the BIP30 duplicate-pair setup.
+func rawCoinbaseFor(h : Nat) : Blob {
+  let buf = VarArray.repeat<Nat8>(0x55, 65);
   writeLE32(buf, 0, Nat32.fromNat(h % 0x1_0000_0000));
   writeLE32(buf, 4, Nat32.fromNat(h / 256));
   Blob.fromVarArray(buf);
+};
+// A regular (non-coinbase) 32-byte txid filler for second-tx-in-block slots.
+func txidFor(h : Nat) : Blob {
+  let buf = VarArray.repeat<Nat8>(0xaa, 32);
+  writeLE32(buf, 0, Nat32.fromNat(h % 0x1_0000_0000));
+  writeLE32(buf, 4, Nat32.fromNat(h / 256));
+  Blob.fromVarArray(buf);
+};
+func dSha(b : Blob) : Blob {
+  let d = Sha256.new(#sha256);
+  d.writeBlob(b);
+  d.sumDouble();
 };
 func cat2(a : Blob, b : Blob) : Blob {
   Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i-32]));
 };
 
 let c = Chain.emptyForTest();
-let A = txidFor(1_000_001); // dup pair A txid (91722 & 91880)
-let B = txidFor(1_000_002); // dup pair B txid (91812 & 91842)
+// Raw bytes shared across the BIP30 duplicate-coinbase pairs; the resulting
+// on-the-wire txids A, B appear twice each (91722/91880 and 91812/91842).
+let cbA = rawCoinbaseFor(1_000_001);
+let cbB = rawCoinbaseFor(1_000_002);
+let A = dSha(cbA); // dup pair A txid (91722 & 91880)
+let B = dSha(cbB); // dup pair B txid (91812 & 91842)
+
+// Real genesis coinbase bytes — the merkle root of the emptyForTest chain's
+// genesis header is this coinbase's txid, so the on-chain coinbase check
+// needs these exact bytes.
+let GENESIS_COINBASE : Blob = Header.hexToBlob(
+  "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000"
+);
 
 // genesis body
-ignore Chain.pushBody(c, Chain.tipBlock(c).hash, 1, HeaderValue.merkleOf(Chain.tipBlock(c).value));
+ignore Chain.pushBody(c, Chain.tipBlock(c).hash, 1, HeaderValue.merkleOf(Chain.tipBlock(c).value), GENESIS_COINBASE);
 
 var h = 1;
 var prev = Chain.tipBlock(c).hash;
 label build while (h <= 91_890) {
-  let (txs, count) : (Blob, Nat) = if (h == 91_722) (A, 1)
-    else if (h == 91_812) (cat2(B, txidFor(h)), 2)
-    else if (h == 91_842) (B, 1)
-    else if (h == 91_880) (cat2(A, txidFor(h)), 2)
-    else (txidFor(h), 1);
+  // Pick the coinbase bytes and the body's txid list for this height. The
+  // 2-tx heights are the real BIP30 cases where a duplicate-coinbase block
+  // (91812/91880) also carries a second tx whose txid is height-unique.
+  let (cbTx, txs, count) : (Blob, Blob, Nat) = if (h == 91_722) (cbA, A, 1)
+    else if (h == 91_812) (cbB, cat2(B, txidFor(h)), 2)
+    else if (h == 91_842) (cbB, B, 1)
+    else if (h == 91_880) (cbA, cat2(A, txidFor(h)), 2)
+    else (rawCoinbaseFor(h), dSha(rawCoinbaseFor(h)), 1);
   let merkle = Merkle.root(txs, count);
   let raw = mkHeader(prev, Nat32.fromNat(1_400_000_000 + h), merkle);
   switch (Chain.pushUnchecked(c, SHA, raw, NOW, UP)) {
     case (#ok ok) prev := ok.hash;
     case (#err e) { Debug.print("push failed at " # debug_show h # ": " # e); assert false };
   };
-  switch (Chain.pushBody(c, prev, count, txs)) {
+  switch (Chain.pushBody(c, prev, count, txs, cbTx)) {
     case (#ok _) {};
     case (#err e) { Debug.print("body failed at " # debug_show h # ": " # e); assert false };
   };
