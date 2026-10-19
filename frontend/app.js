@@ -65,6 +65,12 @@ const idlFactory = ({ IDL }) => {
     is_canonical: IDL.Bool,
     first_seen: IDL.Nat32,
     uploader: IDL.Principal,
+    // The coinbase scriptSig: 2-100 bytes of miner-controlled payload
+    // (BIP34 height varint + often a readable pool tag + extra nonce).
+    // null when the canister hasn't yet stored this block's coinbase
+    // (backfill hasn't reached it, or it's a fork body with no coinbase
+    // upload).
+    coinbase_scriptsig: IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
   const Fork = IDL.Record({
     tip_height: IDL.Nat,
@@ -376,6 +382,46 @@ function renderBlock(bi) {
   const tcEl = $("bi-tx-count");
   tcEl.textContent = "…";
   tcEl.className = "muted";
+
+  renderCoinbaseScriptSig(bi.coinbase_scriptsig);
+}
+
+// Pretty-print the coinbase scriptSig: ASCII decoding on the first line
+// (non-printable bytes shown as `·`), full hex on the second. Collapsed
+// to "—" when the canister hasn't stored this block's coinbase yet
+// (backfill not caught up, or a fork body without a coinbase upload).
+function renderCoinbaseScriptSig(opt) {
+  const el = $("bi-coinbase-scriptsig");
+  el.innerHTML = "";
+  if (!opt || opt.length === 0) {
+    el.textContent = "—";
+    el.className = "muted";
+    return;
+  }
+  const bytes = opt[0];
+  const asciiLine = document.createElement("div");
+  asciiLine.className = "hash";
+  asciiLine.textContent = bytesToPrintableAscii(bytes);
+  const hexLine = document.createElement("div");
+  hexLine.className = "hash muted";
+  hexLine.textContent = bytesToHex(bytes);
+  el.appendChild(asciiLine);
+  el.appendChild(hexLine);
+  el.className = "";
+}
+
+function bytesToHex(bytes) {
+  let s = "";
+  for (const b of bytes) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+
+function bytesToPrintableAscii(bytes) {
+  let s = "";
+  for (const b of bytes) {
+    s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·";
+  }
+  return s;
 }
 
 // Wire up the tx_count cell from a (possibly already in-flight) promise.
