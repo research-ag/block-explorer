@@ -1,7 +1,7 @@
 // nBits <-> target round-trip, against well-known historical values.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 
 suite(
   "Compact (nBits) format",

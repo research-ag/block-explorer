@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Push the next N block headers from an Electrum `blockchain_headers` file
-to the BlockExplorer canister, in batches via `push_headers_hex`.
+to the BlockExplorer canister, in batches via `push_headers`.
 
 Usage:
     scripts/push-headers.py N [--canister NAME] [--env ENV] [--batch SIZE]
@@ -10,7 +10,7 @@ Usage:
 The script:
  1. Queries the canister for its current tip height (via `get_view`).
  2. Reads headers [tip+1 .. tip+N] (each 80 bytes) from the file.
- 3. Sends them in batches of `--batch` (default 1000) to push_headers_hex.
+ 3. Sends them in batches of `--batch` (default 1000) to push_headers.
  4. Stops if the canister rejects a header.
 """
 
@@ -22,8 +22,8 @@ import sys
 import tempfile
 
 HEADER_SIZE = 80
-DEFAULT_BATCH = 1000
-MAX_BATCH = 10_000  # must match MAX_PUSH_BATCH in src/block_explorer/main.mo
+DEFAULT_BATCH = 12_500
+MAX_BATCH = 20_000  # must match MAX_PUSH_BATCH in src/block_explorer/main.mo
 
 
 def run_icp(args, capture=True):
@@ -82,10 +82,14 @@ def read_headers(path, start, count):
     return [data[i * HEADER_SIZE : (i + 1) * HEADER_SIZE] for i in range(end - start)]
 
 
-def push_batch(canister, env, headers_hex):
-    """Send one batch via push_headers_hex; return (accepted, last_error)."""
-    # Build Candid arg: (vec { "hex1"; "hex2"; ... })
-    inner = "; ".join(f'"{h}"' for h in headers_hex)
+def candid_blob(raw):
+    """Candid text-format blob literal for raw bytes."""
+    return 'blob "' + "".join(f"\\{b:02x}" for b in raw) + '"'
+
+
+def push_batch(canister, env, headers_raw):
+    """Send one batch via push_headers (raw blobs); return (accepted, last_error)."""
+    inner = "; ".join(candid_blob(h) for h in headers_raw)
     arg = f"(vec {{ {inner} }})"
 
     with tempfile.NamedTemporaryFile(
@@ -95,7 +99,7 @@ def push_batch(canister, env, headers_hex):
         tmp_path = tmp.name
     try:
         args = [
-            "canister", "call", canister, "push_headers_hex",
+            "canister", "call", canister, "push_headers",
             "--args-file", tmp_path,
         ]
         if env:
@@ -113,7 +117,7 @@ def push_batch(canister, env, headers_hex):
         return 0, err_m.group(1)
     acc_m = re.search(r"accepted\s*=\s*([\d_]+)\s*:\s*nat", out)
     if not acc_m:
-        sys.stderr.write("Could not parse push_headers_hex output:\n" + out)
+        sys.stderr.write("Could not parse push_headers output:\n" + out)
         sys.exit(1)
     accepted = parse_nat(acc_m.group(1))
     last_err = None
@@ -134,7 +138,7 @@ def main():
     )
     ap.add_argument(
         "--batch", type=int, default=DEFAULT_BATCH,
-        help=f"batch size per push_headers_hex call (max {MAX_BATCH}, "
+        help=f"batch size per push_headers call (max {MAX_BATCH}, "
              f"default {DEFAULT_BATCH})",
     )
     ap.add_argument(
@@ -172,14 +176,21 @@ def main():
         headers = read_headers(args.file, cursor, n)
         if not headers:
             break
-        headers_hex = [h.hex() for h in headers]
         print(f"  pushing heights {cursor}..{cursor + len(headers) - 1} "
               f"({len(headers)} headers) ...", end=" ", flush=True)
-        accepted, err = push_batch(args.canister, args.env, headers_hex)
+        accepted, err = push_batch(args.canister, args.env, headers)
         print(f"accepted={accepted}"
               + (f"  err={err}" if err else ""))
         pushed += accepted
         cursor += accepted
+        # "heap limit reached" is the one retryable last_error: the canister
+        # stopped the batch to bound heap growth within a single message, and
+        # the GC reclaims that garbage between messages. Continue from where
+        # it stopped (cursor already advanced by `accepted`). Every other
+        # error is a hard rejection that would fail identically on retry.
+        if err and err.startswith("heap limit reached") and accepted > 0:
+            print(f"  canister heap limit; continuing from height {cursor}")
+            continue
         if accepted < len(headers) or err:
             print(f"Stopping after {pushed} accepted headers.")
             sys.exit(1 if err else 0)

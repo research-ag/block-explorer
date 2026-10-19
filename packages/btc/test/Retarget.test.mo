@@ -1,7 +1,7 @@
 // Tests for difficulty retarget computation.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 import F "fixtures/Fixtures";
 
 func parsed(hex : Text) : Header.Parsed {

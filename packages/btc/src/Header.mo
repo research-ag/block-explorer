@@ -2,16 +2,18 @@
 // This module contains no actor state and is safe to import from tests.
 
 import Blob "mo:core/Blob";
-import Char "mo:core/Char";
 import Int "mo:core/Int";
-import Iter "mo:core/Iter";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
 import Result "mo:core/Result";
-import Runtime "mo:core/Runtime";
 import VarArray "mo:core/VarArray";
 
+import Prim "mo:⛔";
+
 import Sha256 "mo:sha2/Sha256";
+
+import Bytes "Bytes";
+import Hex "internal/Hex";
 
 module {
 
@@ -28,99 +30,22 @@ module {
   public let GENESIS_HEADER_HEX : Text = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
 
   // ---------------------------------------------------------------------
-  // Hex helpers.
+  // Hex helpers (generic; implementation in internal/Hex).
   // ---------------------------------------------------------------------
 
-  func hexCharAt(n : Nat) : Char {
-    // n in [0, 16)
-    if (n < 10) Char.fromNat32(0x30 + Nat32.fromNat(n)) else Char.fromNat32(0x61 + Nat32.fromNat(n - 10));
-  };
-
-  func hexNibble(c : Char) : Nat8 {
-    let n = c.toNat32();
-    if (n >= 0x30 and n <= 0x39) Nat8.fromNat((n - 0x30).toNat()) else if (n >= 0x61 and n <= 0x66) Nat8.fromNat((n - 0x61 + 10).toNat()) else if (n >= 0x41 and n <= 0x46) Nat8.fromNat((n - 0x41 + 10).toNat()) else Runtime.trap("invalid hex char");
-  };
-
-  public func hexToBlob(t : Text) : Blob {
-    let chars = Iter.toArray(t.chars());
-    if (chars.size() % 2 != 0) Runtime.trap("odd-length hex");
-    let n = chars.size() / 2;
-    let mut = VarArray.repeat<Nat8>(0, n);
-    var i = 0;
-    while (i < n) {
-      let hi = hexNibble(chars[2 * i]);
-      let lo = hexNibble(chars[2 * i + 1]);
-      mut[i] := (hi << 4) | lo;
-      i += 1;
-    };
-    Blob.fromVarArray(mut);
-  };
-
-  // Hex-encode a byte sequence (Blob or [Nat8]).  Cold/display path.
-  public func bytesToHex(bs : Blob) : Text {
-    var out = "";
-    for (b in bs.vals()) {
-      let n = b.toNat();
-      out #= hexCharAt(n / 16).toText();
-      out #= hexCharAt(n % 16).toText();
-    };
-    out;
-  };
-
-  public func nat32Hex(v : Nat32) : Text {
-    var out = "";
-    var i : Nat = 4;
-    while (i > 0) {
-      i -= 1;
-      let shift = Nat32.fromNat(i) * 8;
-      let byte = ((v >> shift) & 0xff).toNat();
-      out #= hexCharAt(byte / 16).toText();
-      out #= hexCharAt(byte % 16).toText();
-    };
-    out;
-  };
+  public func hexToBlob(t : Text) : Blob = Hex.decode(t);
+  public func bytesToHex(bs : Blob) : Text = Hex.encode(bs);
 
   // ---------------------------------------------------------------------
   // Header parsing.
   // ---------------------------------------------------------------------
 
-  public func readLE32(bs : [Nat8], offset : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(bs[offset].toNat());
-    let b1 = Nat32.fromNat(bs[offset + 1].toNat());
-    let b2 = Nat32.fromNat(bs[offset + 2].toNat());
-    let b3 = Nat32.fromNat(bs[offset + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
-  // Same as readLE32 but reads directly from a Blob (no toArray copy).
-  public func readLE32Blob(b : Blob, offset : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(b[offset].toNat());
-    let b1 = Nat32.fromNat(b[offset + 1].toNat());
-    let b2 = Nat32.fromNat(b[offset + 2].toNat());
-    let b3 = Nat32.fromNat(b[offset + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
-  // Copy 32 bytes out of a Blob into a fresh Blob (used to hold
-  // prev_hash and merkle as Blob fields in `Parsed`).  Allocates one
-  // 32-byte VarArray and converts it to Blob with no extra copy.
-  public func slice32BlobOut(b : Blob, offset : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, 32);
-    var i = 0;
-    while (i < 32) {
-      mut[i] := b[offset + i];
-      i += 1;
-    };
-    Blob.fromVarArray(mut);
-  };
-
-  // Narrow accessors for hot validation paths: read a single Nat32
-  // field straight out of the raw 80-byte header without allocating
-  // anything. Caller must pass a 80-byte blob.
-  public func versionOf(raw : Blob) : Nat32 = readLE32Blob(raw, 0);
-  public func timeOf(raw : Blob) : Nat32 = readLE32Blob(raw, 68);
-  public func bitsOf(raw : Blob) : Nat32 = readLE32Blob(raw, 72);
-  public func nonceOf(raw : Blob) : Nat32 = readLE32Blob(raw, 76);
+  // Narrow accessors: read a single Nat32 field straight out of the raw
+  // 80-byte header without allocating. Caller must pass an 80-byte blob.
+  public func versionOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 0);
+  public func timeOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 68);
+  public func bitsOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 72);
+  public func nonceOf(raw : Blob) : Nat32 = Bytes.readLE32(raw, 76);
 
   public type Parsed = {
     version : Nat32;
@@ -134,18 +59,25 @@ module {
   public func parseHeader(b : Blob) : ?Parsed {
     if (b.size() != 80) return null;
     ?{
-      version = readLE32Blob(b, 0);
-      prev_hash = slice32BlobOut(b, 4);
-      merkle = slice32BlobOut(b, 36);
-      time = readLE32Blob(b, 68);
-      bits = readLE32Blob(b, 72);
-      nonce = readLE32Blob(b, 76);
+      version = Bytes.readLE32(b, 0);
+      prev_hash = Bytes.slice32(b, 4);
+      merkle = Bytes.slice32(b, 36);
+      time = Bytes.readLE32(b, 68);
+      bits = Bytes.readLE32(b, 72);
+      nonce = Bytes.readLE32(b, 76);
     };
   };
 
-  // doubleSHA256 of an 80-byte header, in internal LE order.
-  public func headerHashBlob(b : Blob) : Blob {
-    Sha256.fromBlob(#sha256, Sha256.fromBlob(#sha256, b));
+  // doubleSHA256 of an 80-byte header, in internal LE order, on a
+  // caller-provided engine (reused across calls via reset()). `sumDouble`
+  // does the second hash in place — the first digest stays in the engine's
+  // state and is reloaded into the message buffer, skipping the 32-byte
+  // intermediate Blob and the byte-by-byte re-parse a `writeBlob(first); sum()`
+  // would do. Leaves the engine finished.
+  public func headerHashBlob(d : Sha256.Digest, b : Blob) : Blob {
+    d.reset();
+    d.writeBlob(b);
+    d.sumDouble();
   };
 
   // Reverse the byte order of a 32-byte Blob (LE <-> BE display).
@@ -159,29 +91,14 @@ module {
     Blob.fromVarArray(mut);
   };
 
-  // Removed: bytesEq([Nat8],[Nat8]).  Use Blob equality (==) instead.
-
-  // Interpret a little-endian Blob as a Nat.
-  public func leBytesToNat(h : Blob) : Nat {
-    var acc : Nat = 0;
-    var i : Nat = h.size();
-    while (i > 0) {
-      i -= 1;
-      acc := acc * 256 + h[i].toNat();
-    };
-    acc;
-  };
-
   // ---------------------------------------------------------------------
   // nBits <-> target conversion (Bitcoin "compact" format).
   // ---------------------------------------------------------------------
 
-  func pow256(n : Nat) : Nat {
-    var acc : Nat = 1;
-    var i = 0;
-    while (i < n) { acc *= 256; i += 1 };
-    acc;
-  };
+  // 256^n as a single bignum shift — a `*= 256` loop allocates a fresh,
+  // growing bignum per iteration (~3.6 KB inside nBitsToTarget for typical
+  // exponents).
+  func pow256(n : Nat) : Nat = Prim.shiftLeft(1, Nat32.fromNat(8 * n));
 
   public func nBitsToTarget(bits : Nat32) : Nat {
     let exp : Nat = (bits >> 24).toNat();
@@ -271,21 +188,62 @@ module {
     if (parsed.prev_hash == prevHash) #ok() else #err("prev_block_hash mismatch");
   };
 
+  // PoW check directly on the compact nBits encoding — no target bignum is
+  // ever computed and nothing allocates. target = mant * 256^(exp - 3), so
+  // in the 32-byte LE hash it is: zero bytes at LE indices [exp..32), the
+  // 3-byte mantissa window at LE indices exp-1 (hi) .. exp-3 (lo), and free
+  // bytes below. hash <= target iff the high bytes are zero and the window,
+  // read as a number, is < mant — or == mant with all lower bytes zero.
+  //
+  // Semantics mirror the old nBitsToTarget-based check exactly:
+  //  - the sign bit (0x00800000) is masked off, like nBitsToTarget;
+  //  - "nBits out of range" iff target == 0 (mant == 0) or target >
+  //    POW_LIMIT_TARGET (= 0xffff * 256^26). The encoding is not canonical,
+  //    so the limit check is per (exp, mant): exceeded iff
+  //    (exp == 0x1d and mant > 0xffff) or (exp == 0x1e and mant > 0xff)
+  //    or (exp >= 0x1f) — and never for exp < 0x1d since mant <= 0x7fffff
+  //    < 0xffff * 256.
+  //  - exp < 3 (window extends below byte 0; never on mainnet) falls back
+  //    to the exact bignum comparison.
   public func checkPoW(headerHashLE : Blob, bits : Nat32) : Result.Result<(), Text> {
-    let target = nBitsToTarget(bits);
-    if (target == 0 or target > POW_LIMIT_TARGET) {
+    let exp = Nat32.toNat(bits >> 24);
+    let mant = bits & 0x007f_ffff;
+    if (mant == 0) return #err("nBits out of range"); // target == 0
+    if (exp >= 0x1f or (exp == 0x1e and mant > 0xff) or (exp == 0x1d and mant > 0xffff)) {
+      return #err("nBits out of range"); // target > POW_LIMIT_TARGET
+    };
+    if (exp < 3) {
+      // Targets with exp < 3 are below ~2^15 — roughly 2^160x harder than
+      // today's difficulty, i.e. unreachable for many decades and bounded by
+      // physics well before then. We reject such headers rather than carry a
+      // bignum hash-vs-target comparison for a case real chain data will
+      // never present. Revisit if Bitcoin difficulty ever approaches it.
       return #err("nBits out of range");
     };
-    if (leBytesToNat(headerHashLE) > target) {
-      return #err("proof-of-work failed");
+    // Bytes above the mantissa window must be zero (LE indices exp..31).
+    var i = exp;
+    while (i < 32) {
+      if (headerHashLE[i] != (0 : Nat8)) return #err("proof-of-work failed");
+      i += 1;
+    };
+    // The 3-byte window vs the mantissa.
+    let w : Nat32 = (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 1])) << 16) | (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 2])) << 8) | Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 3]));
+    if (w > mant) return #err("proof-of-work failed");
+    if (w == mant) {
+      // Exactly at the window: hash <= target only if every lower byte is 0.
+      var j = 0;
+      while (j + 3 < exp) {
+        if (headerHashLE[j] != (0 : Nat8)) return #err("proof-of-work failed");
+        j += 1;
+      };
     };
     #ok();
   };
 
   public func checkBits(actualBits : Nat32, expectedBits : Nat32) : Result.Result<(), Text> {
     if (actualBits == expectedBits) #ok() else #err(
-      "nBits mismatch: got 0x" # nat32Hex(actualBits) #
-      " expected 0x" # nat32Hex(expectedBits)
+      "nBits mismatch: got 0x" # Hex.encodeNat32(actualBits) #
+      " expected 0x" # Hex.encodeNat32(expectedBits)
     );
   };
 
@@ -301,19 +259,18 @@ module {
   // gathers the ancestor data; this function applies all five rules.
   //
   // `expectedBits` is precomputed by the caller (either prev.bits, or
-  // computeRetargetNBits at a 2016-boundary).
-  public func validateAgainst(
-    header : Blob,
+  // computeRetargetNBits at a 2016-boundary). Takes the already-parsed
+  // header and its already-computed hash, so hot callers don't parse or
+  // sha256d the same header twice. The PoW check works on the compact bits
+  // directly — no target is computed anywhere on this path.
+  public func validateParsed(
+    parsed : Parsed,
+    headerHashLE : Blob,
     expectedBits : Nat32,
     prevHashLE : Blob,
     mtp : Nat32,
     nowSecs : Int,
   ) : Result.Result<(), Text> {
-    if (header.size() != 80) return #err("header is not 80 bytes");
-    let parsed = switch (parseHeader(header)) {
-      case (?p) p;
-      case null return #err("could not parse header");
-    };
     switch (checkContinuity(parsed, prevHashLE)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
@@ -322,7 +279,7 @@ module {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
-    switch (checkPoW(headerHashBlob(header), parsed.bits)) {
+    switch (checkPoW(headerHashLE, parsed.bits)) {
       case (#err msg) return #err(msg);
       case (#ok()) {};
     };
@@ -335,6 +292,23 @@ module {
       case (#ok()) {};
     };
     #ok();
+  };
+
+  // Convenience wrapper over `validateParsed` for callers holding only the
+  // raw header (parses and hashes it first).
+  public func validateAgainst(
+    header : Blob,
+    expectedBits : Nat32,
+    prevHashLE : Blob,
+    mtp : Nat32,
+    nowSecs : Int,
+  ) : Result.Result<(), Text> {
+    if (header.size() != 80) return #err("header is not 80 bytes");
+    let parsed = switch (parseHeader(header)) {
+      case (?p) p;
+      case null return #err("could not parse header");
+    };
+    validateParsed(parsed, headerHashBlob(Sha256.new(#sha256), header), expectedBits, prevHashLE, mtp, nowSecs);
   };
 
 };

@@ -1,11 +1,14 @@
 // Tests for the double-SHA256 of a header.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Sha256 "mo:sha2/Sha256";
+import Header "../src/Header";
 import F "fixtures/Fixtures";
 
+let SHA = Sha256.new(#sha256);
+
 func hashBE(hex : Text) : Text {
-  Header.bytesToHex(Header.reverse32(Header.headerHashBlob(Header.hexToBlob(hex))));
+  Header.bytesToHex(Header.reverse32(Header.headerHashBlob(SHA, Header.hexToBlob(hex))));
 };
 
 suite(

@@ -1,36 +1,56 @@
-// 76-byte value blob stored in HeaderDb (the stable hash → header trie).
+// 80-byte value blob stored in the canonical header trie.
 //
-// Layout (all integers little-endian):
+// The layout IS the raw 80-byte Bitcoin header, except the 32-byte
+// prev_hash window (raw bytes [4..36)) is repurposed for our computed
+// fields — so encoding is "copy the raw header, patch one window", and
+// reconstructing the raw header is the inverse patch.
 //
-//   off | bytes | field
-//  -----+-------+-----------------------------------------------
-//     0 |     4 | version          (Nat32)
-//     4 |     4 | parent dbidx     (Nat32)
-//     8 |    32 | merkle root      (raw, internal LE order)
-//    40 |     4 | time             (Nat32)
-//    44 |     4 | bits             (Nat32)
-//    48 |     4 | nonce            (Nat32)
-//    52 |     4 | height           (Nat32)
-//    56 |    16 | cumWork          (Nat128, LE)
-//    72 |     4 | first seen       (Nat32, unix seconds; wraps in 2106)
+//   off | bytes | field                              | source
+//  -----+-------+------------------------------------+------------------
+//     0 |     4 | version          (Nat32, LE)       | raw, byte-identical
+//     4 |     4 | firstTxIndex (F) (Nat32, LE)       | computed
+//     8 |     4 | height           (Nat32, LE)       | computed
+//    12 |    16 | cumWork          (Nat128, LE)      | computed
+//    28 |     4 | first seen       (Nat32, LE; wraps | computed
+//       |       |   in 2106)                         |
+//    32 |     4 | reserved (zeros)                   | computed
+//    36 |    32 | merkle root (internal LE order)    | raw, byte-identical
+//    68 |     4 | time             (Nat32, LE)       | raw, byte-identical
+//    72 |     4 | bits             (Nat32, LE)       | raw, byte-identical
+//    76 |     4 | nonce            (Nat32, LE)       | raw, byte-identical
 //  -----+-------+
-//    76 total
+//    80 total
 //
-// Genesis has parentDbidx == 0 (its own dbidx) and is the only block
-// where parentDbidx points to itself.
+// No prev_hash / parent pointer is stored: the trie holds ONLY the
+// canonical chain, so the parent of the block at trie index `i` is the
+// block at index `i - 1` and prev_hash is that block's key.
+//
+// firstTxIndex (F) is the 0-based index of this block's first transaction
+// in the canonical-chain-wide transaction ordering:
+//   F(0) = 0  (genesis)
+//   F(h) = F(h-1) + N(h-1)   where N is the block's transaction count.
+// It is populated only once the bodies of all preceding blocks are known
+// (a later feature). Until then it is the SENTINEL value 0, meaning
+// "first-transaction number not yet known" — for any block except genesis,
+// whose F is genuinely 0.
 
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
+import Nat64 "mo:core/Nat64";
 import VarArray "mo:core/VarArray";
+
+import Bytes "mo:btc/Bytes";
+
+import Prim "mo:⛔";
 
 module {
 
-  public let SIZE : Nat = 76;
+  public let SIZE : Nat = 80;
 
   public type Fields = {
     version : Nat32;
-    parentDbidx : Nat;
+    firstTxIndex : Nat; // F; 0 == sentinel "unknown" (except genesis)
     merkle : Blob; // 32 bytes, internal LE order
     time : Nat32;
     bits : Nat32;
@@ -44,21 +64,22 @@ module {
   // Blob writers (used only at encode time; reads use direct b[i]).
   // ---------------------------------------------------------------------
 
-  func writeLE32(buf : [var Nat8], off : Nat, v : Nat32) {
-    buf[off] := Nat8.fromNat((v & 0xff).toNat());
-    buf[off + 1] := Nat8.fromNat(((v >> 8) & 0xff).toNat());
-    buf[off + 2] := Nat8.fromNat(((v >> 16) & 0xff).toNat());
-    buf[off + 3] := Nat8.fromNat(((v >> 24) & 0xff).toNat());
-  };
-
+  // Split into two Nat64 limbs WITHOUT bignum division: Nat64.fromIntWrap
+  // takes the value mod 2^64 (= the low limb, exact for Nat) and
+  // Prim.shiftRight(v, 64) yields the high limb — bignum % and / by 2^64
+  // allocate ~0.8 KB of internal temporaries for a 96-bit cumWork, the
+  // wrap+shift split doesn't. Then explode each limb into its 8 bytes in
+  // one prim call (most-significant byte first); byte extraction is free
+  // either way (Nat64 locals are unboxed). Avoid: per-byte `% 256` on a
+  // Nat (fresh bignum per iteration, ~12 KB) and Nat32 quarters (measured
+  // worse).
   func writeLE128(buf : [var Nat8], off : Nat, v : Nat) {
-    var x = v;
-    var i = 0;
-    while (i < 16) {
-      buf[off + i] := Nat8.fromNat(x % 256);
-      x /= 256;
-      i += 1;
-    };
+    let (l7, l6, l5, l4, l3, l2, l1, l0) = Prim.explodeNat64(Nat64.fromIntWrap(v));
+    let (h7, h6, h5, h4, h3, h2, h1, h0) = Prim.explodeNat64(Nat64.fromIntWrap(Prim.shiftRight(v, 64)));
+    buf[off] := l0; buf[off + 1] := l1; buf[off + 2] := l2; buf[off + 3] := l3;
+    buf[off + 4] := l4; buf[off + 5] := l5; buf[off + 6] := l6; buf[off + 7] := l7;
+    buf[off + 8] := h0; buf[off + 9] := h1; buf[off + 10] := h2; buf[off + 11] := h3;
+    buf[off + 12] := h4; buf[off + 13] := h5; buf[off + 14] := h6; buf[off + 15] := h7;
   };
 
   func writeBlob32(buf : [var Nat8], off : Nat, b : Blob) {
@@ -73,22 +94,18 @@ module {
   // Blob readers (direct, no toArray).
   // ---------------------------------------------------------------------
 
-  func readLE32(b : Blob, off : Nat) : Nat32 {
-    let b0 = Nat32.fromNat(b[off].toNat());
-    let b1 = Nat32.fromNat(b[off + 1].toNat());
-    let b2 = Nat32.fromNat(b[off + 2].toNat());
-    let b3 = Nat32.fromNat(b[off + 3].toNat());
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-  };
-
+  // Assemble via two Nat64 limbs (3 bignum ops total) — per-byte
+  // `acc * 256 + b` allocates a fresh, growing bignum every iteration.
   func readLE128(b : Blob, off : Nat) : Nat {
-    var acc : Nat = 0;
-    var i : Nat = 16;
+    var lo : Nat64 = 0;
+    var hi : Nat64 = 0;
+    var i = 8;
     while (i > 0) {
       i -= 1;
-      acc := acc * 256 + b[off + i].toNat();
+      lo := (lo << 8) | Nat64.fromNat(b[off + i].toNat());
+      hi := (hi << 8) | Nat64.fromNat(b[off + 8 + i].toNat());
     };
-    acc;
+    Prim.shiftLeft(Nat64.toNat(hi), 64) + Nat64.toNat(lo);
   };
 
   // ---------------------------------------------------------------------
@@ -97,40 +114,61 @@ module {
 
   public func encode(f : Fields) : Blob {
     let mut = VarArray.repeat<Nat8>(0, SIZE);
-    writeLE32(mut, 0, f.version);
-    writeLE32(mut, 4, Nat32.fromNat(f.parentDbidx));
-    writeBlob32(mut, 8, f.merkle);
-    writeLE32(mut, 40, f.time);
-    writeLE32(mut, 44, f.bits);
-    writeLE32(mut, 48, f.nonce);
-    writeLE32(mut, 52, Nat32.fromNat(f.height));
-    writeLE128(mut, 56, f.cumWork);
-    writeLE32(mut, 72, f.firstSeen);
+    Bytes.writeLE32(mut, 0, f.version);
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(f.firstTxIndex));
+    Bytes.writeLE32(mut, 8, Nat32.fromNat(f.height));
+    writeLE128(mut, 12, f.cumWork);
+    Bytes.writeLE32(mut, 28, f.firstSeen);
+    // bytes 32..36 reserved, already zero
+    writeBlob32(mut, 36, f.merkle);
+    Bytes.writeLE32(mut, 68, f.time);
+    Bytes.writeLE32(mut, 72, f.bits);
+    Bytes.writeLE32(mut, 76, f.nonce);
     Blob.fromVarArray(mut);
   };
 
-  // Slice 32 bytes out of a Blob into a fresh Blob without going via [Nat8].
-  func sliceBlob32(b : Blob, off : Nat) : Blob {
-    let mut = VarArray.repeat<Nat8>(0, 32);
-    var i = 0;
-    while (i < 32) {
-      mut[i] := b[off + i];
-      i += 1;
-    };
+  // Encode straight from the raw 80-byte header: copy all 80 bytes, then
+  // patch the prev_hash window [4..36) with the computed fields — no parse,
+  // no field round trips. The reserved bytes [32..36) are explicitly
+  // zeroed (the copy left prev_hash bytes there).
+  public func encodeFromRaw(raw : Blob, firstTxIndex : Nat, height : Nat, cumWork : Nat, firstSeen : Nat32) : Blob {
+    let mut = Blob.toVarArray(raw); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(firstTxIndex));
+    Bytes.writeLE32(mut, 8, Nat32.fromNat(height));
+    writeLE128(mut, 12, cumWork);
+    Bytes.writeLE32(mut, 28, firstSeen);
+    mut[32] := 0; mut[33] := 0; mut[34] := 0; mut[35] := 0; // reserved
+    Blob.fromVarArray(mut);
+  };
+
+  // Inverse patch: rebuild the raw 80-byte header from a value blob and the
+  // block's prev_hash (the trie key of index - 1).
+  public func toRawHeader(b : Blob, prevHash : Blob) : Blob {
+    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
+    var j = 0;
+    while (j < 32) { mut[4 + j] := prevHash[j]; j += 1 };
+    Blob.fromVarArray(mut);
+  };
+
+  // Copy of `b` with only firstTxIndex (bytes 4..8) replaced — a byte-level
+  // patch, not a decode/re-encode of all nine fields.
+  public func withFirstTxIndex(b : Blob, f : Nat) : Blob {
+    let mut = Blob.toVarArray(b); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 4, Nat32.fromNat(f));
     Blob.fromVarArray(mut);
   };
 
   public func decode(b : Blob) : Fields {
     {
-      version = readLE32(b, 0);
-      parentDbidx = readLE32(b, 4).toNat();
-      merkle = sliceBlob32(b, 8);
-      time = readLE32(b, 40);
-      bits = readLE32(b, 44);
-      nonce = readLE32(b, 48);
-      height = readLE32(b, 52).toNat();
-      cumWork = readLE128(b, 56);
-      firstSeen = readLE32(b, 72);
+      version = Bytes.readLE32(b, 0);
+      firstTxIndex = Bytes.readLE32(b, 4).toNat();
+      height = Bytes.readLE32(b, 8).toNat();
+      cumWork = readLE128(b, 12);
+      firstSeen = Bytes.readLE32(b, 28);
+      merkle = Bytes.slice32(b, 36);
+      time = Bytes.readLE32(b, 68);
+      bits = Bytes.readLE32(b, 72);
+      nonce = Bytes.readLE32(b, 76);
     };
   };
 
@@ -139,17 +177,15 @@ module {
   // without allocating. Caller must pass a 76-byte blob (SIZE).
   // ---------------------------------------------------------------------
 
-  public func versionOf(b : Blob) : Nat32 = readLE32(b, 0);
-  public func parentDbidxOf(b : Blob) : Nat = readLE32(b, 4).toNat();
-  public func timeOf(b : Blob) : Nat32 = readLE32(b, 40);
-  public func bitsOf(b : Blob) : Nat32 = readLE32(b, 44);
-  public func nonceOf(b : Blob) : Nat32 = readLE32(b, 48);
-  public func heightOf(b : Blob) : Nat = readLE32(b, 52).toNat();
-  public func cumWorkOf(b : Blob) : Nat = readLE128(b, 56);
-  public func firstSeenOf(b : Blob) : Nat32 = readLE32(b, 72);
-
-  // 32-byte merkle root copy (small allocation, only used by /metrics
-  // and BlockInfo construction).
-  public func merkleOf(b : Blob) : Blob = sliceBlob32(b, 8);
+  public func versionOf(b : Blob) : Nat32 = Bytes.readLE32(b, 0);
+  public func firstTxIndexOf(b : Blob) : Nat = Bytes.readLE32(b, 4).toNat();
+  public func heightOf(b : Blob) : Nat = Bytes.readLE32(b, 8).toNat();
+  public func cumWorkOf(b : Blob) : Nat = readLE128(b, 12);
+  public func firstSeenOf(b : Blob) : Nat32 = Bytes.readLE32(b, 28);
+  // Raw-identical region: same offsets as the wire header.
+  public func merkleOf(b : Blob) : Blob = Bytes.slice32(b, 36);
+  public func timeOf(b : Blob) : Nat32 = Bytes.readLE32(b, 68);
+  public func bitsOf(b : Blob) : Nat32 = Bytes.readLE32(b, 72);
+  public func nonceOf(b : Blob) : Nat32 = Bytes.readLE32(b, 76);
 
 };

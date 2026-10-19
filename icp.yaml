@@ -1,3 +1,9 @@
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 8001
+
 canisters:
   - name: block_explorer
     recipe:
@@ -5,20 +11,18 @@ canisters:
       configuration:
         main: src/block_explorer/main.mo
         idl: .icp/cache/artifacts/block_explorer.did
+        # Raise the stable-memory page cap from moc's 65536-page (4 GiB)
+        # default to 32x = 2_097_152 pages (128 GiB): the txid trie's
+        # Region.grow was failing at 4 GiB. Recipe passes `args` straight to moc.
+        args: "--max-stable-pages 2097152"
   - name: header_fetcher
     recipe:
       type: "https://raw.githubusercontent.com/research-ag/icp-cli-recipes/idl-option/recipes/motoko/recipe.hbs"
       configuration:
         main: src/header_fetcher/header_fetcher.mo
         idl: .icp/cache/artifacts/header_fetcher.did
-  - name: block_bodies
-    recipe:
-      type: "@dfinity/motoko@v4.1.0"
-      configuration:
-        main: src/block_bodies/block_bodies.mo
-        idl: .icp/cache/artifacts/block_bodies.did
   - name: frontend
     recipe:
-      type: "@dfinity/asset-canister@v2.1.0"
+      type: "@dfinity/static-site@v0.4.1"
       configuration:
         dir: frontend

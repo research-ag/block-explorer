@@ -1,0 +1,123 @@
+// Version: 1.0.0
+type BlobEnum__494823798 = BlobEnumeration__1031154174;
+type BlobEnumeration__1031154174 =
+  {var array : [var Blob]; var size_ : Nat; var tree : Tree__447958514};
+type Data__44217153<K, V> = {var count : Nat__227979830; kvs : [var ?(K, V)]};
+type Enumeration__286404848 = StableTrie__1059179783;
+type ForkBlock__550065393 =
+  {
+    bits : Nat32;
+    body : ?ForkBody__1064556805;
+    cumWork : Nat;
+    firstSeen : Nat32;
+    hash : Blob;
+    height : Nat;
+    merkle : Blob;
+    nonce : Nat32;
+    prevHash : Blob;
+    time : Nat32;
+    version : Nat32
+  };
+type ForkBody__1064556805 = {firstTxIndex : Nat; txids : Blob};
+type ForkStore__323451345<B> =
+  {byHeight : Map__230067015<Nat, [Blob]>; byId : Map__230067015<Blob, B>};
+type Internal__283199666<K, V> =
+  {children : [var ?Node__204828119<K, V>]; data : Data__44217153<K, V>};
+type Leaf__598469445<K, V> = {data : Data__44217153<K, V>};
+type LinkedList__818741339 =
+  {
+    var count : Nat;
+    item_size : Nat64;
+    var last_empty_item : Nat64;
+    loadMask : Nat64;
+    offset_base : Nat64;
+    pointer_size : Nat
+  };
+type List__355132335<T> =
+  {
+    var blockIndex : Nat__227979830;
+    var blocks : [var [var ?T]];
+    var elementIndex : Nat__227979830
+  };
+type List__836382695<T> = List__355132335<T>;
+type Map__230067015<K, V> = Map__405889023<K, V>;
+type Map__405889023<K, V> = Map__603270868<K, V>;
+type Map__603270868<K, V> =
+  {var root : Node__204828119<K, V>; var size : Nat__227979830};
+type Nat__227979830 = Nat__920180692;
+type Nat__920180692 = Nat;
+type Node__204828119<K, V> =
+  {#internal : Internal__283199666<K, V>; #leaf : Leaf__598469445<K, V>};
+type Region__387902757 = Region;
+type Region__616970443 = Region__387902757;
+type ReorgEvent__808211227 =
+  {
+    common_height : Nat;
+    displaced : Nat;
+    fork_length : Nat;
+    new_tip_hash_be_hex : Text;
+    new_tip_height : Nat;
+    old_tip_hash_be_hex : Text;
+    old_tip_height : Nat;
+    time : Int
+  };
+type StableTrie__1059179783 = StableTrie__775205806;
+type StableTrie__775205806 =
+  {
+    aridity_ : Nat64;
+    bitlength : Nat16;
+    bitshift : Nat8;
+    empty_leaves_list : LinkedList__818741339;
+    empty_nodes_list : LinkedList__818741339;
+    empty_values : Bool;
+    key_size : Nat;
+    key_size_ : Nat64;
+    var leaf_count : Nat64;
+    leaf_size : Nat64;
+    var leaves_freeSpace : Nat64;
+    var leaves_region : Region__616970443;
+    loadMask : Nat64;
+    max_address : Nat64;
+    max_chain_depth : Nat64;
+    var node_count : Nat64;
+    node_size : Nat64;
+    node_size_ : Nat;
+    var nodes_freeSpace : Nat64;
+    var nodes_region : Region__616970443;
+    offset_base : Nat64;
+    padding : Nat64;
+    pointer_size : Nat;
+    pointer_size_ : Nat64;
+    root_aridity_ : Nat64;
+    root_bitlength : Nat16;
+    root_bitlength_ : Nat64;
+    root_size : Nat64;
+    safe_node_bound : Nat64;
+    value_size : Nat;
+    zero_leaf : Blob
+  };
+type Tree__447958514 = ?({#B; #R}, Tree__447958514, Nat, Tree__447958514);
+type Uploaders__952700464 =
+  {
+    var anonymousCount : Nat;
+    blocks : List__836382695<List__836382695<Blob>>;
+    enum : BlobEnum__494823798;
+    ofHash : Map__230067015<Blob, Nat>
+  };
+type WorkMemo__1019139925 = {bits : Nat32; target : Nat; work : Nat};
+actor {
+  stable chain :
+    {
+      var bodiesNextHeight : Nat;
+      forks : ForkStore__323451345<ForkBlock__550065393>;
+      headerTrie : Enumeration__286404848;
+      var initialized : Bool;
+      var recentTimes : [Nat32];
+      reorgLog : List__836382695<ReorgEvent__808211227>;
+      var tipWork : Nat;
+      txTrie : Enumeration__286404848;
+      uploaders : Uploaders__952700464;
+      var workMemo : WorkMemo__1019139925
+    };
+  stable var cyclesPerCall : Nat
+};

@@ -9,8 +9,8 @@ import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
 
-import Header "../src/block_explorer/Header";
-import Merkle "../src/block_bodies/Merkle";
+import Header "../src/Header";
+import Merkle "../src/Merkle";
 
 // Pack BE-hex hashes into a single flat LE-byte hashes blob, the
 // shape that `Merkle.root` consumes.

@@ -2,7 +2,7 @@
 // the first few mainnet headers.
 
 import { test; suite } "mo:test";
-import Header "../src/block_explorer/Header";
+import Header "../src/Header";
 import F "fixtures/Fixtures";
 
 suite(

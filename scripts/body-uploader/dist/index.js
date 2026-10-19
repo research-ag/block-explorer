@@ -3,7 +3,16 @@
  *
  * Pulls full blocks from a local Bitcoin Core node via JSON-RPC,
  * extracts the txid list of each block, and uploads them to the
- * block_bodies canister via `put_body`.
+ * block_explorer canister via `push_body` / `push_bodies`.
+ *
+ * A body may be uploaded only once all of the block's ancestor bodies are
+ * known (so its first-tx serial number is determined): canonical bodies in
+ * strict height order, and a fork block's body only after its parent's.
+ * This uploader walks heights in order, which satisfies that for the
+ * canonical chain. The canister verifies each body against the block's
+ * merkle root, indexes canonical bodies into the txid trie, and stores fork
+ * bodies in the fork-block record (so a reorg re-indexes automatically).
+ * Re-uploading a known body is a no-op (counted as `duplicate`).
  *
  * Algorithm
  * ---------
@@ -15,15 +24,34 @@
  *        b. `getblock <hash> 1`          — txid list in chain order
  *        c. Convert hash + each txid from BE display → 32-byte internal LE
  *        d. Concatenate txids into one Uint8Array (tx_count * 32 bytes)
- *        e. Call `bodies.put_body(blockHashLE, BigInt(tx_count), hashesBlob)`
- *           - On `{ ok: PutOk }`         : log accepted / duplicate
+ *        e. Call `push_body(blockHashLE, BigInt(tx_count), hashesBlob)`
+ *           - On `{ ok: PushBodyOk }`    : log accepted / duplicate
  *           - On `{ err: text }`         : log error and stop (keep state)
  *      Persist `next = h + 1` after each successful put.
  *   4. Repeat after POLL_INTERVAL seconds (or one-shot when `--once`).
  *
- * The canister rejects a put_body whose block_hash isn't already known
- * to block_explorer (it looks it up first), so this script depends on
- * the header relay (poll-headers.py / watch-headers.py) being ahead of it.
+ * The canister rejects a push_body whose block_hash isn't already known
+ * (the header must be present first), so this script depends on the
+ * header relay (poll-headers.py / watch-headers.py) being ahead of it.
+ * To avoid burning cycles when the header relay stalls, the uploader
+ * pre-checks each batch with the canister's `have_hashes` query and
+ * only submits the prefix whose headers are already known. If none
+ * are known it skips the iteration entirely — no push_body call, no
+ * cycles spent — and retries after POLL_INTERVAL.
+ *
+ * Reorg handling
+ * --------------
+ * If a Bitcoin reorg replaced canonical blocks below the uploader's
+ * cursor after they were uploaded, the canister will reject the next
+ * push with
+ *   "ancestor bodies unknown: expected canonical body for height H, got G"
+ * The uploader parses H out of that message and rolls the state file
+ * back to H. The next iteration then re-uploads the (now current)
+ * canonical bodies from H onward — bodies whose hashes still match are
+ * counted as `duplicate` and state fast-forwards through them; bodies
+ * that changed under the reorg are re-indexed. A safety cap
+ * (MAX_REORG_ROLLBACK, default 10_000) prevents a parser slip or a
+ * garbled canister error from rewinding state all the way to zero.
  *
  * State file (default: $HOME/.ic/body-uploader.state.json):
  *   { "next": <height>, "updated_at": "<iso8601>" }
@@ -40,6 +68,7 @@
  *   MAX_PER_RUN=1000                      # cap per loop iteration; aligns with MAX_BATCH_BLOCKS
  *   MAX_BATCH_BLOCKS=1000                 # per-call block cap (also enforced canister-side)
  *   MAX_BATCH_TXIDS=31250                 # per-call txid cap (≈1 MiB) (also enforced canister-side)
+ *   MAX_REORG_ROLLBACK=10000              # cap on auto-rollback when the canister reports a reorg
  *   POLL_INTERVAL=60                      # seconds between iterations; 0 = one-shot
  *   STATE_FILE=$HOME/.ic/body-uploader.state.json
  */
@@ -48,7 +77,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { HttpAgent, Actor, AnonymousIdentity } from "@icp-sdk/core/agent";
 import { Ed25519KeyIdentity } from "@icp-sdk/core/identity";
-import { idlFactory } from "../block_bodies.did.js";
+import { idlFactory } from "../block_explorer.did.js";
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -74,6 +103,11 @@ const STATE_FILE = process.env.STATE_FILE
 // 1_000-block cap matches the canister's MAX_BATCH_BLOCKS.
 const MAX_BATCH_BLOCKS = Number(process.env.MAX_BATCH_BLOCKS ?? 1000);
 const MAX_BATCH_TXIDS = Number(process.env.MAX_BATCH_TXIDS ?? 31_250);
+// Cap on how far a reorg auto-rollback may rewind state.next in a
+// single event. Bitcoin reorgs deeper than a handful of blocks are
+// vanishingly rare; 10_000 leaves plenty of headroom while ensuring
+// a garbled error message can't wind state all the way to zero.
+const MAX_REORG_ROLLBACK = Number(process.env.MAX_REORG_ROLLBACK ?? 10_000);
 function required(name) {
     const v = process.env[name];
     if (!v) {
@@ -137,6 +171,26 @@ function hexReverse32(hex) {
     }
     return out;
 }
+// ---------------------------------------------------------------------------
+// Reorg detection
+// ---------------------------------------------------------------------------
+/** The canister's "ancestor bodies unknown" error names the height it
+ *  actually expects next; the uploader's state.next got ahead of the
+ *  canonical chain because a Bitcoin reorg replaced canonical blocks
+ *  under us. Parse the expected height out so the caller can roll
+ *  state back to it. Example message:
+ *
+ *    "ancestor bodies unknown: expected canonical body for height 962_722, got 962_723"
+ *
+ *  Underscores are Candid-style thousands separators. Returns null if
+ *  the message doesn't match. */
+function parseAncestorError(msg) {
+    const m = msg.match(/expected canonical body for height ([\d_]+)/);
+    if (!m)
+        return null;
+    const n = Number(m[1].replace(/_/g, ""));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+}
 function loadState() {
     try {
         const raw = fs.readFileSync(STATE_FILE, "utf8");
@@ -186,6 +240,17 @@ async function processOneIteration(actor, state) {
         log(`up to date: next=${state.next} > bitcoind tip=${tip}`);
         return state;
     }
+    // Header pre-flight for the first block we plan to submit. If the canister
+    // doesn't know that header yet, the header relay is behind — skip this
+    // iteration entirely instead of fetching MAX_PER_RUN blocks from bitcoind
+    // just to have flush() trim them all.
+    const firstHashHex = await getBlockHash(state.next);
+    const firstKnown = (await actor.have_hashes([firstHashHex]))[0];
+    if (!firstKnown) {
+        log(`header pending: canister does not yet know header at height ${state.next} ` +
+            `(hash ${firstHashHex}); waiting for header relay`);
+        return state;
+    }
     const end = Math.min(tip, state.next + MAX_PER_RUN - 1);
     log(`processing heights ${state.next}..${end} (tip=${tip})`);
     // Accumulate blocks into a batch until either MAX_BATCH_BLOCKS or
@@ -200,6 +265,32 @@ async function processOneIteration(actor, state) {
     const flush = async () => {
         if (pending.length === 0)
             return { state, stop: false };
+        // Pre-flight: which of these headers does the canister actually have?
+        // A push_body(ies) for an unknown header still costs cycles and just
+        // fails. Trim to the longest known prefix; defer the rest to a later
+        // iteration once the header relay has caught up.
+        const pendingHashesHex = pending.map((p) => p.hashHex);
+        const known = await actor.have_hashes(pendingHashesHex);
+        let knownPrefix = 0;
+        while (knownPrefix < known.length && known[knownPrefix])
+            knownPrefix += 1;
+        if (knownPrefix === 0) {
+            log(`header pending: canister does not yet know header for height ${pending[0].height} ` +
+                `(hash ${pending[0].hashHex}); stopping iteration until header relay catches up`);
+            pending = [];
+            pendingTxids = 0;
+            return { state, stop: true };
+        }
+        const trimmedTail = knownPrefix < pending.length;
+        if (trimmedTail) {
+            const fromH = pending[knownPrefix].height;
+            const toH = pending[pending.length - 1].height;
+            const dropped = pending.length - knownPrefix;
+            log(`header frontier: canister knows ${knownPrefix}/${pending.length} pending; ` +
+                `deferring heights ${fromH}..${toH} (${dropped} blocks) until header relay catches up`);
+            pending = pending.slice(0, knownPrefix);
+            pendingTxids = pending.reduce((s, p) => s + p.txCount, 0);
+        }
         const batch = pending.map((p) => p.entry);
         const firstH = pending[0].height;
         const lastH = pending[pending.length - 1].height;
@@ -211,10 +302,10 @@ async function processOneIteration(actor, state) {
         log(`submitting heights=${firstH}..${lastH} (${pending.length} blocks, ` +
             `${totalTxs} txids)`);
         const submitT0 = Date.now();
-        const result = await actor.put_bodies(batch);
+        const result = await actor.push_bodies(batch);
         const submitMs = Date.now() - submitT0;
         if ("err" in result) {
-            logErr(`put_bodies heights=${firstH}..${lastH} (${pending.length} blocks, ` +
+            logErr(`push_bodies heights=${firstH}..${lastH} (${pending.length} blocks, ` +
                 `${totalTxs} txids) submit_ms=${submitMs}: ${result.err}`);
             // Hard failure (e.g. malformed input) — don't advance state.
             pending = [];
@@ -241,13 +332,41 @@ async function processOneIteration(actor, state) {
             saveState(nextState);
             pending = [];
             pendingTxids = 0;
-            return { state: nextState, stop: lastError !== null };
+            // If we trimmed unknown-header blocks off the tail, stop the iteration
+            // — the outer loop would just fetch more of them from bitcoind for
+            // nothing.
+            return { state: nextState, stop: lastError !== null || trimmedTail };
         }
         // processed == 0 with last_error set — the very first block in the
-        // batch failed. Don't advance; surface the error.
+        // batch failed. If the canister is telling us its canonical chain
+        // has moved under us (a Bitcoin reorg), roll state.next back to
+        // the height it asked for so the next iteration re-uploads. Cap
+        // the rollback so a parser slip can't rewind us to zero.
+        if (lastError !== null) {
+            const expected = parseAncestorError(lastError);
+            if (expected !== null && expected < state.next) {
+                const rollback = state.next - expected;
+                pending = [];
+                pendingTxids = 0;
+                if (rollback > MAX_REORG_ROLLBACK) {
+                    logErr(`reorg rollback of ${rollback} blocks (from ${state.next} to ${expected}) ` +
+                        `exceeds MAX_REORG_ROLLBACK=${MAX_REORG_ROLLBACK}; giving up. ` +
+                        `Investigate before restarting.`);
+                    return { state, stop: true };
+                }
+                const nextState = {
+                    next: expected,
+                    updated_at: new Date().toISOString(),
+                };
+                saveState(nextState);
+                log(`reorg detected: rolling state back ${rollback} blocks ` +
+                    `(from ${state.next} to ${expected}); will retry on next iteration`);
+                return { state: nextState, stop: true };
+            }
+        }
         pending = [];
         pendingTxids = 0;
-        return { state, stop: lastError !== null };
+        return { state, stop: lastError !== null || trimmedTail };
     };
     for (let h = state.next; h <= end; h += 1) {
         if (shuttingDown)
@@ -268,7 +387,7 @@ async function processOneIteration(actor, state) {
                 return state;
         }
         // Single block bigger than the per-batch txid cap — can't be sent
-        // even as its own batch via put_bodies. Fall back to put_body
+        // even as its own batch via push_bodies. Fall back to push_body
         // (single, no batch cap on the canister side).
         if (txCount > MAX_BATCH_TXIDS) {
             const blockHashLE = hexReverse32(hashHex);
@@ -276,16 +395,31 @@ async function processOneIteration(actor, state) {
             for (let i = 0; i < txCount; i += 1) {
                 hashesBlob.set(hexReverse32(txids[i]), i * 32);
             }
-            const result = await actor.put_body(blockHashLE, BigInt(txCount), hashesBlob);
+            const result = await actor.push_body(blockHashLE, BigInt(txCount), hashesBlob);
             if ("ok" in result) {
                 const ok = result.ok;
-                log(`put_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
-                    `dbidx=${ok.dbidx} duplicate=${ok.duplicate}`);
+                log(`push_body (oversize) height=${h} hash=${hashHex} tx_count=${txCount} ` +
+                    `indexed=${ok.canonical_indexed} duplicate=${ok.duplicate}`);
                 state = { next: h + 1, updated_at: new Date().toISOString() };
                 saveState(state);
                 continue;
             }
-            logErr(`put_body (oversize) height=${h} hash=${hashHex}: ${result.err}`);
+            const errMsg = result.err;
+            logErr(`push_body (oversize) height=${h} hash=${hashHex}: ${errMsg}`);
+            const expected = parseAncestorError(errMsg);
+            if (expected !== null && expected < state.next) {
+                const rollback = state.next - expected;
+                if (rollback > MAX_REORG_ROLLBACK) {
+                    logErr(`reorg rollback of ${rollback} blocks (from ${state.next} to ${expected}) ` +
+                        `exceeds MAX_REORG_ROLLBACK=${MAX_REORG_ROLLBACK}; giving up`);
+                }
+                else {
+                    state = { next: expected, updated_at: new Date().toISOString() };
+                    saveState(state);
+                    log(`reorg detected: rolling state back ${rollback} blocks ` +
+                        `(from ${h} to ${expected}); will retry on next iteration`);
+                }
+            }
             return state;
         }
         const blockHashLE = hexReverse32(hashHex);
@@ -339,6 +473,12 @@ async function main() {
         }
         catch (e) {
             logErr(`iteration failed: ${e instanceof Error ? e.message : e}`);
+            // A flush may have advanced the on-disk state (saveState after each
+            // successful batch) before the throw. Re-sync the in-memory state from
+            // disk — otherwise the next iteration resumes from this run's stale
+            // STARTING height, re-sending already-accepted batches as duplicates and
+            // overwriting the file back down to that height.
+            state = loadState();
         }
         if (oneShot)
             break;

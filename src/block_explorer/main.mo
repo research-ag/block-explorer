@@ -3,14 +3,16 @@
 // Two ways to add headers:
 //   - import_next(n)        : pull next N from the official Bitcoin canister
 //                             (ghsi2-tqaaa-aaaan-aaaca-cai)
-//   - push_header(rawHex)   : push a single 80-byte raw header (hex-encoded)
+//   - push_header(raw)      : push a single 80-byte raw header (blob);
+//                             push_header_hex is the hex convenience wrapper
 //
 // Every accepted header is stored forever, indexed by hash. Forks are
 // tracked; the canonical chain is whichever fork has the most cumulative
 // proof-of-work.
 //
-// The full chain state is a single stable record (`Chain.Chain`) — no
-// snapshot, share/unshare, or pre/post-upgrade hooks are needed.
+// All chain state lives in top-level stable `let`s (the two tries plus a
+// `Chain.State` bundle); EOP persists them directly, so no share/unshare or
+// pre/post-upgrade hooks are needed.
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
@@ -23,10 +25,16 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Time "mo:core/Time";
 
-import PT "mo:promtracker";
+import Prim "mo:⛔";
 
-import Header "Header";
+import Sha256 "mo:sha2/Sha256";
+
+import PT "mo:promtracker";
+import StableTrie "mo:stable-trie/Enumeration";
+
+import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
+import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
 
@@ -45,6 +53,40 @@ persistent actor BlockExplorer {
   transient let renderer = PT.Renderer();
   renderer.addCanisterLabel(BlockExplorer);
   renderer.addValue(PT.allSystemMetrics);
+
+  // Stateful batch gauges (watermarks reset on upgrade, like the renderer).
+  // Each Gauge emits <prefix>_last/_sum/_count plus high/low watermarks.
+  // Hold-down 62 s (default is 302): gauge watermarks decay after roughly
+  // one scrape interval instead of five minutes.
+  transient let tracker = PT.Tracker.newWith([], 62);
+  renderer.addValue(PT.Tracker.toValue(tracker));
+  // Heap size (rts_heap_size) sampled at the end of each batch — including
+  // batches stopped early by the heap limit.
+  transient let heapAfterHeadersBatch = PT.Tracker.newGauge(tracker, "headers_batch_max_heap_bytes", [], []);
+  transient let heapAfterTxidsBatch = PT.Tracker.newGauge(tracker, "txids_batch_max_heap_bytes", [], []);
+  // Number of batch entries actually processed (may be less than submitted
+  // when the batch halts on an error or the heap limit).
+  transient let batchSizeHeaders = PT.Tracker.newGauge(tracker, "headers_batch_processed_count", [], []);
+  transient let batchSizeTxids = PT.Tracker.newGauge(tracker, "txids_batch_processed_count", [], []);
+
+  // Stop processing further batch entries once the heap reaches this size.
+  // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
+  // next message. Callers learn how far the batch got from the result's
+  // accepted/duplicate counts and retry the rest later.
+  //
+  // Constants are `transient` so upgrades pick up new values from the code —
+  // a plain `let` in a persistent actor is stable and would silently keep
+  // the value the canister was installed with.
+  transient let HEAP_LIMIT : Nat = 1_073_741_824; // 1 GiB
+
+  func heapExceeded() : Bool = Prim.rts_heap_size() >= HEAP_LIMIT;
+
+  // One SHA-256 engine for the canister's whole lifetime (re-created on
+  // upgrade), threaded into every hashing call: constructing a Digest costs
+  // ~3.3 KB of heap, reuse via reset() is ~0.4 KB per hash. A module-level
+  // instance is impossible (M0014), so the actor owns it. Safe to share:
+  // each use is synchronous within one message, never held across an await.
+  transient let sha = Sha256.new(#sha256);
 
   // ---------------------------------------------------------------------
   // Bitcoin canister interface (ghsi2-tqaaa-aaaan-aaaca-cai).
@@ -70,19 +112,26 @@ persistent actor BlockExplorer {
   transient let bitcoin_canister : BitcoinCanister = actor ("ghsi2-tqaaa-aaaan-aaaca-cai");
 
   var cyclesPerCall : Nat = 10_000_000_000;
-  let MAX_BATCH : Nat = 100;
+  transient let MAX_BATCH : Nat = 100;
 
   // ---------------------------------------------------------------------
   // Chain state.
   //
-  // The Chain class wraps a stable mo:stable-trie HeaderDb plus a
-  // stable canonical-chain Region plus EOP-stable heap Maps. The class
-  // instance itself is transient (heap-bound trie bookkeeping); we
-  // share/unshare it across upgrades through `chainData`.
+  // All chain state is held in top-level stable `let`s — the two stable-trie
+  // Enumerations directly, and the heap structures bundled into `chain :
+  // Chain.State` (see Chain.mo). There is no class, no share/unshare and no
+  // pre/postupgrade hook: a top-level `let` initializer runs ONLY on fresh
+  // install, so on upgrade EOP restores each value as-is. Operations use
+  // dot-notation, e.g. `chain.push(...)` == `Chain.push(chain, ...)`.
   // ---------------------------------------------------------------------
 
-  var chainData : ?Chain.StableData = null;
-  transient let chain : Chain.Chain = Chain.Chain();
+  // Single top-level stable root. The two tries are fields (chain.headerTrie /
+  // chain.txTrie); building them inline keeps each trie referenced from exactly
+  // one place.
+  let chain : Chain.State = Chain.newState(
+    Chain.newHeaderTrie(Headers.KEY_SIZE),
+    Chain.newTxTrie(Chain.TX_ROOT_ARIDITY),
+  );
 
   func nowSecs() : Int { Time.now() / 1_000_000_000 };
   func nowSecsNat32() : Nat32 {
@@ -90,25 +139,26 @@ persistent actor BlockExplorer {
     if (s <= 0) 0 else Nat32.fromNat(Int.abs(s) % 0x1_0000_0000);
   };
 
-  switch (chainData) {
-    case (?d) chain.unshare(d);
-    case null chain.initGenesis(nowSecsNat32(), Principal.fromActor(BlockExplorer));
+  // Fresh install only: seed genesis. Runs on every actor start, but the
+  // `initialized` guard (persisted) makes it a no-op after the first install.
+  if (not chain.initialized) {
+    Chain.initGenesis(chain, sha, nowSecsNat32(), Principal.fromActor(BlockExplorer));
   };
 
-  system func preupgrade() {
-    chainData := ?chain.share();
-  };
-
-  // Chain-level pull values, registered now that `chain` exists.
-  // All read from `chain` directly so the metric output is always
-  // consistent with what the canister currently sees.
+  // Chain-level pull values, read from `chain` directly so the metric output
+  // is always consistent with what the canister currently sees.
   renderer.addValue(PT.newValue("headers_total", [], func() = chain.size()));
   renderer.addValue(PT.newValue("tip_height", [], func() = chain.tipHeight()));
-  renderer.addValue(PT.newValue("fork_count", [], func() = chain.forks().size()));
+  renderer.addValue(PT.newValue("bodies_height", [], func() = chain.bodiesHeight()));
   renderer.addValue(PT.newValue("uploader_count", [], func() = chain.uploaderStats().size()));
-  renderer.addValue(PT.newValue("header_db_byte_size", [], func() = chain.memoryStats().byte_size));
-  renderer.addValue(PT.newValue("header_db_leaf_count", [], func() = chain.memoryStats().leaf_count));
-  renderer.addValue(PT.newValue("header_db_node_count", [], func() = chain.memoryStats().node_count));
+  // Memory stats of both stable-trie Enumerations (stable_trie_node_count /
+  // _leaf_count / _byte_size families, with a kind="used"|"total" label),
+  // distinguished by a `trie` label.
+  renderer.addValue(PT.bundle([StableTrie.toValue(chain.headerTrie)], [("trie", "headers")]));
+  renderer.addValue(PT.bundle([StableTrie.toValue(chain.txTrie)], [("trie", "txids")]));
+  // Heap data-structure stats: fork-store sizes and reorg history
+  // (chain_fork_* / chain_reorg_* families), computed once per scrape.
+  renderer.addValue(chain.heapStatsValue());
 
   // ---------------------------------------------------------------------
   // Candid-facing types & projections.
@@ -116,7 +166,6 @@ persistent actor BlockExplorer {
 
   public type BlockInfo = {
     height : Nat;
-    dbidx : Nat; // explorer's internal id; pass to block_bodies
     version : Nat32;
     prev_hash_be_hex : Text;
     merkle_root_be_hex : Text;
@@ -136,11 +185,10 @@ persistent actor BlockExplorer {
     let bits = HeaderValue.bitsOf(v);
     let target = Header.nBitsToTarget(bits);
     let difficulty_x1e8 : Nat = if (target == 0) 0 else Header.POW_LIMIT_TARGET * 100_000_000 / target;
-    let prevHashLE = chain.prevHashOf(b);
+    let prevHashLE = Chain.prevHashOf(b);
     let merkleLE = HeaderValue.merkleOf(v);
     {
       height = b.height;
-      dbidx = b.dbidx;
       version = HeaderValue.versionOf(v);
       prev_hash_be_hex = Header.bytesToHex(Header.reverse32(prevHashLE));
       merkle_root_be_hex = Header.bytesToHex(Header.reverse32(merkleLE));
@@ -152,7 +200,7 @@ persistent actor BlockExplorer {
       cum_work = b.cumWork;
       is_canonical = isCanonical_;
       first_seen = HeaderValue.firstSeenOf(v);
-      uploader = chain.uploaderOf(b.dbidx);
+      uploader = chain.uploaderOf(b.hash);
     };
   };
 
@@ -160,38 +208,70 @@ persistent actor BlockExplorer {
   // Push API.
   // ---------------------------------------------------------------------
 
+  // The standard push interface (single and batched) is raw-byte based:
+  // headers go in as 80-byte blobs, results come back as counts / raw
+  // hashes — no hex anywhere on the path. push_header_hex is the single
+  // hex convenience wrapper for manual / console use.
+
   public type BatchPushResult = {
     accepted : Nat; // number of headers successfully appended
-    new_tip : BlockInfo;
+    tip_height : Nat; // canonical tip height after the batch
     last_error : ?Text; // first failure encountered (stops the batch)
   };
 
-  // Maximum headers per push_headers / push_headers_hex call.
-  // 10_000 * 80 = 800_000 bytes of raw header data.
-  let MAX_PUSH_BATCH : Nat = 10_000;
+  // Maximum headers per push_headers call.
+  // 20_000 * 80 = 1_600_000 bytes of raw header data (under the 2 MB
+  // ingress message limit).
+  transient let MAX_PUSH_BATCH : Nat = 20_000;
 
-  public shared ({ caller }) func push_header(raw_hex : Text) : async Result.Result<Chain.PushOk, Text> {
-    chain.push(Header.hexToBlob(raw_hex), nowSecs(), caller);
+  // Standard single push: raw 80-byte header in, raw hash out.
+  public shared ({ caller }) func push_header(raw_header : Blob) : async Result.Result<Chain.PushOk, Text> {
+    chain.push(sha, raw_header, nowSecs(), caller);
   };
 
-  // Loop body of push_headers / push_headers_hex, also reused by
-  // inspect_message as a true dry-run. Pushes headers in order,
-  // halting at the first rejection. Any state mutations made from
-  // inspect_message's invocation are discarded by the IC when
-  // inspect returns, so calling this from there is safe.
+  // Hex convenience wrapper (single only): hex header in, hex hash out.
+  public type PushOkHex = {
+    height : Nat;
+    hash_be_hex : Text;
+    is_canonical : Bool;
+    reorg_depth : Nat;
+  };
+
+  public shared ({ caller }) func push_header_hex(raw_hex : Text) : async Result.Result<PushOkHex, Text> {
+    Result.mapOk<Chain.PushOk, PushOkHex, Text>(
+      chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller),
+      func(ok) = {
+        height = ok.height;
+        hash_be_hex = Header.bytesToHex(Header.reverse32(ok.hash));
+        is_canonical = ok.is_canonical;
+        reorg_depth = ok.reorg_depth;
+      },
+    );
+  };
+
+  // Loop body of push_headers, also reusable by inspect_message as a true
+  // dry-run. Pushes headers in order, halting at the first rejection. Any
+  // state mutations made from inspect_message's invocation are discarded by
+  // the IC when inspect returns, so calling this from there is safe.
   func pushHeadersImpl(headers : [Blob], caller : Principal) : BatchPushResult {
     let now = nowSecs();
     var accepted : Nat = 0;
     var lastErr : ?Text = null;
     label loopH for (h in headers.vals()) {
-      switch (chain.push(h, now, caller)) {
+      switch (chain.push(sha, h, now, caller)) {
         case (#ok _) accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopH };
       };
+      if (heapExceeded()) {
+        lastErr := ?("heap limit reached: batch stopped after " # debug_show accepted # " headers; retry the rest");
+        break loopH;
+      };
     };
+    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeHeaders, accepted);
     {
       accepted;
-      new_tip = toBlockInfo(chain.tipBlock(), true);
+      tip_height = chain.tipHeight();
       last_error = lastErr;
     };
   };
@@ -203,16 +283,202 @@ persistent actor BlockExplorer {
     #ok(pushHeadersImpl(headers, caller));
   };
 
-  // Hex-encoded variant of push_headers — convenience for callers that
-  // already have headers as text (e.g. browser fetches from a third-party
-  // explorer API). Decodes upfront and reuses the same impl.
-  public shared ({ caller }) func push_headers_hex(headers_hex : [Text]) : async Result.Result<BatchPushResult, Text> {
-    if (headers_hex.size() > MAX_PUSH_BATCH) return #err("batch too large: max " # debug_show MAX_PUSH_BATCH # " headers per call");
-    let headers = Array.tabulate<Blob>(
-      headers_hex.size(),
-      func(i) = Header.hexToBlob(headers_hex[i]),
+  // ---------------------------------------------------------------------
+  // Block bodies (canonical transaction index).
+  //
+  // Index a canonical block's transaction ids, verified against the
+  // header's merkle root. Bodies must be uploaded in strict height order
+  // (genesis first); the txid trie stores every canonical transaction
+  // consecutively in chain order, and each block records the index of
+  // its first transaction (firstTxIndex) in the header value.
+  // ---------------------------------------------------------------------
+
+  public type BodyBatchResult = {
+    accepted : Nat; // bodies newly indexed in this call
+    duplicate : Nat; // bodies already indexed; no-op'd
+    last_error : ?Text; // first failure that halted the batch
+  };
+
+  public func push_body(block_hash_internal : Blob, tx_count : Nat, hashes : Blob) : async Result.Result<Chain.PushBodyOk, Text> {
+    chain.pushBody(block_hash_internal, tx_count, hashes);
+  };
+
+  // Batched upload; processes entries in order, stopping at the first
+  // real failure (returned in last_error). Already-indexed bodies are
+  // counted as duplicates and don't halt the batch.
+  public func push_bodies(batch : [(Blob, Nat, Blob)]) : async Result.Result<BodyBatchResult, Text> {
+    if (batch.size() == 0) return #err("empty batch");
+    var accepted = 0;
+    var duplicate = 0;
+    var lastErr : ?Text = null;
+    label loopB for ((block_hash, tx_count, hashes) in batch.vals()) {
+      switch (chain.pushBody(block_hash, tx_count, hashes)) {
+        case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
+        case (#err msg) { lastErr := ?msg; break loopB };
+      };
+      if (heapExceeded()) {
+        lastErr := ?("heap limit reached: batch stopped after " # debug_show (accepted + duplicate) # " bodies; retry the rest");
+        break loopB;
+      };
+    };
+    PT.Gauge.update(heapAfterTxidsBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeTxids, accepted + duplicate);
+    #ok({ accepted; duplicate; last_error = lastErr });
+  };
+
+  // tx_count of the canonical block at `height`, or null if its body
+  // is not yet known.
+  public query func tx_count_of(height : Nat) : async ?Nat = chain.txCountAt(height);
+
+  // tx_count of any block (canonical or fork) by big-endian display hash,
+  // or null if unknown / no body. Works for fork blocks whose bodies were
+  // uploaded into the heap fork-body store.
+  public query func tx_count_of_hash(hash_be_hex : Text) : async ?Nat {
+    let bytes = Header.hexToBlob(hash_be_hex);
+    if (bytes.size() != 32) return null;
+    chain.txCountOfHash(Header.reverse32(bytes));
+  };
+
+  // Body summary (tx_count + first_tx_index) for a canonical block.
+  public query func get_body(height : Nat) : async ?Chain.BodyInfo = chain.bodyAt(height);
+
+  // All known blocks containing `txid` (32 bytes, internal LE): the
+  // canonical block's height (if any) plus the big-endian display hashes of
+  // every fork block that holds it. Callers that only care about the
+  // canonical chain can ignore `fork_block_hashes_be`.
+  public type TxLocation = {
+    canonical_height : ?Nat;
+    fork_block_hashes_be : [Text];
+  };
+
+  public query func lookup_txid(txid : Blob) : async TxLocation {
+    let r = chain.lookupTxid(txid);
+    {
+      canonical_height = r.canonical;
+      fork_block_hashes_be = Array.map<Blob, Text>(
+        r.forks,
+        func(h) = Header.bytesToHex(Header.reverse32(h)),
+      );
+    };
+  };
+
+  // The next height whose body may be uploaded (= count of indexed bodies).
+  public query func bodies_next_height() : async Nat = chain.bodiesHeight();
+
+  // Total transactions indexed across the canonical chain.
+  public query func total_indexed_txids() : async Nat = chain.totalIndexedTxids();
+
+  // Summary of the indexed-transaction frontier for the UI.
+  public type TxidStatus = {
+    total_txids : Nat; // total canonical txids indexed
+    txid_height : ?Nat; // highest canonical height whose body is indexed
+    txid_tip_time : ?Nat32; // timestamp of the block at txid_height
+  };
+
+  public query func txid_status() : async TxidStatus {
+    let total = chain.totalIndexedTxids();
+    let bh = chain.bodiesHeight(); // # canonical blocks with bodies; heights [0, bh)
+    if (bh == 0) {
+      return { total_txids = total; txid_height = null; txid_tip_time = null };
+    };
+    let h : Nat = bh - 1;
+    let time = switch (chain.canonicalAt(h)) {
+      case (?b) ?HeaderValue.timeOf(b.value);
+      case null null;
+    };
+    { total_txids = total; txid_height = ?h; txid_tip_time = time };
+  };
+
+  // ---------------------------------------------------------------------
+  // Transaction lookups.
+  // ---------------------------------------------------------------------
+
+  // One occurrence of a transaction: the block that contains it, with the
+  // block's height, canonical/fork status, timestamp, and the tx's position
+  // within the block.
+  public type TxOccurrence = {
+    block_hash_be_hex : Text;
+    height : Nat;
+    is_canonical : Bool;
+    block_time : Nat32;
+    position : Nat;
+  };
+
+  // A transaction view: every block (canonical + forks) that contains the
+  // txid, plus its global serial number in the canonical tx ordering (if
+  // it's in a canonical block).
+  public type TxView = {
+    txid_be_hex : Text;
+    canonical_index : ?Nat;
+    occurrences : [TxOccurrence];
+  };
+
+  // Find a transaction by big-endian display txid. Returns null if no known
+  // block contains it.
+  public query func find_tx(txid_be_hex : Text) : async ?TxView {
+    let bytes = Header.hexToBlob(txid_be_hex);
+    if (bytes.size() != 32) return null;
+    let txid = Header.reverse32(bytes);
+    let loc = chain.txLocations(txid);
+    let canonOcc : ?TxOccurrence = switch (loc.canonical) {
+      case (?c) switch (chain.canonicalAt(c.height)) {
+        case (?b) ?{
+          block_hash_be_hex = Header.bytesToHex(Header.reverse32(b.hash));
+          height = c.height;
+          is_canonical = true;
+          block_time = HeaderValue.timeOf(b.value);
+          position = c.position;
+        };
+        case null null;
+      };
+      case null null;
+    };
+    let forkOccs = Array.map<Chain.TxForkLoc, TxOccurrence>(
+      loc.forks,
+      func(f) {
+        let t = switch (chain.byHashInternal(f.hash)) {
+          case (?b) HeaderValue.timeOf(b.value);
+          case null (0 : Nat32);
+        };
+        {
+          block_hash_be_hex = Header.bytesToHex(Header.reverse32(f.hash));
+          height = f.height;
+          is_canonical = false;
+          block_time = t;
+          position = f.position;
+        };
+      },
     );
-    #ok(pushHeadersImpl(headers, caller));
+    let occurrences = switch (canonOcc) {
+      case (?o) Array.tabulate<TxOccurrence>(forkOccs.size() + 1, func(i) = if (i == 0) o else forkOccs[i - 1]);
+      case null forkOccs;
+    };
+    if (occurrences.size() == 0) return null;
+    ?{
+      txid_be_hex = Header.bytesToHex(Header.reverse32(txid));
+      canonical_index = switch (loc.canonical) { case (?c) ?c.index; case null null };
+      occurrences;
+    };
+  };
+
+  // The txid (big-endian display) at a global canonical serial index, or null.
+  public query func txid_at_index(index : Nat) : async ?Text {
+    switch (chain.txidAtIndex(index)) {
+      case (?t) ?Header.bytesToHex(Header.reverse32(t));
+      case null null;
+    };
+  };
+
+  // The transaction ids (big-endian display) of a block, in block order,
+  // paginated (limit capped at 1000). Works for canonical and fork blocks.
+  public query func block_txids(block_hash_be_hex : Text, offset : Nat, limit : Nat) : async [Text] {
+    let bytes = Header.hexToBlob(block_hash_be_hex);
+    if (bytes.size() != 32) return [];
+    let cap = if (limit > 1000) 1000 else limit;
+    Array.map<Blob, Text>(
+      chain.blockTxids(Header.reverse32(bytes), offset, cap),
+      func(t) = Header.bytesToHex(Header.reverse32(t)),
+    );
   };
 
   // ---------------------------------------------------------------------
@@ -231,16 +497,26 @@ persistent actor BlockExplorer {
   //                        newly added (`accepted > 0`). Rejects
   //                        empty / oversize / all-known / error-
   //                        before-first-add uniformly.
-  //   push_headers_hex   — same, after decoding the hex inputs.
+  //   push_header_hex    — same as push_header, after hex decode.
   //
   // All other methods pass through unchanged.
   // ---------------------------------------------------------------------
+  // NOTE: inspect_message is intentionally DISABLED (commented out below).
+  // When enabled it ran the full push (validation + storage + any reorg)
+  // as a boundary-node dry run whose state changes the IC discards — an
+  // exact accept/reject predictor that spam-filtered bad/duplicate/orphan/
+  // stale headers, at the cost of doing that work twice per accepted push.
+  // With it disabled, all ingress messages are accepted at the boundary and
+  // filtering happens only in the real call. To re-enable, uncomment.
+  /*
   system func inspect({
     caller : Principal;
     arg : Blob;
     msg : {
       #blocks_by_uploader : () -> (p : Principal, offset : Nat, limit : Nat);
+      #bodies_next_height : () -> ();
       #cycles_balance : () -> ();
+      #get_body : () -> (height : Nat);
       #get_by_hash : () -> (hash_be_hex : Text);
       #get_cycles_per_call : () -> ();
       #get_view : () -> (height : ?Nat);
@@ -248,11 +524,17 @@ persistent actor BlockExplorer {
       #header_db_memory_stats : () -> ();
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
-      #lookup_header : () -> (hash_internal : Blob);
-      #push_header : () -> (raw_hex : Text);
+      #lookup_txid : () -> (txid : Blob);
+      #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob);
+      #push_bodies : () -> (batch : [(Blob, Nat, Blob)]);
+      #push_header : () -> (raw_header : Blob);
+      #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
-      #push_headers_hex : () -> (headers_hex : [Text]);
+      #reorg_log : () -> (offset : Nat, limit : Nat);
       #set_cycles_per_call : () -> (n : Nat);
+      #total_indexed_txids : () -> ();
+      #tx_count_of : () -> (height : Nat);
+      #tx_count_of_hash : () -> (hash_be_hex : Text);
       #uploader_leaderboard : () -> (top : Nat)
     };
   }) : Bool {
@@ -260,7 +542,7 @@ persistent actor BlockExplorer {
     switch (msg) {
       case (#push_header fetch) {
         let raw_hex = fetch();
-        switch (chain.push(Header.hexToBlob(raw_hex), nowSecs(), caller)) {
+        switch (chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller)) {
           case (#ok _) true;
           case (#err _) false;
         };
@@ -282,6 +564,7 @@ persistent actor BlockExplorer {
       case (_) true;
     };
   };
+  */
 
   // ---------------------------------------------------------------------
   // Pull API.
@@ -321,14 +604,19 @@ persistent actor BlockExplorer {
     };
 
     var imported : Nat = 0;
+    var firstErr : ?Text = null;
     label loopH for (h in resp.block_headers.vals()) {
-      switch (chain.push(h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
+      switch (chain.push(sha, h, nowSecs(), ANONYMOUS_PRINCIPAL)) {
         case (#ok _) imported += 1;
-        case (#err msg) {
-          if (imported == 0) return #err(msg);
-          break loopH;
-        };
+        case (#err msg) { firstErr := ?msg; break loopH };
       };
+      if (heapExceeded()) break loopH;
+    };
+    PT.Gauge.update(heapAfterHeadersBatch, Prim.rts_heap_size());
+    PT.Gauge.update(batchSizeHeaders, imported);
+    switch (firstErr) {
+      case (?msg) if (imported == 0) return #err(msg);
+      case null {};
     };
     #ok(imported);
   };
@@ -361,7 +649,7 @@ persistent actor BlockExplorer {
     };
     let siblings_ : [BlockInfo] = Array.map<Chain.StoredBlock, BlockInfo>(
       chain.allAt(h),
-      func(b) = toBlockInfo(b, chain.isOnCanonical(b)),
+      func(b) = toBlockInfo(b, Chain.isOnCanonical(b)),
     );
     {
       tip = toBlockInfo(tipBlock, true);
@@ -375,33 +663,26 @@ persistent actor BlockExplorer {
   // Single-block lookup by hash (for the search box).
   public query func get_by_hash(hash_be_hex : Text) : async ?BlockInfo {
     switch (chain.byHashBE(hash_be_hex)) {
-      case (?b) ?toBlockInfo(b, chain.isOnCanonical(b));
+      case (?b) ?toBlockInfo(b, Chain.isOnCanonical(b));
       case null null;
-    };
-  };
-
-  // Compact lookup used by the `block_bodies` canister to verify that a
-  // header is known and obtain the canonical merkle root for body
-  // verification. Hash is in internal LE order (raw 32 bytes).
-  public type HeaderRef = {
-    dbidx : Nat;
-    merkle_root : Blob; // internal LE order, 32 bytes
-  };
-
-  public query func lookup_header(hash_internal : Blob) : async ?HeaderRef {
-    switch (chain.byHashInternal(hash_internal)) {
-      case null null;
-      case (?b) ?{
-        dbidx = b.dbidx;
-        merkle_root = HeaderValue.merkleOf(b.value);
-      };
     };
   };
 
   // Batched membership check. Used by client-side pre-filters to avoid
   // shipping headers whose hash is already stored or whose parent is
   // unknown. Returns one Bool per input, in the same order.
-  let MAX_HAVE_HASHES : Nat = 50_000;
+  // Recompute the chain's hashes from stored headers over heights start..n
+  // and return the hash of block n (internal LE order; null if n is beyond
+  // the tip or start > n). The walk is seeded at `start` with that block's
+  // stored prev_hash, so a sub-range can be verified without re-walking from
+  // genesis — handy for chunking the work under the query instruction budget.
+  // rehash(0, n) checks the whole chain up to n; rehash(n, n) checks block n
+  // alone against its stored parent. A pure read-only integrity check.
+  public query func rehash(start : Nat, n : Nat) : async ?Blob {
+    chain.rehashChain(sha, start, n);
+  };
+
+  transient let MAX_HAVE_HASHES : Nat = 50_000;
   public query func have_hashes(hashes_be_hex : [Text]) : async [Bool] {
     if (hashes_be_hex.size() > MAX_HAVE_HASHES) {
       // Best-effort: trap rather than silently truncate.
@@ -421,7 +702,12 @@ persistent actor BlockExplorer {
   };
 
   public query func header_db_memory_stats() : async StableTrieStats {
-    chain.memoryStats();
+    let m = chain.memoryStats();
+    {
+      byte_size = m.total_bytes; // renamed in stable-trie 0.1.4; candid field kept
+      leaf_count = m.used_leaf_count;
+      node_count = m.used_node_count;
+    };
   };
 
   // ---------------------------------------------------------------------
@@ -452,17 +738,37 @@ persistent actor BlockExplorer {
   // (we don't track its individual blocks; see Chain.uploaders).
   public query func blocks_by_uploader(p : Principal, offset : Nat, limit : Nat) : async [BlockInfo] {
     let cap : Nat = if (limit > 1000) 1000 else limit;
-    let dbidxs = chain.blocksByUploader(p, offset, cap);
+    let hashes = chain.blocksByUploader(p, offset, cap);
     Array.tabulate<BlockInfo>(
-      dbidxs.size(),
+      hashes.size(),
       func(i) {
-        switch (chain.byDbidx(dbidxs[i])) {
-          case (?b) toBlockInfo(b, chain.isOnCanonical(b));
+        switch (chain.byHashInternal(hashes[i])) {
+          case (?b) toBlockInfo(b, Chain.isOnCanonical(b));
           case null Runtime.trap(
-            "blocks_by_uploader: dbidx " # debug_show dbidxs[i] # " missing"
+            "blocks_by_uploader: hash " # debug_show hashes[i] # " missing"
           );
         };
       },
+    );
+  };
+
+  // ---------------------------------------------------------------------
+  // Reorg log.
+  // ---------------------------------------------------------------------
+
+  // Page through recorded reorg events, newest first. `offset` is 0 for
+  // the most recent. `limit` is capped at 1000.
+  public query func reorg_log(offset : Nat, limit : Nat) : async [Chain.ReorgEvent] {
+    let all = chain.reorgs();
+    let n = all.size();
+    if (offset >= n) return [];
+    let cap : Nat = if (limit > 1000) 1000 else limit;
+    if (cap == 0) return [];
+    let remaining : Nat = n - offset;
+    let take = if (cap < remaining) cap else remaining;
+    Array.tabulate<Chain.ReorgEvent>(
+      take,
+      func(k) = all[n - 1 - offset - k],
     );
   };
 

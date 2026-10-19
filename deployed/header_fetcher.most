@@ -1,0 +1,190 @@
+// Version: 1.0.0
+type Counter__744332090 =
+  {
+    id : Nat;
+    labels : Text;
+    name : Text;
+    parent : Tracker__734863782;
+    var value : Int
+  };
+type Environment__881950380 = {var holdDownPeriod : Nat64};
+type Gauge__983499890 =
+  {
+    var count : Nat;
+    counters : [var Nat];
+    high : Watermark__478526455;
+    id : Nat;
+    labels : Text;
+    var lastValue : Nat;
+    limits : [Nat];
+    low : Watermark__478526455;
+    parent : Tracker__734863782;
+    prefix : Text;
+    var sum : Nat
+  };
+type Heatmap__872400070 =
+  {
+    var buckets : [var Int];
+    var count : Int;
+    id : Nat;
+    labels : Text;
+    parent : Tracker__734863782;
+    prefix : Text;
+    var sum : Int
+  };
+type List__531658074<T> = ?(T, List__531658074<T>);
+type LogEntry__198254269 =
+  {
+    at_ns : Int;
+    detail : Text;
+    height : ?Nat;
+    outcome : Outcome__252664544;
+    stage : Stage__464554536;
+    tick : Nat
+  };
+type Outcome__252664544 =
+  {
+    #call_failed : Text;
+    #http_status : Nat;
+    #non_utf8;
+    #ok;
+    #rejected : Text;
+    #unexpected_payload : Text
+  };
+type Stage__464554536 = {#blocks; #header; #push};
+type TValue__216959742 =
+  {
+    #counter : Counter__744332090;
+    #gauge : Gauge__983499890;
+    #heatmap : Heatmap__872400070;
+    #tracker : Tracker__734863782
+  };
+type Tracker__734863782 =
+  {
+    env : Environment__881950380;
+    id : Nat;
+    var labels : Text;
+    var nonce : Nat;
+    parent : ?Tracker__734863782;
+    var values : List__531658074<TValue__216959742>
+  };
+type Watermark__478526455 =
+  {
+    var activated : Bool;
+    env : Environment__881950380;
+    var lastMarkTime : Nat64;
+    var mark : Nat
+  };
+actor {
+  stable blocksErrCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable blocksOkCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable headerErrCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable headerOkCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable lastFetchedHeightCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable lastProviderTipCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable var lastSeenTipHash : Text;
+  stable lastSuccessAtCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable lastTickAtCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable var logBuf : [var ?LogEntry__198254269];
+  stable var logCount : Nat;
+  stable var logNext : Nat;
+  stable pt :
+    {
+      env : Environment__881950380;
+      id : Nat;
+      var labels : Text;
+      var nonce : Nat;
+      parent : ?Tracker__734863782;
+      var values : List__531658074<TValue__216959742>
+    };
+  stable pushErrCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable pushOkCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable skippedTicksCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable ticksCounter :
+    {
+      id : Nat;
+      labels : Text;
+      name : Text;
+      parent : Tracker__734863782;
+      var value : Int
+    };
+  stable var timerId : ?Nat;
+  stable var timerSeconds : Nat
+};
