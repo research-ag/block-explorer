@@ -41,9 +41,9 @@ module {
 
   // Register `p` and return its id, growing `blocks` to match.
   func findOrAdd(self : Uploaders, p : Principal) : Nat {
-    let id = Enum.BlobEnumeration.add(self.enum, Principal.toBlob(p));
-    while (List.size(self.blocks) <= id) {
-      List.add(self.blocks, List.empty<Blob>());
+    let id = Enum.BlobEnumeration.add(self.enum, p.toBlob());
+    while (self.blocks.size() <= id) {
+      self.blocks.add(List.empty<Blob>());
     };
     id;
   };
@@ -52,20 +52,20 @@ module {
   // the block's first insertion (canonical or fork).
   public func record(self : Uploaders, hash : Blob, uploader : Principal) {
     let id = findOrAdd(self, uploader);
-    if (Principal.isAnonymous(uploader)) {
+    if (uploader.isAnonymous()) {
       self.anonymousCount += 1;
     } else {
-      switch (List.get(self.blocks, id)) {
-        case (?lst) List.add(lst, hash);
+      switch (self.blocks.get(id)) {
+        case (?lst) lst.add(hash);
         case null Runtime.trap("Uploaders.record: missing block list for id " # debug_show id);
       };
-      Map.add<Blob, Nat>(self.ofHash, Blob.compare, hash, id);
+      self.ofHash.add(Blob.compare, hash, id);
     };
   };
 
   // Resolve the uploader principal for a block hash; unattributed -> anonymous.
   public func of(self : Uploaders, hash : Blob) : Principal {
-    switch (Map.get<Blob, Nat>(self.ofHash, Blob.compare, hash)) {
+    switch (self.ofHash.get(Blob.compare, hash)) {
       case (?id) Principal.fromBlob(Enum.BlobEnumeration.at(self.enum, id));
       case null anonymousPrincipal();
     };
@@ -81,11 +81,11 @@ module {
       n,
       func(i) {
         let p = Principal.fromBlob(Enum.BlobEnumeration.at(self.enum, i));
-        let c = if (Principal.isAnonymous(p)) {
+        let c = if (p.isAnonymous()) {
           self.anonymousCount;
         } else {
-          switch (List.get(self.blocks, i)) {
-            case (?lst) List.size(lst);
+          switch (self.blocks.get(i)) {
+            case (?lst) lst.size();
             case null 0;
           };
         };
@@ -97,16 +97,16 @@ module {
   // Page through the block hashes uploaded by `p`, newest first. Anonymous
   // returns []: its blocks are not tracked individually.
   public func blocksByUploader(self : Uploaders, p : Principal, offset : Nat, limit : Nat) : [Blob] {
-    if (Principal.isAnonymous(p) or limit == 0) return [];
-    let id = switch (Enum.BlobEnumeration.lookup(self.enum, Principal.toBlob(p))) {
+    if (p.isAnonymous() or limit == 0) return [];
+    let id = switch (Enum.BlobEnumeration.lookup(self.enum, p.toBlob())) {
       case (?i) i;
       case null return [];
     };
-    let lst = switch (List.get(self.blocks, id)) {
+    let lst = switch (self.blocks.get(id)) {
       case (?l) l;
       case null return [];
     };
-    let n = List.size(lst);
+    let n = lst.size();
     if (offset >= n) return [];
     let remaining : Nat = n - offset;
     let take = if (limit < remaining) limit else remaining;
@@ -114,7 +114,7 @@ module {
       take,
       func(k) {
         let pos : Nat = n - 1 - offset - k;
-        switch (List.get(lst, pos)) {
+        switch (lst.get(pos)) {
           case (?h) h;
           case null Runtime.trap("Uploaders.blocksByUploader: index out of range");
         };

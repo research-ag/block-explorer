@@ -59,7 +59,7 @@ module {
       CORS[1],
       CORS[2],
     ];
-    body = Text.encodeUtf8(body);
+    body = body.encodeUtf8();
   };
 
   func json(status : Nat16, body : Text) : Response = {
@@ -70,7 +70,7 @@ module {
       CORS[1],
       CORS[2],
     ];
-    body = Text.encodeUtf8(body);
+    body = body.encodeUtf8();
   };
 
   func notFound(msg : Text) : Response = plain(404, msg);
@@ -92,15 +92,15 @@ module {
   // Strip a leading '?...' query string from a URL, then split the
   // path on '/' and drop empty segments produced by the leading '/'.
   func splitPath(url : Text) : [Text] {
-    let path = switch (Text.split(url, #char '?').next()) {
+    let path = switch (url.split(#char '?').next()) {
       case (?p) p;
       case null url;
     };
     let out = List.empty<Text>();
-    for (seg in Text.split(path, #char '/')) {
-      if (seg.size() > 0) List.add(out, seg);
+    for (seg in path.split(#char '/')) {
+      if (seg.size() > 0) out.add(seg);
     };
-    List.toArray(out);
+    out.toArray();
   };
 
   // ------------------------------------------------------------------
@@ -112,9 +112,9 @@ module {
   func diffJson(x1e8 : Nat) : Text {
     let whole = x1e8 / 100_000_000;
     let frac = x1e8 % 100_000_000;
-    var fracStr = Nat.toText(frac);
+    var fracStr = frac.toText();
     while (fracStr.size() < 8) fracStr := "0" # fracStr;
-    Nat.toText(whole) # "." # fracStr;
+    whole.toText() # "." # fracStr;
   };
 
   func quoted(t : Text) : Text = "\"" # t # "\"";
@@ -133,17 +133,17 @@ module {
 
     var out = "{";
     out #= quoted("id") # ":" # quoted(hashHex) # ",";
-    out #= quoted("height") # ":" # Nat.toText(b.height) # ",";
-    out #= quoted("version") # ":" # Nat32.toText(HeaderValue.versionOf(v)) # ",";
-    out #= quoted("timestamp") # ":" # Nat32.toText(HeaderValue.timeOf(v)) # ",";
+    out #= quoted("height") # ":" # b.height.toText() # ",";
+    out #= quoted("version") # ":" # HeaderValue.versionOf(v).toText() # ",";
+    out #= quoted("timestamp") # ":" # HeaderValue.timeOf(v).toText() # ",";
     out #= quoted("merkle_root") # ":" # quoted(merkleHex) # ",";
     if (b.height > 0) {
       let prevHex = Header.bytesToHex(Header.reverse32(Chain.prevHashOf(b)));
       out #= quoted("previousblockhash") # ":" # quoted(prevHex) # ",";
     };
-    out #= quoted("mediantime") # ":" # Nat32.toText(mediantime) # ",";
-    out #= quoted("nonce") # ":" # Nat32.toText(HeaderValue.nonceOf(v)) # ",";
-    out #= quoted("bits") # ":" # Nat32.toText(bits) # ",";
+    out #= quoted("mediantime") # ":" # mediantime.toText() # ",";
+    out #= quoted("nonce") # ":" # HeaderValue.nonceOf(v).toText() # ",";
+    out #= quoted("bits") # ":" # bits.toText() # ",";
     out #= quoted("difficulty") # ":" # diffJson(diff);
     out #= "}";
     out;
@@ -153,7 +153,7 @@ module {
     let inBest = Chain.isOnCanonical(b);
     var out = "{";
     out #= quoted("in_best_chain") # ":" # (if (inBest) "true" else "false") # ",";
-    out #= quoted("height") # ":" # Nat.toText(b.height);
+    out #= quoted("height") # ":" # b.height.toText();
     if (inBest) {
       switch (chain.canonicalChildOf(b)) {
         case (?nxt) {
@@ -212,11 +212,11 @@ module {
     if (segs.size() < 2 or segs[0] != "api") {
       return notFound("not found");
     };
-    let p = Iter.toArray<Text>(Iter.drop<Text>(segs.vals(), 1));
+    let p = segs.values().drop(1).toArray();
 
     // /api/blocks/tip/height
     if (p.size() == 3 and p[0] == "blocks" and p[1] == "tip" and p[2] == "height") {
-      return plain(200, Nat.toText(chain.tipHeight()));
+      return plain(200, chain.tipHeight().toText());
     };
 
     // /api/blocks/tip/hash

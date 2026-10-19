@@ -90,7 +90,7 @@ import Prim "mo:⛔";
 
 import BEHeader "mo:btc/Header";
 
-persistent actor HeaderFetcher {
+actor HeaderFetcher {
 
   // ------------------------------------------------------------------
   // Prometheus metrics.
@@ -136,7 +136,7 @@ persistent actor HeaderFetcher {
     }
   );
 
-  transient let blockExplorer : BlockExplorer = actor (Principal.toText(blockExplorerId));
+  transient let blockExplorer : BlockExplorer = actor (blockExplorerId.toText());
 
   // ------------------------------------------------------------------
   // Management canister: http_request (HTTPS outcall).
@@ -412,7 +412,7 @@ persistent actor HeaderFetcher {
     let resp = try {
       await (with cycles = OUTCALL_CYCLES) ic.http_request(req);
     } catch (e) {
-      record(tickN, height, stage, #call_failed(Error.message(e)), url);
+      record(tickN, height, stage, #call_failed(e.message()), url);
       return null;
     };
     if (resp.status != 200) {
@@ -420,25 +420,22 @@ persistent actor HeaderFetcher {
       record(tickN, height, stage, #http_status(resp.status), url # " body=" # snippet);
       return null;
     };
-    switch (Text.decodeUtf8(resp.body)) {
-      case (?t) ?Text.trim(
-        t,
-        #predicate(
+    switch (resp.body.decodeUtf8()) {
+      case (?t) ?t.trim(#predicate(
           func(c) = c == ' ' or c == '\n' or c == '\r' or c == '\t'
-        ),
-      );
+        ), );
       case null { record(tickN, height, stage, #non_utf8, url); null };
     };
   };
 
   func bodySnippet(b : Blob, maxLen : Nat) : Text {
-    let s = switch (Text.decodeUtf8(b)) { case (?t) t; case null "<binary>" };
+    let s = switch (b.decodeUtf8()) { case (?t) t; case null "<binary>" };
     if (Text.size(s) <= maxLen) return s;
     var out = "";
     var i = 0;
     label l for (c in s.chars()) {
       if (i >= maxLen) break l;
-      out #= Text.fromChar(c);
+      out #= c.toText();
       i += 1;
     };
     out # "...";
@@ -474,7 +471,7 @@ persistent actor HeaderFetcher {
   // Slice cs[from..to) into a fresh Text.
   func sliceText(cs : [Char], from : Nat, to : Nat) : Text {
     let sub = Array.tabulate<Char>((to - from : Nat), func(j) = cs[from + j]);
-    Text.fromIter(sub.vals());
+    Text.fromIter(sub.values());
   };
 
   // Split a top-level JSON array string into its per-element object
@@ -482,7 +479,7 @@ persistent actor HeaderFetcher {
   // Returns null on structural failure. Walks strings with `\` escape
   // awareness so a `}` inside a string doesn't close an object.
   func splitTopLevelObjects(json : Text) : ?[Text] {
-    let cs = Iter.toArray<Char>(json.chars());
+    let cs = json.chars().toArray();
     let n = cs.size();
     var i : Nat = 0;
     while (i < n and cs[i] != '[') i += 1;
@@ -523,10 +520,10 @@ persistent actor HeaderFetcher {
           if (depth == 0) break scan;
         } else i += 1;
       };
-      List.add(ranges, (start, i));
+      ranges.add((start, i));
     };
 
-    let rArr = List.toArray(ranges);
+    let rArr = ranges.toArray();
     ?Array.tabulate<Text>(
       rArr.size(),
       func(k) {
@@ -545,7 +542,7 @@ persistent actor HeaderFetcher {
       if (n >= 64) break scan;
       let isH = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
       if (not isH) return null;
-      out #= Text.fromChar(c);
+      out #= c.toText();
       n += 1;
     };
     if (n == 64) ?out else null;
@@ -573,7 +570,7 @@ persistent actor HeaderFetcher {
   // immediately follows. Used for fields like `"id":"...":` whose
   // marker includes the opening quote.
   func findHexAfter(obj : Text, marker : Text) : ?Text {
-    let parts = Iter.toArray(Text.split(obj, #text marker));
+    let parts = obj.split(#text marker).toArray();
     if (parts.size() < 2) return null;
     first64Hex(parts[1]);
   };
@@ -581,7 +578,7 @@ persistent actor HeaderFetcher {
   // Locate `marker` in `obj` and return the Nat that immediately
   // follows. Used for numeric fields like `"height":`.
   func findNatAfter(obj : Text, marker : Text) : ?Nat {
-    let parts = Iter.toArray(Text.split(obj, #text marker));
+    let parts = obj.split(#text marker).toArray();
     if (parts.size() < 2) return null;
     leadingNat(parts[1]);
   };
@@ -590,7 +587,7 @@ persistent actor HeaderFetcher {
     switch (findNatAfter(obj, marker)) {
       case null null;
       case (?n) {
-        if (n > 0xFFFF_FFFF) null else ?Nat32.fromNat(n);
+        if (n > 0xFFFF_FFFF) null else ?n.toNat32();
       };
     };
   };
@@ -660,9 +657,9 @@ persistent actor HeaderFetcher {
 
   func hexCharOf(n : Nat) : Char {
     if (n < 10) {
-      Char.fromNat32(0x30 + Nat32.fromNat(n));
+      Nat32.toChar(0x30 + n.toNat32());
     } else {
-      Char.fromNat32(0x61 + Nat32.fromNat(n - 10 : Nat));
+      Nat32.toChar(0x61 + Nat.toNat32(n - 10 : Nat));
     };
   };
 
@@ -671,10 +668,10 @@ persistent actor HeaderFetcher {
     var out = "";
     var i : Nat = 0;
     while (i < 4) {
-      let shift = Nat32.fromNat(i * 8);
+      let shift = Nat.toNat32(i * 8);
       let byte = Nat32.toNat((v >> shift) & 0xff);
-      out #= Text.fromChar(hexCharOf(byte / 16));
-      out #= Text.fromChar(hexCharOf(byte % 16));
+      out #= hexCharOf(byte / 16).toText();
+      out #= hexCharOf(byte % 16).toText();
       i += 1;
     };
     out;
@@ -683,7 +680,7 @@ persistent actor HeaderFetcher {
   // Reverse a 64-hex string in 2-char chunks (byte order reversal).
   // Returns null if the input isn't 64 chars long.
   func reverseHex32(hex : Text) : ?Text {
-    let cs = Iter.toArray<Char>(hex.chars());
+    let cs = hex.chars().toArray();
     if (cs.size() != 64) return null;
     let buf = VarArray.repeat<Char>('0', 64);
     var i : Nat = 0;
@@ -693,7 +690,7 @@ persistent actor HeaderFetcher {
       buf[dst + 1] := cs[2 * i + 1];
       i += 1;
     };
-    ?Text.fromIter(Array.fromVarArray(buf).vals());
+    ?Text.fromIter(buf.toArray().values());
   };
 
   // Reconstruct the canonical 80-byte raw header as a 160-char hex
@@ -742,7 +739,7 @@ persistent actor HeaderFetcher {
     try {
       await tickBody();
     } catch (e) {
-      record(cv(ticksCounter), null, #blocks, #call_failed(Error.message(e)), "uncaught in tickBody");
+      record(cv(ticksCounter), null, #blocks, #call_failed(e.message()), "uncaught in tickBody");
     };
     tickInFlight := false;
   };
@@ -799,7 +796,7 @@ persistent actor HeaderFetcher {
     label discover loop {
       let url = switch nextStart {
         case null api # "/blocks";
-        case (?h) api # "/blocks/" # Nat.toText(h);
+        case (?h) api # "/blocks/" # h.toText();
       };
 
       let body = switch (await httpGet(myTick, null, #blocks, url, BLOCKS_MAX_BYTES)) {
@@ -831,7 +828,7 @@ persistent actor HeaderFetcher {
       let have = try {
         await blockExplorer.have_hashes(hashesArr);
       } catch (e) {
-        record(myTick, null, #blocks, #call_failed(Error.message(e)), "have_hashes");
+        record(myTick, null, #blocks, #call_failed(e.message()), "have_hashes");
         return;
       };
       if (have.size() != blocks.size()) {
@@ -856,7 +853,7 @@ persistent actor HeaderFetcher {
           commonH := ?common;
           var j : Nat = 0;
           while (j < ci) {
-            List.add(collected, blocks[j]);
+            collected.add(blocks[j]);
             j += 1;
           };
           record(
@@ -864,15 +861,15 @@ persistent actor HeaderFetcher {
             ?common,
             #blocks,
             #ok,
-            "common=" # Nat.toText(common) #
-            " new=" # Nat.toText(ci) #
-            " their_tip=" # Nat.toText(theirTip),
+            "common=" # common.toText() #
+            " new=" # ci.toText() #
+            " their_tip=" # theirTip.toText(),
           );
           break discover;
         };
         case null {
           // None known; collect all and page back.
-          for (b in blocks.vals()) List.add(collected, b);
+          for (b in blocks.values()) collected.add(b);
           let lo = blocks[blocks.size() - 1 : Nat].height;
           record(
             myTick,
@@ -880,7 +877,7 @@ persistent actor HeaderFetcher {
             #blocks,
             #ok,
             "no_known batch=" # Nat.toText(batchNum + 1) #
-            " low=" # Nat.toText(lo),
+            " low=" # lo.toText(),
           );
           batchNum += 1;
           if (batchNum >= MAX_BATCHES) {
@@ -918,7 +915,7 @@ persistent actor HeaderFetcher {
 
     // Nothing new to push: either we're already on the provider's tip
     // hash, or the provider is at or behind us.
-    if (List.size(collected) == 0) {
+    if (collected.size() == 0) {
       lastSuccessAtCounter.set(Int.abs(Time.now()));
       lastSeenTipHash := theirTipHash;
       record(
@@ -926,8 +923,8 @@ persistent actor HeaderFetcher {
         ?common,
         #push,
         #ok,
-        "in_sync common=" # Nat.toText(common) #
-        " their_tip=" # Nat.toText(theirTip),
+        "in_sync common=" # common.toText() #
+        " their_tip=" # theirTip.toText(),
       );
       return;
     };
@@ -940,7 +937,7 @@ persistent actor HeaderFetcher {
     // reverse to push in chain order. Stop at `forwardEnd` and
     // leave the rest for the next tick.
     let forwardEnd : Nat = if ((theirTip - common : Nat) > MAX_FORWARD) common + MAX_FORWARD else theirTip;
-    let collectedArr = List.toArray(collected);
+    let collectedArr = collected.toArray();
 
     // Assemble the ascending rawHex array up to `forwardEnd`. We
     // iterate `collected` in reverse (it's descending) so the
@@ -970,11 +967,11 @@ persistent actor HeaderFetcher {
           return;
         };
       };
-      List.add(rawHeaders, BEHeader.hexToBlob(rawHex));
-      List.add(pushHeights, h);
+      rawHeaders.add(BEHeader.hexToBlob(rawHex));
+      pushHeights.add(h);
     };
 
-    let toPush = List.toArray(rawHeaders);
+    let toPush = rawHeaders.toArray();
     if (toPush.size() == 0) {
       // Nothing within the forward window. Shouldn't normally happen
       // since the `List.size(collected) == 0` short-circuit above
@@ -982,7 +979,7 @@ persistent actor HeaderFetcher {
       return;
     };
 
-    let heights = List.toArray(pushHeights);
+    let heights = pushHeights.toArray();
     let lo = heights[0];
     let hi = heights[heights.size() - 1 : Nat];
 
@@ -991,7 +988,7 @@ persistent actor HeaderFetcher {
     let pushRes = try {
       await blockExplorer.push_headers(toPush);
     } catch (e) {
-      record(myTick, ?lo, #push, #call_failed(Error.message(e)), "push_headers");
+      record(myTick, ?lo, #push, #call_failed(e.message()), "push_headers");
       return;
     };
     switch pushRes {
@@ -1002,8 +999,8 @@ persistent actor HeaderFetcher {
           lastFetchedHeightCounter.set(highestAccepted);
           lastSuccessAtCounter.set(Int.abs(Time.now()));
         };
-        let detail = "accepted=" # Nat.toText(accepted) # "/" # Nat.toText(toPush.size()) #
-        " range=[" # Nat.toText(lo) # ".." # Nat.toText(hi) # "]";
+        let detail = "accepted=" # accepted.toText() # "/" # toPush.size().toText() #
+        " range=[" # lo.toText() # ".." # hi.toText() # "]";
         switch (r.last_error) {
           case (?err) {
             record(myTick, ?lo, #push, #rejected(err), detail);
@@ -1048,12 +1045,14 @@ persistent actor HeaderFetcher {
     timerSeconds := 0;
   };
 
-  // Recurring timers don't survive upgrades, so re-arm from the persisted
-  // interval. Keeps both the schedule and `timer_seconds` accurate.
-  system func postupgrade() {
-    if (timerSeconds > 0) {
-      timerId := ?Timer.recurringTimer<system>(#seconds timerSeconds, tick);
-    };
+  // Recurring timers don't survive upgrades (the IC-level global_timer is
+  // cleared by install_code), so re-arm from the persisted interval on every
+  // actor start. On a fresh install `timerSeconds == 0`, so this is a no-op;
+  // on upgrade it re-schedules at the interval that was active before. The
+  // top-level actor body runs on both init and upgrade, so no postupgrade
+  // system func is required.
+  if (timerSeconds > 0) {
+    timerId := ?Timer.recurringTimer<system>(#seconds timerSeconds, tick);
   };
 
 };
