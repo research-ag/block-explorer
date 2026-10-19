@@ -28,8 +28,7 @@ export const idlFactory = ({ IDL }) => {
           IDL.Vec(
             IDL.Tuple(
               IDL.Vec(IDL.Nat8),
-              IDL.Nat,
-              IDL.Vec(IDL.Nat8),
+              IDL.Vec(IDL.Vec(IDL.Nat8)),
               IDL.Vec(IDL.Nat8),
             ),
           ),
@@ -38,7 +37,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'push_body' : IDL.Func(
-        [IDL.Vec(IDL.Nat8), IDL.Nat, IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
+        [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Vec(IDL.Nat8)), IDL.Vec(IDL.Nat8)],
         [PushBodyResult],
         [],
       ),

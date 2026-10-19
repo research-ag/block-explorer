@@ -131,33 +131,26 @@ func cbTxid(k : Nat) : Blob = dSha(cbTx(k));
 
 // Build a block body: coinbase txid at position 0 (derived from seed `k`)
 // then the given `others` at positions 1..n-1. Returns the push_body call's
-// `hashes`, the matching header merkle root, and the raw coinbase bytes.
+// `txids`, the matching header merkle root, and the raw coinbase bytes.
 type Body = {
   coinbaseTx : Blob;
   coinbaseTxid : Blob;
-  hashes : Blob;
+  txids : [Blob];
   root : Blob;
 };
 
 func body(k : Nat, others : [Blob]) : Body {
   let cb = cbTx(k);
   let cbid = dSha(cb);
-  let n = 1 + others.size();
-  let flat = VarArray.repeat<Nat8>(0, n * 32);
-  var i = 0;
-  while (i < 32) { flat[i] := cbid[i]; i += 1 };
-  var j = 0;
-  while (j < others.size()) {
-    var l = 0;
-    while (l < 32) { flat[(j + 1) * 32 + l] := others[j][l]; l += 1 };
-    j += 1;
-  };
-  let hashes = Blob.fromVarArray(flat);
+  let txids = Array.tabulate<Blob>(
+    1 + others.size(),
+    func(i) = if (i == 0) cbid else others[i - 1],
+  );
   {
     coinbaseTx = cb;
     coinbaseTxid = cbid;
-    hashes = hashes;
-    root = Merkle.root(hashes, n);
+    txids = txids;
+    root = Merkle.root(txids);
   };
 };
 
@@ -604,7 +597,7 @@ suite(
 
         // Genesis body: the real genesis coinbase bytes + empty witness
         // (the lone txid IS the merkle root for a 1-tx block).
-        switch (c.pushBody(g.hash, 1, genMerkle, GENESIS_COINBASE)) {
+        switch (c.pushBody(g.hash, [genMerkle], GENESIS_COINBASE)) {
           case (#ok ok) assert ok.height == 0 and ok.tx_count == 1 and ok.first_tx_index == 0 and ok.canonical_indexed and not ok.duplicate;
           case (#err _) assert false;
         };
@@ -617,7 +610,7 @@ suite(
         let b1 = body(1, [txid(2), txid(3)]);
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, b1.root);
         switch (push(c, h1)) { case (#ok ok) assert ok.is_canonical; case _ assert false };
-        switch (c.pushBody(hashOf(h1), 3, b1.hashes, b1.coinbaseTx)) {
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) {
           case (#ok ok) assert ok.height == 1 and ok.tx_count == 3 and ok.first_tx_index == 1 and ok.canonical_indexed;
           case (#err _) assert false;
         };
@@ -658,11 +651,11 @@ suite(
         ignore push(c, h1);
 
         // Block 1 body before genesis: rejected (ancestor body unknown).
-        switch (c.pushBody(hashOf(h1), 2, b1.hashes, b1.coinbaseTx)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) { case (#err _) {}; case _ assert false };
         assert c.bodiesHeight() == 0;
         // Genesis first, then block 1 — strict chain order.
-        switch (c.pushBody(g.hash, 1, genMerkle, GENESIS_COINBASE)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
-        switch (c.pushBody(hashOf(h1), 2, b1.hashes, b1.coinbaseTx)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
+        switch (c.pushBody(g.hash, [genMerkle], GENESIS_COINBASE)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) { case (#ok ok) assert ok.canonical_indexed; case _ assert false };
         assert c.bodiesHeight() == 2;
         // Extend the canonical chain (header only) so the 2-block fork below
         // ties on work and does not trigger a reorg.
@@ -677,14 +670,14 @@ suite(
         ignore push(c, f2);
 
         // F2 body before F1 body: rejected (fork ancestor body unknown).
-        switch (c.pushBody(hashOf(f2), 2, bF2.hashes, bF2.coinbaseTx)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(hashOf(f2), bF2.txids, bF2.coinbaseTx)) { case (#err _) {}; case _ assert false };
         // F1 body OK (parent genesis has a body); stored in the fork record.
-        switch (c.pushBody(hashOf(f1), 1, bF1.hashes, bF1.coinbaseTx)) {
+        switch (c.pushBody(hashOf(f1), bF1.txids, bF1.coinbaseTx)) {
           case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 1;
           case _ assert false;
         };
         // Now F2 body OK (parent F1 has a body); F = F(F1) + N(F1) = 1 + 1.
-        switch (c.pushBody(hashOf(f2), 2, bF2.hashes, bF2.coinbaseTx)) {
+        switch (c.pushBody(hashOf(f2), bF2.txids, bF2.coinbaseTx)) {
           case (#ok ok) assert not ok.canonical_indexed and ok.first_tx_index == 2;
           case _ assert false;
         };
@@ -697,20 +690,20 @@ suite(
       func() {
         let c = newChain();
         let g = canon0(c);
-        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value), GENESIS_COINBASE);
+        ignore c.pushBody(g.hash, [HeaderValue.merkleOf(g.value)], GENESIS_COINBASE);
 
         // A1 canonical, body of 2 txs (coinbase + txid(11)).
         let bA = body(10, [txid(11)]);
         let a1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_000, 1, bA.root);
         ignore push(c, a1);
-        ignore c.pushBody(hashOf(a1), 2, bA.hashes, bA.coinbaseTx);
+        ignore c.pushBody(hashOf(a1), bA.txids, bA.coinbaseTx);
         assert c.totalIndexedTxids() == 3; // genesis + A1
 
         // Competing fork B1 off genesis; upload its body while non-canonical.
         let bB = body(20, [txid(21), txid(22)]);
         let b1 = mkHeaderM(g.hash, EASY_BITS, 1_700_000_010, 101, bB.root);
         ignore push(c, b1);
-        switch (c.pushBody(hashOf(b1), 3, bB.hashes, bB.coinbaseTx)) {
+        switch (c.pushBody(hashOf(b1), bB.txids, bB.coinbaseTx)) {
           case (#ok ok) assert not ok.canonical_indexed and not ok.duplicate;
           case _ assert false;
         };
@@ -743,7 +736,7 @@ suite(
       func() {
         let c = newChain();
         let g = canon0(c);
-        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value), GENESIS_COINBASE);
+        ignore c.pushBody(g.hash, [HeaderValue.merkleOf(g.value)], GENESIS_COINBASE);
 
         let b1 = body(1, [txid(2)]);
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b1.root);
@@ -751,16 +744,16 @@ suite(
 
         // Wrong txids -> merkle (or coinbase) mismatch — either way #err.
         let bad = body(5, [txid(6)]);
-        switch (c.pushBody(hashOf(h1), 2, bad.hashes, bad.coinbaseTx)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(hashOf(h1), bad.txids, bad.coinbaseTx)) { case (#err _) {}; case _ assert false };
         // Unknown header (any coinbase_tx is fine — the lookup fails first).
         // Unknown header: coinbase bytes don't matter, lookup fails first.
         // Use a > 64-byte stub so the length pin doesn't fire ahead of it.
         let stub65 = Blob.fromArray(Array.tabulate<Nat8>(65, func _ = 0));
-        switch (c.pushBody(txid(99), 1, txid(99), stub65)) { case (#err _) {}; case _ assert false };
+        switch (c.pushBody(txid(99), [txid(99)], stub65)) { case (#err _) {}; case _ assert false };
         // Correct body indexes it.
-        switch (c.pushBody(hashOf(h1), 2, b1.hashes, b1.coinbaseTx)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
         // Re-upload -> duplicate no-op.
-        switch (c.pushBody(hashOf(h1), 2, b1.hashes, b1.coinbaseTx)) { case (#ok ok) assert ok.duplicate; case _ assert false };
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) { case (#ok ok) assert ok.duplicate; case _ assert false };
         assert c.bodiesHeight() == 2;
       },
     );
@@ -770,31 +763,30 @@ suite(
       func() {
         let c = newChain();
         let g = canon0(c);
-        ignore c.pushBody(g.hash, 1, HeaderValue.merkleOf(g.value), GENESIS_COINBASE);
+        ignore c.pushBody(g.hash, [HeaderValue.merkleOf(g.value)], GENESIS_COINBASE);
 
         // Four-tx block: real depth is 2.
         let b1 = body(1, [txid(2), txid(3), txid(4)]);
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b1.root);
         ignore push(c, h1);
 
-        // Attack: upload the TWO level-1 node hashes as "leaves" with
-        // tx_count=2. Merkle.root over two level-1 nodes DOES equal the real
-        // merkle root (collapsing from level 1 produces the same root). To
-        // satisfy the "coinbase hashes to hashes[0]" check the attacker would
-        // need bytes whose dSHA = level-1 node — and the only such bytes are
-        // the EXACTLY 64-byte pair of real level-0 txids. The > 64 length
-        // pin rejects that.
-        let level1Left = dSha(Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = b1.hashes[i])));
-        let level1Right = dSha(Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = b1.hashes[64 + i])));
-        let fakeHashes = Blob.fromArray(
-          Array.tabulate<Nat8>(64, func(i) = if (i < 32) level1Left[i] else level1Right[i - 32])
-        );
-        // The one coinbase_tx that satisfies dSHA == level1Left is the 64-byte
-        // concatenation of txids 0 and 1 — rejected by the length pin.
-        let attackCoinbase = Blob.fromArray(
-          Array.tabulate<Nat8>(64, func(i) = b1.hashes[i])
-        );
-        switch (c.pushBody(hashOf(h1), 2, fakeHashes, attackCoinbase)) {
+        // Pair two 32-byte Blobs into one 64-byte Blob.
+        func cat64(a : Blob, b : Blob) : Blob {
+          Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i - 32]));
+        };
+        // Attack: upload the TWO level-1 node hashes as "leaves". Merkle.root
+        // over two level-1 nodes DOES equal the real merkle root (collapsing
+        // from level 1 produces the same root). To satisfy the "coinbase
+        // hashes to txids[0]" check the attacker would need bytes whose dSHA
+        // = level-1 node — and the only such bytes are the EXACTLY 64-byte
+        // pair of real level-0 txids. The > 64 length pin rejects that.
+        let level1Left = dSha(cat64(b1.txids[0], b1.txids[1]));
+        let level1Right = dSha(cat64(b1.txids[2], b1.txids[3]));
+        let fakeTxids : [Blob] = [level1Left, level1Right];
+        // The one coinbase_tx that satisfies dSHA == level1Left is the
+        // 64-byte concatenation of txids 0 and 1 — rejected by the length pin.
+        let attackCoinbase = cat64(b1.txids[0], b1.txids[1]);
+        switch (c.pushBody(hashOf(h1), fakeTxids, attackCoinbase)) {
           case (#err e) assert Text.contains(e, #text "> 64 bytes");
           case _ assert false;
         };
@@ -803,17 +795,17 @@ suite(
         // check. Now dSHA no longer hits level1Left — the coinbase-hash check
         // rejects it before the merkle recompute even runs.
         let paddedAttack = Blob.fromArray(
-          Array.tabulate<Nat8>(65, func(i) = if (i < 64) b1.hashes[i] else 0)
+          Array.tabulate<Nat8>(65, func(i) = if (i < 64) attackCoinbase[i] else 0)
         );
-        switch (c.pushBody(hashOf(h1), 2, fakeHashes, paddedAttack)) {
+        switch (c.pushBody(hashOf(h1), fakeTxids, paddedAttack)) {
           case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
           case _ assert false;
         };
 
-        // Coinbase that doesn't hash to hashes[0] — honest-length (> 64) but
+        // Coinbase that doesn't hash to txids[0] — honest-length (> 64) but
         // mismatched bytes.
         let wrongCb = Blob.fromArray(Array.tabulate<Nat8>(80, func(i) = Nat8.fromNat(i)));
-        switch (c.pushBody(hashOf(h1), 4, b1.hashes, wrongCb)) {
+        switch (c.pushBody(hashOf(h1), b1.txids, wrongCb)) {
           case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
           case _ assert false;
         };
@@ -821,13 +813,13 @@ suite(
         // Short coinbase (<=64 bytes) is rejected by the length pin even if
         // its dSHA would otherwise match something.
         let shortCb = Blob.fromArray(Array.tabulate<Nat8>(64, func(_) = 0));
-        switch (c.pushBody(hashOf(h1), 4, b1.hashes, shortCb)) {
+        switch (c.pushBody(hashOf(h1), b1.txids, shortCb)) {
           case (#err e) assert Text.contains(e, #text "> 64 bytes");
           case _ assert false;
         };
 
-        // Happy path: valid tx_count, hashes and > 64-byte coinbase.
-        switch (c.pushBody(hashOf(h1), 4, b1.hashes, b1.coinbaseTx)) {
+        // Happy path: valid txids and > 64-byte coinbase.
+        switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) {
           case (#ok ok) assert ok.canonical_indexed and not ok.duplicate;
           case _ assert false;
         };

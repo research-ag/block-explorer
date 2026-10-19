@@ -37,7 +37,9 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
+import Migration "Migration";
 
+(with migration = Migration.run)
 persistent actor BlockExplorer {
 
   // ---------------------------------------------------------------------
@@ -301,23 +303,22 @@ persistent actor BlockExplorer {
 
   public func push_body(
     block_hash_internal : Blob,
-    tx_count : Nat,
-    hashes : Blob,
+    txids : [Blob],
     coinbase_tx : Blob,
   ) : async Result.Result<Chain.PushBodyOk, Text> {
-    chain.pushBody(block_hash_internal, tx_count, hashes, coinbase_tx);
+    chain.pushBody(block_hash_internal, txids, coinbase_tx);
   };
 
   // Batched upload; processes entries in order, stopping at the first
   // real failure (returned in last_error). Already-indexed bodies are
   // counted as duplicates and don't halt the batch.
-  public func push_bodies(batch : [(Blob, Nat, Blob, Blob)]) : async Result.Result<BodyBatchResult, Text> {
+  public func push_bodies(batch : [(Blob, [Blob], Blob)]) : async Result.Result<BodyBatchResult, Text> {
     if (batch.size() == 0) return #err("empty batch");
     var accepted = 0;
     var duplicate = 0;
     var lastErr : ?Text = null;
-    label loopB for ((block_hash, tx_count, hashes, coinbase_tx) in batch.vals()) {
-      switch (chain.pushBody(block_hash, tx_count, hashes, coinbase_tx)) {
+    label loopB for ((block_hash, txids, coinbase_tx) in batch.vals()) {
+      switch (chain.pushBody(block_hash, txids, coinbase_tx)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
@@ -530,8 +531,8 @@ persistent actor BlockExplorer {
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
       #lookup_txid : () -> (txid : Blob);
-      #push_body : () -> (block_hash_internal : Blob, tx_count : Nat, hashes : Blob, coinbase_tx : Blob);
-      #push_bodies : () -> (batch : [(Blob, Nat, Blob, Blob)]);
+      #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
+      #push_bodies : () -> (batch : [(Blob, [Blob], Blob)]);
       #push_header : () -> (raw_header : Blob);
       #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
