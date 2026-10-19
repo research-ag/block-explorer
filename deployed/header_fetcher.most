@@ -32,7 +32,7 @@ type Heatmap__872400070 =
     prefix : Text;
     var sum : Int
   };
-type List__531658074<T> = ?(T, List__531658074<T>);
+type List__406439787<T> = ?(T, List__406439787<T>);
 type LogEntry__198254269 =
   {
     at_ns : Int;
@@ -66,7 +66,7 @@ type Tracker__734863782 =
     var labels : Text;
     var nonce : Nat;
     parent : ?Tracker__734863782;
-    var values : List__531658074<TValue__216959742>
+    var values : List__406439787<TValue__216959742>
   };
 type Watermark__478526455 =
   {
@@ -151,7 +151,7 @@ actor {
       var labels : Text;
       var nonce : Nat;
       parent : ?Tracker__734863782;
-      var values : List__531658074<TValue__216959742>
+      var values : List__406439787<TValue__216959742>
     };
   stable pushErrCounter :
     {
