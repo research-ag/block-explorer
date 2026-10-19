@@ -13,7 +13,9 @@
 //    12 |    16 | cumWork          (Nat128, LE)      | computed
 //    28 |     4 | first seen       (Nat32, LE; wraps | computed
 //       |       |   in 2106)                         |
-//    32 |     4 | reserved (zeros)                   | computed
+//    32 |     4 | coinbaseEnd      (Nat32, LE;       | computed
+//       |       |   end-offset into Chain's          |
+//       |       |   coinbasesRegion; 0 = not stored) |
 //    36 |    32 | merkle root (internal LE order)    | raw, byte-identical
 //    68 |     4 | time             (Nat32, LE)       | raw, byte-identical
 //    72 |     4 | bits             (Nat32, LE)       | raw, byte-identical
@@ -159,6 +161,17 @@ module {
     mut.toBlob();
   };
 
+  // Copy of `b` with only coinbaseEnd (bytes 32..36) replaced. The
+  // end-offset is a Nat32 LE into the Chain's coinbasesRegion; 0 is the
+  // sentinel "not stored yet". Length of this block's coinbase =
+  // coinbaseEnd(h) - coinbaseEnd(h - 1), with coinbaseEnd(-1) := 0 by
+  // convention (i.e. the genesis coinbase lives at [0, coinbaseEnd(0))).
+  public func withCoinbaseEnd(b : Blob, end : Nat32) : Blob {
+    let mut = b.toVarArray(); // one prim copy; no zero-init pass
+    Bytes.writeLE32(mut, 32, end);
+    mut.toBlob();
+  };
+
   public func decode(b : Blob) : Fields {
     {
       version = Bytes.readLE32(b, 0);
@@ -183,6 +196,7 @@ module {
   public func heightOf(b : Blob) : Nat = Bytes.readLE32(b, 8).toNat();
   public func cumWorkOf(b : Blob) : Nat = readLE128(b, 12);
   public func firstSeenOf(b : Blob) : Nat32 = Bytes.readLE32(b, 28);
+  public func coinbaseEndOf(b : Blob) : Nat32 = Bytes.readLE32(b, 32);
   // Raw-identical region: same offsets as the wire header.
   public func merkleOf(b : Blob) : Blob = Bytes.slice32(b, 36);
   public func timeOf(b : Blob) : Nat32 = Bytes.readLE32(b, 68);
