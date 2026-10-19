@@ -1,7 +1,7 @@
 // Inline actor migration for the coinbase-storage change.
 //
 // Three State additions that need defaulting from the pre-change shape:
-//   * `coinbasesRegion : Region` — fresh empty region
+//   * `coinbasesRegion : Coinbases.Store` — fresh empty region
 //   * `coinbasesRegionSize : Nat64` — 0
 //   * `coinbaseBackfillCursor : Nat` — 0 (backfill starts from genesis)
 //
@@ -19,12 +19,12 @@ import Blob "mo:core/Blob";
 import List "mo:core/List";
 import Map "mo:core/Map";
 import Nat64 "mo:core/Nat64";
-import Region "mo:core/Region";
 
 import ForkStore "mo:heaviest-chain/ForkStore";
 import StableTrie "mo:stable-trie/Enumeration";
 
 import Chain "Chain";
+import Coinbases "Coinbases";
 import Uploaders "Uploaders";
 
 module {
@@ -102,7 +102,7 @@ module {
         forks = convertForks(o.forks);
         uploaders = o.uploaders;
         reorgLog = o.reorgLog;
-        coinbasesRegion = Region.new();
+        coinbasesRegion = Coinbases.newStore();
         var coinbasesRegionSize : Nat64 = 0;
         var coinbaseBackfillCursor = 0;
         var tipWork = o.tipWork;

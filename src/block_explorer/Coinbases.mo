@@ -23,10 +23,13 @@
 //     page allocation itself is never shrunk, since `Region.grow` is
 //     one-way).
 //
-// Access: this module exposes helpers that take a plain `Region.Region`
-// and a `size : Nat64` passed by the caller (Chain's `coinbasesRegionSize`
-// var). Keeping the size out of the Region frees us from having to probe
-// `Region.size` (page count, not byte count) on every append.
+// Access: this module exposes helpers that take a `Store` (opaque type
+// alias for `Region.Region`) and a `size : Nat64` passed by the caller
+// (Chain's `coinbasesRegionSize` var). Keeping the size out of the Region
+// frees us from having to probe `Region.size` (page count, not byte count)
+// on every append. Keeping the Region type and constructor behind this
+// module means callers (Chain, Migration) never touch `mo:core/Region`
+// directly.
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
@@ -40,6 +43,13 @@ import Runtime "mo:core/Runtime";
 
 module {
 
+  // Opaque alias for the backing stable region. Chain/Migration refer to
+  // this type (and `newStore()` below) so neither has to import
+  // `mo:core/Region` directly.
+  public type Store = Region.Region;
+
+  public func newStore() : Store = Region.new();
+
   // One region page = 64 KiB.
   let PAGE : Nat64 = 65536;
 
@@ -47,7 +57,7 @@ module {
   // Idempotent / cheap when the region is already large enough. Returns
   // nothing — the caller keeps its own `size` cursor; this just extends
   // the allocation.
-  public func ensureCapacity(region : Region.Region, size : Nat64) {
+  public func ensureCapacity(region : Store, size : Nat64) {
     let havePages = region.size();
     let needPages = (size +% (PAGE -% 1)) / PAGE;
     if (needPages > havePages) {
@@ -66,7 +76,7 @@ module {
   // Grows the region as needed. No framing bytes written — the caller is
   // responsible for recording the end-offset in the per-height index
   // (HeaderValue.withCoinbaseEnd).
-  public func append(region : Region.Region, oldSize : Nat64, coinbase : Blob) : Nat64 {
+  public func append(region : Store, oldSize : Nat64, coinbase : Blob) : Nat64 {
     let n = coinbase.size().toNat64();
     let newSize = oldSize +% n;
     ensureCapacity(region, newSize);
@@ -79,7 +89,7 @@ module {
   // `0` for height 0) and `end` from the current block's `coinbaseEnd`.
   // Traps on an inconsistent range (end < start, or end past the region
   // size) — these would indicate corrupted index state.
-  public func load(region : Region.Region, start : Nat32, end : Nat32) : Blob {
+  public func load(region : Store, start : Nat32, end : Nat32) : Blob {
     if (end < start) Runtime.trap("Coinbases: load with end < start");
     let len = (end -% start) : Nat32;
     region.loadBlob(start.toNat64(), len.toNat());

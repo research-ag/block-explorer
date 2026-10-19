@@ -37,7 +37,6 @@ import Nat16 "mo:core/Nat16";
 import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
 import Principal "mo:core/Principal";
-import Region "mo:core/Region";
 import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Set "mo:core/Set";
@@ -176,7 +175,7 @@ module {
     // (bytes 32..36). On reorg, the demoted bytes are moved onto the fork
     // body's heap-side `coinbase` field and the region's write-tail is
     // rewound — see Coinbases.mo for the mechanics.
-    coinbasesRegion : Region.Region;
+    coinbasesRegion : Coinbases.Store;
     var coinbasesRegionSize : Nat64; // write-tail (next append offset)
     // Smallest canonical height whose coinbase is NOT yet in `coinbasesRegion`.
     // Equivalently: next height to backfill. Backfill advances it one block
@@ -262,7 +261,7 @@ module {
     forks = ForkStore.empty<ForkBlock>();
     uploaders = Uploaders.empty();
     reorgLog = List.empty<ReorgEvent>();
-    coinbasesRegion = Region.new();
+    coinbasesRegion = Coinbases.newStore();
     var coinbasesRegionSize : Nat64 = 0;
     var coinbaseBackfillCursor = 0;
     var tipWork = 0;
