@@ -383,14 +383,20 @@ function renderBlock(bi) {
   tcEl.textContent = "…";
   tcEl.className = "muted";
 
-  renderCoinbaseScriptSig(bi.coinbase_scriptsig);
+  renderCoinbaseScriptSig(bi.coinbase_scriptsig, bi.height);
 }
+
+// Mainnet activation height for BIP34 (height-in-coinbase soft fork).
+// From this block onward, the coinbase scriptSig MUST start with a push
+// of the block height — we strip that prefix for display so the user
+// sees only the miner-controlled bytes (extra nonce + pool tag).
+const BIP34_ACTIVATION_HEIGHT = 227_836n;
 
 // Pretty-print the coinbase scriptSig: ASCII decoding on the first line
 // (non-printable bytes shown as `·`), full hex on the second. Collapsed
 // to "—" when the canister hasn't stored this block's coinbase yet
 // (backfill not caught up, or a fork body without a coinbase upload).
-function renderCoinbaseScriptSig(opt) {
+function renderCoinbaseScriptSig(opt, height) {
   const el = $("bi-coinbase-scriptsig");
   el.innerHTML = "";
   if (!opt || opt.length === 0) {
@@ -398,7 +404,18 @@ function renderCoinbaseScriptSig(opt) {
     el.className = "muted";
     return;
   }
-  const bytes = opt[0];
+  let bytes = opt[0];
+  if (BigInt(height) >= BIP34_ACTIVATION_HEIGHT && bytes.length >= 1) {
+    // BIP34 pushes the height via a direct push: first byte is the push
+    // length N (0x01..0x4b), followed by N bytes of little-endian height.
+    // Skip N + 1 bytes. If the first byte is outside the direct-push
+    // range (OP_PUSHDATA* / OP_PUSHNUM), fall through unchanged — safer
+    // than mis-parsing a non-standard encoding.
+    const n = bytes[0];
+    if (n >= 0x01 && n <= 0x4b && bytes.length >= 1 + n) {
+      bytes = bytes.slice(1 + n);
+    }
+  }
   const asciiLine = document.createElement("div");
   asciiLine.className = "hash";
   asciiLine.textContent = bytesToPrintableAscii(bytes);
