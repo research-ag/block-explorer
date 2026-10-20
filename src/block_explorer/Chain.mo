@@ -901,6 +901,50 @@ module {
     #ok(storeAndMaybeReorg(self, raw, parsed, hash, parent, firstSeen, uploader, nowSecs));
   };
 
+  // Validate-only mirror of `push`: runs the same checks a real push does
+  // and returns the same `#err` on failure, but writes no state and
+  // computes no reorg. Used by `system func inspect` in main.mo to deny
+  // ingress calls that would be rejected by the real update, without
+  // consuming the full update's instruction budget on the dry run.
+  //
+  // KEEP IN SYNC WITH `push` ABOVE — every check-in-push must have a
+  // corresponding check here, in the same order with the same error
+  // messages. The code below is a line-for-line mirror of push's
+  // pre-`storeAndMaybeReorg` section.
+  public func validatePush(self : State, sha : Sha256.Digest, raw : Blob, nowSecs : Int) : Result.Result<(), Text> {
+    if (raw.size() != 80) return #err("header is not 80 bytes");
+    let parsed = switch (Header.parseHeader(raw)) {
+      case (?p) p;
+      case null return #err("could not parse header");
+    };
+    let hash = Header.headerHashBlob(sha, raw);
+    switch (byHashInternal(self, hash)) {
+      case (?_) return #err("duplicate: hash already present");
+      case null {};
+    };
+    let parent = switch (resolveParent(self, parsed.prev_hash)) {
+      case (?p) p;
+      case null return #err("unknown previous block hash");
+    };
+    let tipTimeNat = self.recentTimes[0].toNat();
+    let parsedTimeNat = parsed.time.toNat();
+    if (parsedTimeNat + ONE_YEAR_SECS < tipTimeNat) {
+      return #err(
+        "header timestamp " # debug_show parsedTimeNat #
+        " is more than 1 year before current tip timestamp " #
+        debug_show tipTimeNat
+      );
+    };
+    let newHeight = parent.height + 1;
+    let expectedBits = expectedBitsFor(self, parent, newHeight);
+    let stamps = lastTimestampsFrom(self, parent.hash, parent.height, parent.isCanonical, if (newHeight < MTP_WINDOW) newHeight else MTP_WINDOW);
+    let mtp = Header.medianTimePast(stamps);
+    switch (Header.validateParsed(parsed, hash, expectedBits, parsed.prev_hash, mtp, nowSecs)) {
+      case (#err msg) #err(msg);
+      case (#ok()) #ok(());
+    };
+  };
+
   public func pushUnchecked(self : State, sha : Sha256.Digest, raw : Blob, nowSecs : Int, uploader : Principal) : Result.Result<PushOk, Text> {
     if (raw.size() != 80) return #err("header is not 80 bytes");
     let parsed = switch (Header.parseHeader(raw)) {
@@ -1256,6 +1300,63 @@ module {
     };
   };
 
+  // Validate-only mirror of `pushBody`. Returns `#ok(())` when the real
+  // function would return `#ok` (newly accepted OR known-duplicate — both
+  // are non-denials from the real function's point of view) and `#err(msg)`
+  // when the real function would return `#err(msg)`. Writes no state.
+  //
+  // KEEP IN SYNC WITH `pushBody` ABOVE — same checks, same order, same
+  // error strings. See validatePush for the rationale.
+  public func validatePushBody(self : State, blockHashInternal : Blob, txids : [Blob], coinbaseTx : Blob) : Result.Result<(), Text> {
+    if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
+    let txCount = txids.size();
+    if (txCount == 0) return #err("txids must be non-empty");
+    var i = 0;
+    while (i < txCount) {
+      if (txids[i].size() != 32) {
+        return #err("txids[" # debug_show i # "] is " # debug_show txids[i].size() # " bytes, want 32");
+      };
+      i += 1;
+    };
+    if (coinbaseTx.size() <= 64) {
+      return #err("coinbase_tx must be > 64 bytes (depth-of-tree binding)");
+    };
+    let b = switch (byHashInternal(self, blockHashInternal)) {
+      case (?b) b;
+      case null return #err("unknown block header hash");
+    };
+    if (bodyKnown(self, b)) return #ok(());
+    let merkleRoot = HeaderValue.merkleOf(b.value);
+    let cbSha = Sha256.new(#sha256);
+    cbSha.writeBlob(coinbaseTx);
+    if (cbSha.sumDouble() != txids[0]) {
+      return #err("coinbase_tx hash does not match first txid");
+    };
+    if (Merkle.root(txids) != merkleRoot) return #err("merkle root mismatch");
+    if (b.isCanonical) {
+      if (b.height != self.bodiesNextHeight) {
+        return #err(
+          "ancestor bodies unknown: expected canonical body for height " #
+          debug_show self.bodiesNextHeight # ", got " # debug_show b.height
+        );
+      };
+    } else {
+      let parent = switch (parentOf(self, b)) {
+        case (?p) p;
+        case null return #err("fork block has no parent");
+      };
+      switch (firstTxAfter(self, parent)) {
+        case (?_) {};
+        case null return #err("ancestor bodies unknown for this fork block");
+      };
+      switch (self.forks.get(b.hash)) {
+        case (?_) {};
+        case null return #err("fork block missing from store");
+      };
+    };
+    #ok(());
+  };
+
   // --- Coinbase storage helpers ---------------------------------------
   //
   // `storeCanonicalCoinbase` appends to `coinbasesRegion`, writes the
@@ -1398,6 +1499,34 @@ module {
     #ok({ accepted = n });
   };
 
+  // Validate-only mirror of `pushCoinbasesBackfill`, limited to the FIRST
+  // entry of the batch. The real function returns `#ok({accepted = i})`
+  // after the first mismatch — i.e. it rejects the CALL only when `i == 0`
+  // (nothing could be stored). So inspect only needs to check: would the
+  // first entry be accepted? If so, the real call is non-denying; if not,
+  // deny the call.
+  //
+  // KEEP IN SYNC WITH `pushCoinbasesBackfill` ABOVE — mirrors its
+  // first-iteration checks, same errors.
+  public func validatePushCoinbasesBackfillFirst(self : State, startHeight : Nat, coinbases : [Blob]) : Result.Result<(), Text> {
+    if (startHeight != self.coinbaseBackfillCursor) {
+      return #err(
+        "startHeight " # debug_show startHeight #
+        " != coinbase_backfill_cursor " # debug_show self.coinbaseBackfillCursor
+      );
+    };
+    if (coinbases.size() == 0) return #ok(());
+    let cb = coinbases[0];
+    if (cb.size() <= 64) return #err("coinbases[0] must be > 64 bytes");
+    let cbSha = Sha256.new(#sha256);
+    cbSha.writeBlob(cb);
+    let cbTxid = cbSha.sumDouble();
+    switch (firstTxidAt(self, startHeight)) {
+      case null #err("no canonical block body at height " # debug_show startHeight);
+      case (?w) if (cbTxid != w) #err("coinbases[0] does not match first txid at height " # debug_show startHeight) else #ok(());
+    };
+  };
+
   // First txid at canonical height `h`, resolved from the body-side
   // state. For a 1-tx block (either the only tx or a BIP30 compressed
   // single-tx block), this is the header's merkle root. For a multi-tx
@@ -1441,6 +1570,27 @@ module {
       return #err("coinbase hash does not match the fork body's first txid");
     };
     self.forks.update(hashInternal, { fb with body = ?{ body with coinbase = ?coinbase } });
+    #ok();
+  };
+
+  // Validate-only mirror of `pushForkCoinbase`.
+  // KEEP IN SYNC WITH `pushForkCoinbase` ABOVE.
+  public func validatePushForkCoinbase(self : State, hashInternal : Blob, coinbase : Blob) : Result.Result<(), Text> {
+    if (hashInternal.size() != 32) return #err("block hash must be 32 bytes");
+    if (coinbase.size() <= 64) return #err("coinbase must be > 64 bytes (depth-of-tree binding)");
+    let fb = switch (self.forks.get(hashInternal)) {
+      case (?x) x;
+      case null return #err("not a known fork block");
+    };
+    let body = switch (fb.body) {
+      case (?b) b;
+      case null return #err("fork body not yet uploaded");
+    };
+    let cbSha = Sha256.new(#sha256);
+    cbSha.writeBlob(coinbase);
+    if (cbSha.sumDouble() != body.txids[0]) {
+      return #err("coinbase hash does not match the fork body's first txid");
+    };
     #ok();
   };
 
