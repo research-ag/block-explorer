@@ -55,10 +55,11 @@ from typing import List, Optional, Tuple
 
 from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
 
-from ic.agent import Agent
+from ic.agent import Agent, sign_request
 from ic.candid import Types, encode, decode
 from ic.client import Client
 from ic.identity import Identity
+from ic.principal import Principal
 
 # ---------------------------------------------------------------------------
 # Config
@@ -221,12 +222,45 @@ class CanisterClient:
             identity = Identity()
             log.info("Anonymous identity")
         self.agent = Agent(identity, Client(url=IC_URL))
+        self.canister_id = CANISTER_ID
+
+    # ------------------------------------------------------------------
+    def _query(self, method_name: str, encoded_arg: bytes, return_type=None):
+        """Replacement for ic-py 1.0.1's broken `agent.query_raw`, which
+        uses `type(x) != dict` instead of `isinstance(x, dict)` and so
+        rejects the frozendict response shape used by modern IC subnets
+        (subnet-signed queries). Replicates query_raw's signing + endpoint
+        call, decodes the reply with the supplied Candid return_type."""
+        cid = self.canister_id
+        cid_bytes = (
+            Principal.from_str(cid).bytes
+            if isinstance(cid, str) else cid.bytes
+        )
+        req = {
+            "request_type": "query",
+            "sender": self.agent.identity.sender().bytes,
+            "canister_id": cid_bytes,
+            "method_name": method_name,
+            "arg": encoded_arg,
+            "ingress_expiry": self.agent.get_expiry_date(),
+        }
+        _, data = sign_request(req, self.agent.identity)
+        result = self.agent.query_endpoint(cid, data)
+        status = result.get("status") if hasattr(result, "get") else None
+        if status == "replied":
+            return decode(result["reply"]["arg"], return_type)
+        if status == "rejected":
+            raise RuntimeError(
+                f"IC rejected query {method_name}: "
+                f"{result.get('reject_message') or result!r}"
+            )
+        raise RuntimeError(f"Unexpected IC reply: {result!r}")
 
     # ------------------------------------------------------------------
     def status(self) -> dict:
         """Query. `coinbase_backfill_status : () -> (...) query`."""
-        result = self.agent.query_raw(
-            CANISTER_ID, "coinbase_backfill_status", encode([]),
+        result = self._query(
+            "coinbase_backfill_status", encode([]),
             return_type=CoinbaseBackfillStatusType,
         )
         if not result or "value" not in result[0]:
