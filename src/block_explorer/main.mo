@@ -37,9 +37,7 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
-import Migration "Migration";
 
-(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
@@ -519,92 +517,125 @@ actor BlockExplorer {
   // ---------------------------------------------------------------------
   // Ingress inspection.
   //
-  // inspect_message runs at the boundary node before an ingress call
-  // is forwarded to the actor. Returning `false` rejects the call
-  // outright. For the three push methods we run the same code as
-  // the real handler as a dry-run: the IC discards any state
-  // mutations made during inspect, so calling chain.push /
-  // pushHeadersImpl here is safe and gives us an exact prediction
-  // of whether the call would make progress.
+  // `canister_inspect_message` runs at the boundary node BEFORE an ingress
+  // call is accepted — returning `false` rejects it outright, consuming
+  // only the inspect-level budget (200M instructions per IC resource
+  // limits, vs 40B for an update). We use it to mirror the input
+  // validation each push does, so a garbage message dies at ingress
+  // instead of burning an update's cycles only to be rejected a
+  // few billion instructions later.
   //
-  //   push_header        — accept iff chain.push returns #ok.
-  //   push_headers       — accept iff at least one header would be
-  //                        newly added (`accepted > 0`). Rejects
-  //                        empty / oversize / all-known / error-
-  //                        before-first-add uniformly.
-  //   push_header_hex    — same as push_header, after hex decode.
+  // The semantics are strictly: deny iff the real call would deny.
+  // For singles that's a direct validate. For batches, the real call
+  // returns a partial-success result (accepted = i < n) rather than
+  // #err when a later entry is bad, so inspect only rejects when the
+  // FIRST entry is bad — matching the real "nothing-stored" denial.
   //
-  // All other methods pass through unchanged.
+  //   push_header, push_header_hex   — Chain.validatePush of the arg.
+  //   push_headers                   — size-cap + validate the first header.
+  //   push_body                      — Chain.validatePushBody of the arg.
+  //   push_bodies                    — validate the first (hash, txids, cb).
+  //   push_coinbases_backfill        — Chain.validatePushCoinbasesBackfillFirst.
+  //   push_fork_coinbase             — Chain.validatePushForkCoinbase.
+  //   set_cycles_per_call            — controller-only (match real check).
+  //   import_next, http_request,
+  //     plus all queries             — accept (nothing to validate).
+  //
+  // See Chain.validate* for the per-method check-by-check mirror of the
+  // real update's error path, kept in sync by convention.
   // ---------------------------------------------------------------------
-  // NOTE: inspect_message is intentionally DISABLED (commented out below).
-  // When enabled it ran the full push (validation + storage + any reorg)
-  // as a boundary-node dry run whose state changes the IC discards — an
-  // exact accept/reject predictor that spam-filtered bad/duplicate/orphan/
-  // stale headers, at the cost of doing that work twice per accepted push.
-  // With it disabled, all ingress messages are accepted at the boundary and
-  // filtering happens only in the real call. To re-enable, uncomment.
-  /*
   system func inspect({
     caller : Principal;
     arg : Blob;
     msg : {
       #blocks_by_uploader : () -> (p : Principal, offset : Nat, limit : Nat);
       #bodies_next_height : () -> ();
+      #block_txids : () -> (block_hash_be_hex : Text, offset : Nat, limit : Nat);
+      #coinbase_backfill_status : () -> ();
       #cycles_balance : () -> ();
+      #find_tx : () -> (txid_be_hex : Text);
       #get_body : () -> (height : Nat);
       #get_by_hash : () -> (hash_be_hex : Text);
+      #get_coinbase : () -> (height : Nat);
       #get_cycles_per_call : () -> ();
+      #get_fork_coinbase : () -> (block_hash_be_hex : Text);
       #get_view : () -> (height : ?Nat);
       #have_hashes : () -> (hashes_be_hex : [Text]);
       #header_db_memory_stats : () -> ();
       #http_request : () -> (req : Esplora.Request);
       #import_next : () -> (max_batch : Nat);
       #lookup_txid : () -> (txid : Blob);
-      #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
       #push_bodies : () -> (batch : [(Blob, [Blob], Blob)]);
+      #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
       #push_coinbases_backfill : () -> (start_height : Nat, coinbases : [Blob]);
       #push_fork_coinbase : () -> (block_hash_internal : Blob, coinbase : Blob);
-      #get_coinbase : () -> (height : Nat);
-      #get_fork_coinbase : () -> (block_hash_be_hex : Text);
-      #coinbase_backfill_status : () -> ();
       #push_header : () -> (raw_header : Blob);
       #push_header_hex : () -> (raw_hex : Text);
       #push_headers : () -> (headers : [Blob]);
+      #rehash : () -> (start : Nat, n : Nat);
       #reorg_log : () -> (offset : Nat, limit : Nat);
       #set_cycles_per_call : () -> (n : Nat);
       #total_indexed_txids : () -> ();
       #tx_count_of : () -> (height : Nat);
       #tx_count_of_hash : () -> (hash_be_hex : Text);
-      #uploader_leaderboard : () -> (top : Nat)
+      #txid_at_index : () -> (index : Nat);
+      #txid_status : () -> ();
+      #uploader_leaderboard : () -> (top : Nat);
     };
   }) : Bool {
     ignore arg;
+    let now = nowSecs();
     switch (msg) {
       case (#push_header fetch) {
+        let raw = fetch();
+        isOk(chain.validatePush(sha, raw, now));
+      };
+      case (#push_header_hex fetch) {
         let raw_hex = fetch();
-        switch (chain.push(sha, Header.hexToBlob(raw_hex), nowSecs(), caller)) {
-          case (#ok _) true;
-          case (#err _) false;
-        };
+        isOk(chain.validatePush(sha, Header.hexToBlob(raw_hex), now));
       };
       case (#push_headers fetch) {
         let headers = fetch();
+        if (headers.size() == 0) return false;
         if (headers.size() > MAX_PUSH_BATCH) return false;
-        pushHeadersImpl(headers, caller).accepted > 0;
+        // First-header validation: the real function stops at the first
+        // #err, so when headers[0] is bad nothing is accepted — same
+        // denial semantics as a single push_header of that header.
+        isOk(chain.validatePush(sha, headers[0], now));
       };
-      case (#push_headers_hex fetch) {
-        let headers_hex = fetch();
-        if (headers_hex.size() > MAX_PUSH_BATCH) return false;
-        let headers = Array.tabulate<Blob>(
-          headers_hex.size(),
-          func(i) = Header.hexToBlob(headers_hex[i]),
-        );
-        pushHeadersImpl(headers, caller).accepted > 0;
+      case (#push_body fetch) {
+        let (hash, txids, cb) = fetch();
+        isOk(chain.validatePushBody(hash, txids, cb));
+      };
+      case (#push_bodies fetch) {
+        let batch = fetch();
+        if (batch.size() == 0) return false;
+        let (hash, txids, cb) = batch[0];
+        isOk(chain.validatePushBody(hash, txids, cb));
+      };
+      case (#push_coinbases_backfill fetch) {
+        let (start_height, coinbases) = fetch();
+        if (coinbases.size() == 0) return false;
+        isOk(chain.validatePushCoinbasesBackfillFirst(start_height, coinbases));
+      };
+      case (#push_fork_coinbase fetch) {
+        let (hash, cb) = fetch();
+        isOk(chain.validatePushForkCoinbase(hash, cb));
+      };
+      case (#set_cycles_per_call _) {
+        // Match the real function's controller gate so a non-controller
+        // caller gets rejected at ingress instead of trapping an update.
+        caller.isController();
       };
       case (_) true;
     };
   };
-  */
+
+  // Helper: `Result.isOk` across the validate-only Chain entry points.
+  // Keeps the inspect body tidy.
+  transient func isOk<A, E>(r : Result.Result<A, E>) : Bool {
+    switch (r) { case (#ok _) true; case (#err _) false };
+  };
 
   // ---------------------------------------------------------------------
   // Pull API.
