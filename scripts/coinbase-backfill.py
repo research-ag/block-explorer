@@ -274,6 +274,21 @@ class CanisterClient:
         }
 
     # ------------------------------------------------------------------
+    def bodies_next_height(self) -> int:
+        """Query. `bodies_next_height : () -> nat`. Next height whose body
+        is NOT yet indexed in the canister — so bodies [0, bodies_next_height)
+        are all indexed. The coinbase backfill can only push for heights
+        where the body is indexed (push_coinbases_backfill verifies against
+        `first_txid` from the body-side state), so we gate submission by
+        this value and never make calls we know will fail."""
+        result = self._query(
+            "bodies_next_height", encode([]), return_type=Types.Nat,
+        )
+        if not result or "value" not in result[0]:
+            raise RuntimeError(f"Unexpected bodies_next_height reply: {result!r}")
+        return int(result[0]["value"])
+
+    # ------------------------------------------------------------------
     def push_coinbases(self, start_height: int, coinbases: List[bytes]) -> int:
         """Update. `push_coinbases_backfill : (nat, vec blob) -> variant {...}`.
         Returns `accepted` from `#ok`; raises on `#err`."""
@@ -303,15 +318,27 @@ class CanisterClient:
 def run_once(canister: CanisterClient) -> int:
     """Pull one batch starting from the current cursor and push it.
     Returns how many heights were accepted in the push call (0 if nothing
-    to do, or if the body-uploader hasn't indexed the next height yet)."""
-    status = canister.status()
-    cursor, tip = status["cursor"], status["canonical_tip"]
-    log.info("status: cursor=%d canonical_tip=%d region_bytes=%d complete=%s",
-             cursor, tip, status["region_bytes"], status["complete"])
+    to do, or if the body-uploader hasn't indexed the next height yet).
 
-    if status["complete"] or cursor > tip:
+    The upper bound is NOT the header-tip height (`canonical_tip`) — it's
+    the body-index tip (`bodies_next_height`). push_coinbases_backfill
+    verifies each coinbase against the body-side first_txid, so a push
+    for a height whose body isn't indexed yet returns #err("no canonical
+    block body at height ...") and burns an update's cycles. Gating on
+    `bodies_next_height` means we never make a call we know will fail."""
+    status = canister.status()
+    bodies_next = canister.bodies_next_height()
+    cursor, header_tip = status["cursor"], status["canonical_tip"]
+    log.info("status: cursor=%d bodies_next=%d header_tip=%d region_bytes=%d complete=%s",
+             cursor, bodies_next, header_tip, status["region_bytes"], status["complete"])
+
+    if status["complete"]:
         return 0
-    batch_end = min(cursor + BATCH_SIZE, tip + 1)
+    if cursor >= bodies_next:
+        # Body-uploader hasn't indexed anything new since the cursor —
+        # nothing to backfill. Sleep until the next tick.
+        return 0
+    batch_end = min(cursor + BATCH_SIZE, bodies_next)
     n = batch_end - cursor
     if n <= 0:
         return 0
