@@ -1300,13 +1300,19 @@ module {
     };
   };
 
-  // Validate-only mirror of `pushBody`. Returns `#ok(())` when the real
-  // function would return `#ok` (newly accepted OR known-duplicate — both
-  // are non-denials from the real function's point of view) and `#err(msg)`
-  // when the real function would return `#err(msg)`. Writes no state.
+  // Validate-only mirror of `pushBody`. Runs the CHEAP input checks a
+  // real pushBody does and returns the same `#err` on those; defers the
+  // merkle-root recomputation to the real update because that work alone
+  // can exceed the 200M-instruction `canister_inspect_message` limit on
+  // large blocks (a ~5000-tx block needs ~160M+ instructions just for
+  // Merkle.root). A body with a bad merkle still bounces inside the
+  // real update — this just moves that specific denial from inspect to
+  // update. Everything else (sizes, hash lookup, coinbase hash match,
+  // canonical/fork ordering) stays at ingress.
   //
-  // KEEP IN SYNC WITH `pushBody` ABOVE — same checks, same order, same
-  // error strings. See validatePush for the rationale.
+  // KEEP IN SYNC WITH `pushBody` ABOVE — same cheap checks, same order,
+  // same error strings. The one check deliberately skipped here is
+  // `Merkle.root(txids) != merkleRoot`.
   public func validatePushBody(self : State, blockHashInternal : Blob, txids : [Blob], coinbaseTx : Blob) : Result.Result<(), Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     let txCount = txids.size();
@@ -1326,13 +1332,13 @@ module {
       case null return #err("unknown block header hash");
     };
     if (bodyKnown(self, b)) return #ok(());
-    let merkleRoot = HeaderValue.merkleOf(b.value);
     let cbSha = Sha256.new(#sha256);
     cbSha.writeBlob(coinbaseTx);
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
     };
-    if (Merkle.root(txids) != merkleRoot) return #err("merkle root mismatch");
+    // Merkle.root(txids) check deliberately skipped — too heavy for the
+    // 200M inspect budget on blocks with more than a few thousand txs.
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {
         return #err(
