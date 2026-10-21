@@ -1,10 +1,27 @@
 [toolchain]
 moc = "2.0.0"
 wasmtime = "36.0.9"
+wasm-opt = "133"
+
+# Binaryen's wasm-opt pass applied by `mops build` after candid metadata
+# attach. Halves the instruction cost of tight numeric loops (e.g., Sha256
+# compressions inside Merkle.root). Default level is -O3; -g preserved so
+# the deployed wasm keeps name metadata for backtraces.
+[optimize]
+level = "O3"
+keep-names = true
+
+# `mops build block_explorer` reads this entry to find the actor file and
+# any extra flags for moc. --max-stable-pages 2097152 raises moc's default
+# stable-memory ceiling from 4 GiB to 128 GiB (needed by the txid trie
+# as of the mainnet deploy at a1bc103).
+[canisters.block_explorer]
+main = "src/block_explorer/main.mo"
+args = ["--max-stable-pages", "2097152"]
 
 [dependencies]
 core = "2.6.2"
-sha2 = "0.3.1"
+sha2 = "0.3.2"
 promtracker = "1.0.1"
 stable-trie = "0.2.0"
 enumeration = "0.2.2"
