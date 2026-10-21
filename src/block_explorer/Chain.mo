@@ -1240,15 +1240,12 @@ module {
     onMerkleInsns : ?((Nat64) -> ()),
   ) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
-    let txCount = txids.size();
-    if (txCount == 0) return #err("txids must be non-empty");
-    var i = 0;
-    while (i < txCount) {
-      if (txids[i].size() != 32) {
-        return #err("txids[" # debug_show i # "] is " # debug_show txids[i].size() # " bytes, want 32");
-      };
-      i += 1;
-    };
+    // Per-element size and non-empty checks are not needed here — Merkle.root
+    // walks every leaf through `Hasher.combineBlob32`, which traps if either
+    // input is not 32 bytes, and asserts `txids.size() >= 1` before the walk.
+    // A malformed body therefore bounces inside Merkle.root with the hasher's
+    // own trap message (less specific than our old `#err("txids[i] is X bytes
+    // ...")` but same effect — the update rolls back, nothing lands).
     // Depth-of-tree binding (no inclusion proof needed). Every internal merkle
     // node is `dSHA256(32-byte || 32-byte) = dSHA256(exactly 64 bytes)`, so an
     // uploader passing `coinbase_tx` of any length other than 64 cannot have
@@ -1346,15 +1343,12 @@ module {
   // `Merkle.root(txids) != merkleRoot`.
   public func validatePushBody(self : State, blockHashInternal : Blob, txids : [Blob], coinbaseTx : Blob) : Result.Result<(), Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
-    let txCount = txids.size();
-    if (txCount == 0) return #err("txids must be non-empty");
-    var i = 0;
-    while (i < txCount) {
-      if (txids[i].size() != 32) {
-        return #err("txids[" # debug_show i # "] is " # debug_show txids[i].size() # " bytes, want 32");
-      };
-      i += 1;
-    };
+    // The per-element size check and non-empty check that `pushBody` used to
+    // run are removed here too — see pushBody for the rationale (both would
+    // trap downstream in Merkle.root's combineBlob32 anyway, and this is the
+    // 200M-budget hot path). The downstream `txids[0]` access on the dSHA
+    // line below traps on an empty txids array, which inspect translates to
+    // a false-return rejection — same effect as a `#err`.
     if (coinbaseTx.size() <= 64) {
       return #err("coinbase_tx must be > 64 bytes (depth-of-tree binding)");
     };
