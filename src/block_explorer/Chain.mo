@@ -41,6 +41,8 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Set "mo:core/Set";
 
+import Prim "mo:⛔";
+
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
@@ -1214,11 +1216,28 @@ module {
   // Index a block's body — allowed only when all ancestor bodies are known.
   // Canonical bodies go to the txid trie in chain order; fork bodies into the
   // ForkBlock record. Re-upload is a no-op.
+  // Three-arg wrapper used by tests (and anywhere else that doesn't want
+  // the measurement side-channel). Equivalent to `pushBodyWithObserver`
+  // with `onMerkleInsns = null`.
   public func pushBody(
     self : State,
     blockHashInternal : Blob,
     txids : [Blob],
     coinbaseTx : Blob,
+  ) : Result.Result<PushBodyOk, Text> = pushBodyWithObserver(self, blockHashInternal, txids, coinbaseTx, null);
+
+  // `onMerkleInsns` is an optional observer that gets the Wasm instruction
+  // delta across the Merkle.root(txids) call (per-call cost, in isolation).
+  // Called only on the real recompute path — a duplicate push, a bad coinbase
+  // dSHA, or any pre-merkle error returns before the call and the observer
+  // is not invoked. Lets main.mo bump a promtracker gauge without Chain.mo
+  // having to know about promtracker.
+  public func pushBodyWithObserver(
+    self : State,
+    blockHashInternal : Blob,
+    txids : [Blob],
+    coinbaseTx : Blob,
+    onMerkleInsns : ?((Nat64) -> ()),
   ) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     let txCount = txids.size();
@@ -1257,7 +1276,19 @@ module {
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
     };
-    if (Merkle.root(txids) != merkleRoot) return #err("merkle root mismatch");
+    // Only read Prim.performanceCounter when an observer is subscribed —
+    // the counter traps in wasi test mode ("cannot get performance_counter
+    // when running locally"), so the measurement path has to be gated.
+    let got = switch (onMerkleInsns) {
+      case null Merkle.root(txids);
+      case (?f) {
+        let m0 = Prim.performanceCounter(0);
+        let r = Merkle.root(txids);
+        f(Prim.performanceCounter(0) - m0);
+        r;
+      };
+    };
+    if (got != merkleRoot) return #err("merkle root mismatch");
 
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {

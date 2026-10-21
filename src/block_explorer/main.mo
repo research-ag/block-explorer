@@ -19,6 +19,7 @@ import Blob "mo:core/Blob";
 import Cycles "mo:core/Cycles";
 import Int "mo:core/Int";
 import Nat "mo:core/Nat";
+import Nat64 "mo:core/Nat64";
 import Nat32 "mo:core/Nat32";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
@@ -68,6 +69,21 @@ actor BlockExplorer {
   // when the batch halts on an error or the heap limit).
   transient let batchSizeHeaders = tracker.newGauge("headers_batch_processed_count", [], []);
   transient let batchSizeTxids = tracker.newGauge("txids_batch_processed_count", [], []);
+
+  // Per-call Wasm instruction counters on push_body. Snapshot the ic0
+  // performanceCounter(0) at three points — method entry (approximates the
+  // Candid-decode cost of the `(blob, vec blob, blob)` argument), across
+  // the Merkle.root(txids) call inside chain.pushBody (handed in as a
+  // callback-friendly ?Gauge; the inner function updates it with the delta
+  // across the merkle recompute), and at method exit (total message
+  // instructions). Over time this gives us the real distribution of each
+  // cost: in particular how close push_body comes to the 40B update cap
+  // and whether Merkle.root alone would still fit in the 200M inspect
+  // budget on today's traffic (the sha2 bench put it at ~158M for a
+  // 6467-tx block).
+  transient let pushBodyInsnsEntry = tracker.newGauge("push_body_insns_entry", [], []);
+  transient let pushBodyInsnsMerkle = tracker.newGauge("push_body_insns_merkle", [], []);
+  transient let pushBodyInsnsExit = tracker.newGauge("push_body_insns_exit", [], []);
 
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
@@ -298,12 +314,22 @@ actor BlockExplorer {
     last_error : ?Text; // first failure that halted the batch
   };
 
+  // Closure that `Chain.pushBody` calls with the Wasm instruction delta
+  // across the Merkle.root(txids) step. Lives here so Chain.mo doesn't
+  // need to know about promtracker. On the duplicate / early-rejection
+  // paths that never reach the merkle recompute, Chain won't call this,
+  // so the gauge only tracks real recomputation costs.
+  func onMerkleInsns(delta : Nat64) { pushBodyInsnsMerkle.update(delta.toNat()) };
+
   public func push_body(
     block_hash_internal : Blob,
     txids : [Blob],
     coinbase_tx : Blob,
   ) : async Result.Result<Chain.PushBodyOk, Text> {
-    chain.pushBody(block_hash_internal, txids, coinbase_tx);
+    pushBodyInsnsEntry.update(Prim.performanceCounter(0).toNat());
+    let r = chain.pushBodyWithObserver(block_hash_internal, txids, coinbase_tx, ?onMerkleInsns);
+    pushBodyInsnsExit.update(Prim.performanceCounter(0).toNat());
+    r;
   };
 
   // Batched upload; processes entries in order, stopping at the first
@@ -311,11 +337,12 @@ actor BlockExplorer {
   // counted as duplicates and don't halt the batch.
   public func push_bodies(batch : [(Blob, [Blob], Blob)]) : async Result.Result<BodyBatchResult, Text> {
     if (batch.size() == 0) return #err("empty batch");
+    pushBodyInsnsEntry.update(Prim.performanceCounter(0).toNat());
     var accepted = 0;
     var duplicate = 0;
     var lastErr : ?Text = null;
     label loopB for ((block_hash, txids, coinbase_tx) in batch.values()) {
-      switch (chain.pushBody(block_hash, txids, coinbase_tx)) {
+      switch (chain.pushBodyWithObserver(block_hash, txids, coinbase_tx, ?onMerkleInsns)) {
         case (#ok ok) if (ok.duplicate) duplicate += 1 else accepted += 1;
         case (#err msg) { lastErr := ?msg; break loopB };
       };
@@ -326,6 +353,7 @@ actor BlockExplorer {
     };
     heapAfterTxidsBatch.update(Prim.rts_heap_size());
     batchSizeTxids.update(accepted + duplicate);
+    pushBodyInsnsExit.update(Prim.performanceCounter(0).toNat());
     #ok({ accepted; duplicate; last_error = lastErr });
   };
 
