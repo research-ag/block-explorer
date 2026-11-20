@@ -825,5 +825,37 @@ suite(
         };
       },
     );
+
+    test(
+      "validatePushBody (inspect) rejects a mutated body, accepts the real one",
+      func() {
+        let c = newChain();
+        let g = canon0(c);
+        ignore c.pushBody(g.hash, [HeaderValue.merkleOf(g.value)], GENESIS_COINBASE);
+
+        // Real 3-tx body [cb, t2, t3]; the mutated [cb, t2, t3, t3] has the
+        // same Merkle root (CVE-2012-2459) and a valid coinbase binding, so
+        // only the mutation check stops it. pushBody traps on it inside
+        // Merkle.root, which a test cannot observe; inspect returns #err.
+        let b1 = body(1, [txid(2), txid(3)]);
+        let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b1.root);
+        ignore push(c, h1);
+        let mutatedTxids : [Blob] = [b1.txids[0], b1.txids[1], b1.txids[2], b1.txids[2]];
+
+        switch (c.validatePushBody(hashOf(h1), mutatedTxids, b1.coinbaseTx)) {
+          case (#err e) assert Text.contains(e, #text "mutated");
+          case _ assert false;
+        };
+        switch (c.validatePushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) {
+          case (#ok _) {};
+          case _ assert false;
+        };
+        // Coinbase binding is still checked first.
+        switch (c.validatePushBody(hashOf(h1), mutatedTxids, cbTx(7))) {
+          case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
+          case _ assert false;
+        };
+      },
+    );
   },
 );

@@ -1273,6 +1273,12 @@ module {
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
     };
+    // Mutated bodies (CVE-2012-2459): Merkle.root runs `Merkle.mutated` over
+    // the complete txid list before building the tree and TRAPS on a flagged
+    // list, e.g. `[cb, t1, t2, t2]` for the real `[cb, t1, t2]`, which has the
+    // same root. The trap rolls back the whole call (in push_bodies: every
+    // entry of the batch, not just this one).
+    //
     // Only read Prim.performanceCounter when an observer is subscribed —
     // the counter traps in wasi test mode ("cannot get performance_counter
     // when running locally"), so the measurement path has to be gated.
@@ -1361,6 +1367,12 @@ module {
     cbSha.writeBlob(coinbaseTx);
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
+    };
+    // Mutated-body check (CVE-2012-2459), the one pushBody's Merkle.root runs
+    // up front and traps on. At most log2(n) Blob comparisons, no hashing, so
+    // it is cheap enough for the inspect budget.
+    if (Merkle.mutated(txids)) {
+      return #err("mutated transaction list (CVE-2012-2459)");
     };
     // Merkle.root(txids) check deliberately skipped — too heavy for the
     // 200M inspect budget on blocks with more than a few thousand txs.
