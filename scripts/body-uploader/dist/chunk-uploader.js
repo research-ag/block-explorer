@@ -251,6 +251,9 @@ async function makeActor() {
         await agent.fetchRootKey();
     return Actor.createActor(idlFactory, { agent, canisterId: CANISTER_ID });
 }
+// Accepted chunks and completed blocks since this process started (log only).
+let totalChunks = 0;
+let totalBlocks = 0;
 async function processOne(actor) {
     // 1. Where does the next txid go?
     const tip = await actor.txid_tip();
@@ -277,6 +280,10 @@ async function processOne(actor) {
     }
     // 4. The chunk and its proof, checked as the canister will check it.
     const end = Math.min(offset + CHUNK_SIZE, n);
+    // Chunk k of K for this block, counted from the offset so it stays right
+    // across restarts (exact while the block's chunks are all CHUNK_SIZE long).
+    const chunkNo = Math.ceil(offset / CHUNK_SIZE) + 1;
+    const chunkCount = chunkNo + Math.ceil((n - end) / CHUNK_SIZE);
     const proof = proofFor(block.levels, end);
     if (!closes(block.levels, end, proof)) {
         throw new Error(`local check failed for the proof of txs [${offset}, ${end}) of block ${hashHex}; not sending`);
@@ -285,7 +292,7 @@ async function processOne(actor) {
     const start = offset === 0
         ? { coinbase_tx: await fetchCoinbase(block) }
         : { offset: BigInt(offset) };
-    const what = `height=${height} txs=[${offset}, ${end}) of ${n} proof=${proof.length}`;
+    const what = `height=${height} chunk=${chunkNo}/${chunkCount} txs=[${offset}, ${end}) of ${n} proof=${proof.length}`;
     if (DRY_RUN) {
         log(`dry run: would send ${what} (${offset === 0 ? "with coinbase" : "by offset"})`);
         return "work";
@@ -296,9 +303,15 @@ async function processOne(actor) {
     const ms = Date.now() - t0;
     if ("ok" in result) {
         const ok = result.ok;
-        log(`accepted  height=${ok.height} offset=${ok.offset} complete=${ok.complete} first_tx_index=${ok.first_tx_index} submit_ms=${ms}`);
+        totalChunks += 1;
         if (ok.complete)
+            totalBlocks += 1;
+        log(`accepted  height=${ok.height} chunk=${chunkNo}/${chunkCount} offset=${ok.offset} complete=${ok.complete} ` +
+            `first_tx_index=${ok.first_tx_index} submit_ms=${ms} | since start: chunks=${totalChunks} blocks=${totalBlocks}`);
+        if (ok.complete) {
+            log(`block done height=${ok.height} txs=${n} chunks=${chunkCount}`);
             cached = null;
+        }
         return "work";
     }
     logErr(`push_body_chunk ${what} submit_ms=${ms}: ${result.err}`);
