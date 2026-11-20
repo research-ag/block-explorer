@@ -38,12 +38,7 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
-import Migration "Migration";
 
-// One-off: drops the `backup` pool from the chunk verifier of an upload in
-// progress (Chain.State.bodyChunks). Remove with Migration.mo after the
-// upgrade has run on mainnet.
-(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
