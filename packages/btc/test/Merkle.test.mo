@@ -10,12 +10,40 @@ import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
 
+import Sha256 "mo:sha2/Sha256";
+
+import BitcoinMerkle "../src/BitcoinMerkle";
 import Header "../src/Header";
 import Merkle "../src/Merkle";
 
 // Decode BE-hex hashes to the internal-LE `[Blob]` shape `Merkle.root` consumes.
 func leTxids(beHexes : [Text]) : [Blob] =
   Array.map<Text, Blob>(beHexes, func(h) = Header.reverse32(Header.hexToBlob(h)));
+
+// Distinct synthetic 32-byte leaf: every byte is `k`.
+func leaf(k : Nat) : Blob = Blob.fromVarArray(VarArray.repeat<Nat8>(Nat8.fromNat(k % 256), 32));
+
+func leaves(ks : [Nat]) : [Blob] = Array.map<Nat, Blob>(ks, leaf);
+
+func cat(a : Blob, b : Blob) : Blob {
+  let x = a.toArray();
+  let y = b.toArray();
+  Blob.fromArray(Array.tabulate<Nat8>(x.size() + y.size(), func(i) = if (i < x.size()) x[i] else y[i - x.size()]));
+};
+
+func dSha(b : Blob) : Blob {
+  let d = Sha256.new(#sha256);
+  d.writeBlob(b);
+  d.sumDouble();
+};
+
+// Root via the incremental API, which (unlike Merkle.root) does not run the
+// mutation check, so it can show that a mutated list shares the real root.
+func uncheckedRoot(txids : [Blob]) : Blob {
+  let mmr = BitcoinMerkle.new(txids.size(), false);
+  for (t in txids.values()) mmr.add(t);
+  mmr.root();
+};
 
 // Run Merkle.root and compare its output (LE) to the expected
 // big-endian hex.
@@ -53,16 +81,52 @@ suite(
     test(
       "3-tx synthetic (odd-count duplicate-last rule)",
       func() {
-        // Synthetic vector: three identical leaves H = 0x00..00.
-        // With Bitcoin's "duplicate the last node on odd levels"
-        // rule the tree collapses to:
-        //   L1 = [ sha256d(H||H), sha256d(H||H) ]
-        //   root = sha256d(L1[0] || L1[1])
-        // i.e. it must equal Merkle.root([H,H,H,H]) for the same
-        // four-leaf tree of all-zero hashes. This exercises the
-        // odd-count code path.
-        let zero : Blob = Blob.fromVarArray(VarArray.repeat<Nat8>(0, 32));
-        assert Merkle.root([zero, zero, zero]) == Merkle.root([zero, zero, zero, zero]);
+        // Three distinct leaves A, B, C. Bitcoin pairs the odd last node
+        // with itself: root = dSHA(dSHA(A||B) || dSHA(C||C)). (Identical
+        // leaves no longer work here: Merkle.root traps on them as a
+        // mutated list.)
+        let a = leaf(1);
+        let b = leaf(2);
+        let c = leaf(3);
+        assert Merkle.root([a, b, c]) == dSha(cat(dSha(cat(a, b)), dSha(cat(c, c))));
+      },
+    );
+  },
+);
+
+suite(
+  "Merkle.mutated (CVE-2012-2459)",
+  func() {
+
+    test(
+      "genuine lists of distinct txids pass, 1 to 40 leaves",
+      func() {
+        var n = 1;
+        while (n <= 40) {
+          assert not Merkle.mutated(leaves(Array.tabulate<Nat>(n, func(i) = i + 1)));
+          n += 1;
+        };
+      },
+    );
+
+    test(
+      "duplicated tails share the real root and are flagged",
+      func() {
+        // (real, mutated) pairs from BitcoinMutation.mo: the mutated list
+        // ends with a second copy, complete or cut off, of the subtree
+        // before it on some level.
+        let cases : [([Nat], [Nat])] = [
+          ([1, 2, 3], [1, 2, 3, 3]),
+          ([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 5, 6]),
+          ([1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 5, 5]),
+          ([1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 5]),
+        ];
+        for ((real, mut) in cases.values()) {
+          assert uncheckedRoot(leaves(mut)) == uncheckedRoot(leaves(real));
+          assert Merkle.root(leaves(real)) == uncheckedRoot(leaves(real));
+          assert not Merkle.mutated(leaves(real));
+          assert Merkle.mutated(leaves(mut));
+        };
       },
     );
   },

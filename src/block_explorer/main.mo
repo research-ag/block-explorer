@@ -561,7 +561,11 @@ actor BlockExplorer {
   //
   //   push_header, push_header_hex   — Chain.validatePush of the arg.
   //   push_headers                   — size-cap + validate the first header.
-  //   push_body                      — Chain.validatePushBody of the arg.
+  //   push_body                      — Chain.validatePushBody of the arg:
+  //                                    coinbase dSHA == txids[0] and the
+  //                                    mutated-body check, but NOT the full
+  //                                    Merkle root (over the 200M budget on
+  //                                    large blocks).
   //   push_bodies                    — validate the first (hash, txids, cb).
   //   push_coinbases_backfill        — Chain.validatePushCoinbasesBackfillFirst.
   //   push_fork_coinbase             — Chain.validatePushForkCoinbase.
