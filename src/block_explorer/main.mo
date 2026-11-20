@@ -85,6 +85,16 @@ actor BlockExplorer {
   transient let pushBodyInsnsMerkle = tracker.newGauge("push_body_insns_merkle", [], []);
   transient let pushBodyInsnsExit = tracker.newGauge("push_body_insns_exit", [], []);
 
+  // The same three counters for push_body_chunk, the middle one across the
+  // chunk's verifyChunk (its Merkle work; with an empty proof a full root
+  // check, comparable with push_body_insns_merkle). Exit minus entry minus
+  // verify is then mostly the txid trie inserts. Plus the chunk's txid
+  // count, to read the counters per txid.
+  transient let pushBodyChunkInsnsEntry = tracker.newGauge("push_body_chunk_insns_entry", [], []);
+  transient let pushBodyChunkInsnsVerify = tracker.newGauge("push_body_chunk_insns_verify", [], []);
+  transient let pushBodyChunkInsnsExit = tracker.newGauge("push_body_chunk_insns_exit", [], []);
+  transient let pushBodyChunkTxids = tracker.newGauge("push_body_chunk_txids", [], []);
+
   // Stop processing further batch entries once the heap reaches this size.
   // Headroom below the 4 GB wasm32 ceiling for the response, the GC and the
   // next message. Callers learn how far the batch got from the result's
@@ -348,8 +358,16 @@ actor BlockExplorer {
     txids : [Blob],
     proof : [Blob],
   ) : async Result.Result<Chain.BodyChunkOk, Text> {
-    chain.pushBodyChunk(block_hash_internal, start, txids, proof);
+    pushBodyChunkInsnsEntry.update(Prim.performanceCounter(0).toNat());
+    pushBodyChunkTxids.update(txids.size());
+    let r = chain.pushBodyChunkWithObserver(block_hash_internal, start, txids, proof, ?onVerifyInsns);
+    pushBodyChunkInsnsExit.update(Prim.performanceCounter(0).toNat());
+    r;
   };
+
+  // Closure for Chain.pushBodyChunkWithObserver: the instruction delta across
+  // verifyChunk (see onMerkleInsns).
+  func onVerifyInsns(delta : Nat64) { pushBodyChunkInsnsVerify.update(delta.toNat()) };
 
   // Batched upload; processes entries in order, stopping at the first
   // real failure (returned in last_error). Already-indexed bodies are

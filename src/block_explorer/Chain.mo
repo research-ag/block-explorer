@@ -1571,12 +1571,28 @@ module {
   // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
   // m) for a chunk ending at leaf m); empty for the last chunk. A rejected
   // chunk leaves the upload as it was.
+  // Wrapper without the measurement side-channel (tests and anywhere else);
+  // `pushBodyChunkWithObserver` with `onVerifyInsns = null`.
   public func pushBodyChunk(
     self : State,
     blockHashInternal : Blob,
     start : ChunkStart,
     txids : [Blob],
     proof : [Blob],
+  ) : Result.Result<BodyChunkOk, Text> = pushBodyChunkWithObserver(self, blockHashInternal, start, txids, proof, null);
+
+  // `onVerifyInsns` is an optional observer that gets the Wasm instruction
+  // delta across `verifyChunk` (the chunk's Merkle work: hashing its leaves
+  // and closing the tree with the proof; with an empty proof a full root
+  // check, the counterpart of pushBody's `onMerkleInsns`). Called whether
+  // the chunk verifies or not, but not on the checks that return before it.
+  public func pushBodyChunkWithObserver(
+    self : State,
+    blockHashInternal : Blob,
+    start : ChunkStart,
+    txids : [Blob],
+    proof : [Blob],
+    onVerifyInsns : ?((Nat64) -> ()),
   ) : Result.Result<BodyChunkOk, Text> {
     let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
       case (#ok x) x;
@@ -1601,8 +1617,18 @@ module {
     let isFirst = p.verifier.count == 0;
     // Check the chunk against the header's root. A rejected chunk leaves the
     // verifier as it was (Example 10 copies its peaks back), and a rejected
-    // first chunk's fresh verifier is simply dropped.
-    if (not p.verifier.verifyChunk(txids, proof)) {
+    // first chunk's fresh verifier is simply dropped. The performance counter
+    // is read only with an observer: it traps in wasi test mode.
+    let verified = switch (onVerifyInsns) {
+      case null p.verifier.verifyChunk(txids, proof);
+      case (?f) {
+        let v0 = Prim.performanceCounter(0);
+        let ok = p.verifier.verifyChunk(txids, proof);
+        f(Prim.performanceCounter(0) - v0);
+        ok;
+      };
+    };
+    if (not verified) {
       return #err("chunk does not verify against the block's merkle root with this proof");
     };
     if (isFirst) {
