@@ -1,7 +1,15 @@
-// Version: 1.0.0
+// Version: 3.0.0
 type BlobEnum__494823798 = BlobEnumeration__373145820;
 type BlobEnumeration__373145820 =
   {var array : [var Blob]; var size_ : Nat; var tree : Tree__1044591825};
+type BodyChunks__525190424 =
+  {
+    coinbase : Blob;
+    firstTxIndex : Nat;
+    hash : Blob;
+    height : Nat;
+    verifier : Verifier__490165045
+  };
 type Data__44217153<K, V> = {var count : Nat__227979830; kvs : [var ?(K, V)]};
 type Enumeration__286404848 = StableTrie__1059179783;
 type ForkBlock__550065393 =
@@ -22,6 +30,7 @@ type ForkBody__1064556805 =
   {coinbase : ?Blob; firstTxIndex : Nat; txids : [Blob]};
 type ForkStore__323451345<B> =
   {byHeight : Map__230067015<Nat, [Blob]>; byId : Map__230067015<Blob, B>};
+type Hasher__900105027 = State__681818436;
 type Internal__283199666<K, V> =
   {children : [var ?Node__204828119<K, V>]; data : Data__44217153<K, V>};
 type Leaf__598469445<K, V> = {data : Data__44217153<K, V>};
@@ -49,6 +58,22 @@ type Nat__227979830 = Nat__920180692;
 type Nat__920180692 = Nat;
 type Node__204828119<K, V> =
   {#internal : Internal__283199666<K, V>; #leaf : Leaf__598469445<K, V>};
+type OldState__174340003 =
+  {
+    var bodiesNextHeight : Nat;
+    var coinbaseBackfillCursor : Nat;
+    coinbasesRegion : Store__98599885;
+    var coinbasesRegionSize : Nat64;
+    forks : ForkStore__323451345<ForkBlock__550065393>;
+    headerTrie : Enumeration__286404848;
+    var initialized : Bool;
+    var recentTimes : [Nat32];
+    reorgLog : List__836382695<ReorgEvent__808211227>;
+    var tipWork : Nat;
+    txTrie : Enumeration__286404848;
+    uploaders : Uploaders__952700464;
+    var workMemo : WorkMemo__1019139925
+  };
 type Region__387902757 = Region;
 type Region__616970443 = Region__387902757;
 type ReorgEvent__808211227 =
@@ -97,6 +122,7 @@ type StableTrie__775205806 =
     value_size : Nat;
     zero_leaf : Blob
   };
+type State__681818436 = [var Nat16];
 type Store__98599885 = Region__616970443;
 type Tree__1044591825 = ?({#B; #R}, Tree__1044591825, Nat, Tree__1044591825);
 type Uploaders__952700464 =
@@ -106,11 +132,23 @@ type Uploaders__952700464 =
     enum : BlobEnum__494823798;
     ofHash : Map__230067015<Blob, Nat>
   };
+type Verifier__490165045 =
+  {
+    backup : [var Hasher__900105027];
+    var count : Nat64;
+    var done : Bool;
+    hasher : [var Hasher__900105027];
+    root : Blob
+  };
 type WorkMemo__1019139925 = {bits : Nat32; target : Nat; work : Nat};
-actor {
+actor ({
+  in chain : OldState__174340003;
+  stable var cyclesPerCall : Nat
+}, {
   stable chain :
     {
       var bodiesNextHeight : Nat;
+      var bodyChunks : ?BodyChunks__525190424;
       var coinbaseBackfillCursor : Nat;
       coinbasesRegion : Store__98599885;
       var coinbasesRegionSize : Nat64;
@@ -125,4 +163,4 @@ actor {
       var workMemo : WorkMemo__1019139925
     };
   stable var cyclesPerCall : Nat
-};
+});
