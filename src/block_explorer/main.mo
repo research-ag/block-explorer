@@ -38,11 +38,7 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
-import Migration "Migration";
 
-// One-off: adds Chain.State.bodyChunks (chunked body uploads). Remove with
-// Migration.mo after the upgrade has run on mainnet.
-(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
