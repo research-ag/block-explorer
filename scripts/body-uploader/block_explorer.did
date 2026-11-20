@@ -13,6 +13,16 @@ type BodyBatchResult = record {
   last_error : opt text;
 };
 type BodyBatchResultR = variant { ok : BodyBatchResult; err : text };
+// Chunked upload (chunk-uploader).
+type ChunkStart = variant { coinbase_tx : blob; offset : nat };
+type BodyChunkOk = record {
+  height : nat;
+  offset : nat;
+  complete : bool;
+  first_tx_index : nat;
+};
+type BodyChunkResult = variant { ok : BodyChunkOk; err : text };
+type TxidTip = record { height : nat; offset : nat };
 service : {
   // Next canonical height whose body is still missing (contiguous frontier).
   bodies_next_height : () -> (nat) query;
@@ -36,4 +46,14 @@ service : {
   push_body : (blob, vec blob, blob) -> (PushBodyResult);
   // Batched variant; processes in order, stops at the first real error.
   push_bodies : (vec record { blob; vec blob; blob }) -> (BodyBatchResultR);
+  // Where the next txid upload starts: the body tip's height and the offset
+  // of the next txid within that block (0 unless a chunked upload is in
+  // progress).
+  txid_tip : () -> (TxidTip) query;
+  // Next chunk of the canonical body at the txid tip: block hash (internal
+  // LE), start (#coinbase_tx for the first chunk at offset 0, else #offset
+  // = the tip's offset), the chunk's txids (internal LE), and the proof for
+  // the leaves after the chunk (empty for the last chunk). Each chunk is
+  // verified against the header's merkle root on arrival.
+  push_body_chunk : (blob, ChunkStart, vec blob, vec blob) -> (BodyChunkResult);
 };
