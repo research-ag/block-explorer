@@ -27,6 +27,7 @@ import Sha256 "mo:sha2/Sha256";
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
 import Merkle "mo:btc/Merkle";
+import ChunkProof "mo:btc/BitcoinChunkProof";
 import HeaderValue "../src/block_explorer/HeaderValue";
 
 // --- Test harness ---------------------------------------------------------
@@ -855,6 +856,238 @@ suite(
           case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
           case _ assert false;
         };
+      },
+    );
+  },
+);
+
+// --- Chunked body uploads (push_body_chunk, Example 10) --------------------
+
+func slice(a : [Blob], lo : Nat, hi : Nat) : [Blob] = Array.tabulate<Blob>(hi - lo : Nat, func(i) = a[lo + i]);
+
+// Upload a chunk [lo, hi) of `b` with the proof for the leaves after it; the
+// coinbase goes with the chunk at offset 0.
+func chunk(c : Chain.State, hash : Blob, b : Body, lo : Nat, hi : Nat) : Result.Result<Chain.BodyChunkOk, Text> {
+  let start : Chain.ChunkStart = if (lo == 0) #coinbase_tx(b.coinbaseTx) else #offset(lo);
+  c.pushBodyChunk(hash, start, slice(b.txids, lo, hi), ChunkProof.proof(b.txids, hi));
+};
+
+func errHas(r : Result.Result<Chain.BodyChunkOk, Text>, needle : Text) : Bool {
+  switch r { case (#err e) Text.contains(e, #text needle); case _ false };
+};
+
+func tipIs(c : Chain.State, height : Nat, offset : Nat) : Bool {
+  let t = c.txidTip();
+  t.height == height and t.offset == offset;
+};
+
+// Genesis body indexed, plus a canonical block 1 whose body is `b`.
+func chainWithBlock1(b : Body) : (Chain.State, Blob) {
+  let c = newChain();
+  let g = canon0(c);
+  ignore c.pushBody(g.hash, [HeaderValue.merkleOf(g.value)], GENESIS_COINBASE);
+  let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b.root);
+  ignore push(c, h1);
+  (c, hashOf(h1));
+};
+
+// Coinbase + 6 more txids.
+func body7() : Body = body(1, [txid(2), txid(3), txid(4), txid(5), txid(6), txid(7)]);
+
+suite(
+  "Chain chunked bodies",
+  func() {
+
+    test(
+      "chunks in order: indexed per chunk, tip advances, body completes",
+      func() {
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        assert tipIs(c, 1, 0);
+
+        switch (chunk(c, h, b, 0, 3)) {
+          case (#ok ok) assert ok.height == 1 and ok.offset == 3 and not ok.complete and ok.first_tx_index == 1;
+          case _ assert false;
+        };
+        // Indexed right away, but the body is not complete yet.
+        assert tipIs(c, 1, 3);
+        assert c.bodiesHeight() == 1;
+        assert c.totalIndexedTxids() == 4;
+        assert c.lookupTxid(b.txids[1]).canonical == ?1;
+        switch (c.txLocations(b.txids[2]).canonical) {
+          case (?loc) assert loc.height == 1 and loc.position == 2 and loc.index == 3;
+          case null assert false;
+        };
+        // The last complete body's count ignores the partial tail.
+        assert c.txCountAt(0) == ?1;
+        assert c.txCountAt(1) == null;
+
+        switch (chunk(c, h, b, 3, 5)) {
+          case (#ok ok) assert ok.offset == 5 and not ok.complete;
+          case _ assert false;
+        };
+        switch (chunk(c, h, b, 5, 7)) {
+          case (#ok ok) assert ok.offset == 7 and ok.complete;
+          case _ assert false;
+        };
+        assert tipIs(c, 2, 0);
+        assert c.bodiesHeight() == 2;
+        assert c.txCountAt(1) == ?7;
+        assert c.blockTxids(h, 0, 10) == b.txids;
+        assert c.getCanonicalCoinbase(1) == ?b.coinbaseTx;
+      },
+    );
+
+    test(
+      "a whole body as one chunk with an empty proof",
+      func() {
+        let b = body(1, [txid(2), txid(3)]);
+        let (c, h) = chainWithBlock1(b);
+        switch (c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), b.txids, [])) {
+          case (#ok ok) assert ok.offset == 3 and ok.complete;
+          case _ assert false;
+        };
+        assert tipIs(c, 2, 0);
+        assert c.txCountAt(1) == ?3;
+      },
+    );
+
+    test(
+      "offset, coinbase and proof errors leave the upload unchanged",
+      func() {
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        let first = slice(b.txids, 0, 3);
+        let p3 = ChunkProof.proof(b.txids, 3);
+
+        assert errHas(c.pushBodyChunk(h, #offset(0), first, p3), "use #coinbase_tx");
+        assert errHas(c.pushBodyChunk(h, #offset(1), first, p3), "does not match the txid tip");
+        assert errHas(c.pushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
+        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), [], p3), "empty chunk");
+        assert errHas(c.pushBodyChunk(txid(99), #coinbase_tx(b.coinbaseTx), first, p3), "unknown block");
+        // The proof for another boundary does not verify.
+        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, ChunkProof.proof(b.txids, 4)), "does not verify");
+        assert tipIs(c, 1, 0);
+        assert c.totalIndexedTxids() == 1;
+
+        switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
+        let next = slice(b.txids, 3, 5);
+        let p5 = ChunkProof.proof(b.txids, 5);
+        // A lost race: the same first chunk again, or a chunk for an old offset.
+        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3), "does not match the txid tip");
+        assert errHas(c.pushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
+        // Wrong leaves at the right offset, and a wrong proof.
+        assert errHas(c.pushBodyChunk(h, #offset(3), [txid(40), txid(41)], p5), "does not verify");
+        assert errHas(c.pushBodyChunk(h, #offset(3), next, p3), "does not verify");
+        assert tipIs(c, 1, 3);
+        assert c.totalIndexedTxids() == 4;
+
+        // The verifier was restored after each rejection: the real chunks go on.
+        switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
+        switch (chunk(c, h, b, 5, 7)) { case (#ok ok) assert ok.complete; case _ assert false };
+        assert errHas(chunk(c, h, b, 0, 7), "already complete");
+      },
+    );
+
+    test(
+      "fork blocks and blocks above the body tip are rejected",
+      func() {
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        let g = canon0(c);
+        // A sibling of block 1 with the same work stays a fork.
+        let bf = body(20, [txid(21)]);
+        let f1 = mkHeaderM(g.hash, EASY_BITS, 2, 9, bf.root);
+        ignore push(c, f1);
+        assert errHas(c.pushBodyChunk(hashOf(f1), #coinbase_tx(bf.coinbaseTx), bf.txids, []), "canonical blocks only");
+        // Block 2 before block 1's body.
+        let b2 = body(30, [txid(31)]);
+        let h2 = mkHeaderM(h, EASY_BITS, 3, 3, b2.root);
+        ignore push(c, h2);
+        assert errHas(c.pushBodyChunk(hashOf(h2), #coinbase_tx(b2.coinbaseTx), b2.txids, []), "ancestor bodies unknown");
+      },
+    );
+
+    test(
+      "a mutated last chunk is rejected by the verifier and by inspect",
+      func() {
+        // Real [cb, t2, t3]; mutated [cb, t2, t3, t3] has the same root.
+        let b = body(1, [txid(2), txid(3)]);
+        let (c, h) = chainWithBlock1(b);
+        let mutated : [Blob] = [b.txids[0], b.txids[1], b.txids[2], b.txids[2]];
+        // Whole mutated list at once: inspect flags it from the txids alone.
+        switch (c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, [])) {
+          case (#err e) assert Text.contains(e, #text "mutated");
+          case _ assert false;
+        };
+        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, []), "does not verify");
+
+        // In chunks: the first two are a genuine prefix (same proof as the
+        // real block), the duplicate tail comes in the last chunk.
+        switch (chunk(c, h, b, 0, 2)) { case (#ok ok) assert ok.offset == 2; case _ assert false };
+        let tail : [Blob] = [b.txids[2], b.txids[2]];
+        switch (c.validatePushBodyChunk(h, #offset(2), tail, [])) {
+          case (#err e) assert Text.contains(e, #text "mutated");
+          case _ assert false;
+        };
+        assert errHas(c.pushBodyChunk(h, #offset(2), tail, []), "does not verify");
+        assert tipIs(c, 1, 2);
+        // The real last chunk passes both.
+        switch (c.validatePushBodyChunk(h, #offset(2), [b.txids[2]], [])) { case (#ok _) {}; case _ assert false };
+        switch (chunk(c, h, b, 2, 3)) { case (#ok ok) assert ok.complete and ok.offset == 3; case _ assert false };
+      },
+    );
+
+    test(
+      "push_body supersedes a chunked upload in progress",
+      func() {
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
+        switch (c.pushBody(h, b.txids, b.coinbaseTx)) {
+          case (#ok ok) assert ok.canonical_indexed and ok.tx_count == 7 and ok.first_tx_index == 1;
+          case _ assert false;
+        };
+        assert tipIs(c, 2, 0);
+        assert c.totalIndexedTxids() == 8;
+        assert c.lookupTxid(b.txids[6]).canonical == ?1;
+        assert c.blockTxids(h, 0, 10) == b.txids;
+      },
+    );
+
+    test(
+      "a reorg that displaces the block drops its chunked upload",
+      func() {
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        let g = canon0(c);
+        switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
+        assert c.totalIndexedTxids() == 4;
+
+        // A two-block branch off genesis outweighs block 1.
+        let bB = body(50, [txid(51), txid(52)]);
+        let x1 = mkHeaderM(g.hash, EASY_BITS, 5, 50, bB.root);
+        ignore push(c, x1);
+        ignore push(c, mkHeader(hashOf(x1), EASY_BITS, 6, 51));
+        assert c.tipHeight() == 2;
+        assert c.canonicalAt(1) != null;
+
+        // The partial txids are gone and are not kept as a fork body.
+        assert tipIs(c, 1, 0);
+        assert c.bodiesHeight() == 1;
+        assert c.totalIndexedTxids() == 1;
+        assert c.lookupTxid(b.txids[1]).canonical == null;
+        assert c.forkBodyCount() == 0;
+        assert c.txCountAt(0) == ?1;
+        // An old chunk of the displaced block is now for a fork block.
+        assert errHas(c.pushBodyChunk(h, #offset(3), slice(b.txids, 3, 5), ChunkProof.proof(b.txids, 5)), "canonical blocks only");
+
+        // The new block 1 uploads from scratch.
+        switch (chunk(c, hashOf(x1), bB, 0, 3)) {
+          case (#ok ok) assert ok.complete and ok.first_tx_index == 1;
+          case _ assert false;
+        };
+        assert tipIs(c, 2, 0);
       },
     );
   },

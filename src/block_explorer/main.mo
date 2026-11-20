@@ -38,7 +38,11 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
+import Migration "Migration";
 
+// One-off: adds Chain.State.bodyChunks (chunked body uploads). Remove with
+// Migration.mo after the upgrade has run on mainnet.
+(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
@@ -332,6 +336,25 @@ actor BlockExplorer {
     r;
   };
 
+  // Chunked upload of the canonical body at the txid tip (see txid_tip):
+  // the block's txids in order, each chunk verified on arrival against the
+  // header's Merkle root with `proof`, the proof for the leaves after the
+  // chunk (Example 10 of the sha2 package; empty for the last chunk).
+  // `start` is #coinbase_tx (the raw witness-stripped coinbase) for the
+  // first chunk, which starts at offset 0, and #offset (> 0, the txid tip's
+  // offset) for every later chunk. A whole body in one chunk with an empty
+  // proof is fine. Accepted txids are indexed right away; the body tip
+  // advances when the last chunk is accepted. Canonical blocks only; fork
+  // bodies go through push_body. See Chain.pushBodyChunk.
+  public func push_body_chunk(
+    block_hash_internal : Blob,
+    start : Chain.ChunkStart,
+    txids : [Blob],
+    proof : [Blob],
+  ) : async Result.Result<Chain.BodyChunkOk, Text> {
+    chain.pushBodyChunk(block_hash_internal, start, txids, proof);
+  };
+
   // Batched upload; processes entries in order, stopping at the first
   // real failure (returned in last_error). Already-indexed bodies are
   // counted as duplicates and don't halt the batch.
@@ -431,6 +454,11 @@ actor BlockExplorer {
 
   // The next height whose body may be uploaded (= count of indexed bodies).
   public query func bodies_next_height() : async Nat = chain.bodiesHeight();
+
+  // Where the next txid upload starts: the body tip's height and the offset
+  // within that block (0 unless a chunked upload is in progress). The next
+  // push_body_chunk must name this block and this offset.
+  public query func txid_tip() : async Chain.TxidTip = chain.txidTip();
 
   // Total transactions indexed across the canonical chain.
   public query func total_indexed_txids() : async Nat = chain.totalIndexedTxids();
@@ -567,6 +595,12 @@ actor BlockExplorer {
   //                                    Merkle root (over the 200M budget on
   //                                    large blocks).
   //   push_bodies                    — validate the first (hash, txids, cb).
+  //   push_body_chunk                — Chain.validatePushBodyChunk: block,
+  //                                    start == txid tip (#coinbase_tx with
+  //                                    dSHA == txids[0], or #offset),
+  //                                    and for the last chunk (empty proof)
+  //                                    the mutated-body check. No Merkle
+  //                                    verification, as for push_body.
   //   push_coinbases_backfill        — Chain.validatePushCoinbasesBackfillFirst.
   //   push_fork_coinbase             — Chain.validatePushForkCoinbase.
   //   set_cycles_per_call            — controller-only (match real check).
@@ -599,6 +633,7 @@ actor BlockExplorer {
       #lookup_txid : () -> (txid : Blob);
       #push_bodies : () -> (batch : [(Blob, [Blob], Blob)]);
       #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
+      #push_body_chunk : () -> (block_hash_internal : Blob, start : Chain.ChunkStart, txids : [Blob], proof : [Blob]);
       #push_coinbases_backfill : () -> (start_height : Nat, coinbases : [Blob]);
       #push_fork_coinbase : () -> (block_hash_internal : Blob, coinbase : Blob);
       #push_header : () -> (raw_header : Blob);
@@ -612,6 +647,7 @@ actor BlockExplorer {
       #tx_count_of_hash : () -> (hash_be_hex : Text);
       #txid_at_index : () -> (index : Nat);
       #txid_status : () -> ();
+      #txid_tip : () -> ();
       #uploader_leaderboard : () -> (top : Nat);
     };
   }) : Bool {
@@ -638,6 +674,10 @@ actor BlockExplorer {
       case (#push_body fetch) {
         let (hash, txids, cb) = fetch();
         isOk(chain.validatePushBody(hash, txids, cb));
+      };
+      case (#push_body_chunk fetch) {
+        let (hash, start, txids, proof) = fetch();
+        isOk(chain.validatePushBodyChunk(hash, start, txids, proof));
       };
       case (#push_bodies fetch) {
         let batch = fetch();

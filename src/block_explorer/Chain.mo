@@ -52,6 +52,7 @@ import Reorg "mo:heaviest-chain/Reorg";
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 import Merkle "mo:btc/Merkle";
+import ChunksForward "mo:btc/BitcoinChunksForward";
 import Coinbases "Coinbases";
 import Headers "Headers";
 import Uploaders "Uploaders";
@@ -161,6 +162,42 @@ module {
     duplicate : Bool;
   };
 
+  // A canonical block body arriving in chunks (push_body_chunk), verified
+  // chunk by chunk with Example 10 of the sha2 package
+  // (BitcoinChunksForward). At most one exists, and it is always for the
+  // canonical block at `bodiesNextHeight`. The accepted txids are already in
+  // `txTrie`, from `firstTxIndex` on (and F is written into the block's
+  // HeaderValue on the first chunk); `bodiesNextHeight` advances, and the
+  // coinbase is stored, only when the last chunk is accepted. A reorg that
+  // displaces the block drops it together with its txids (fork bodies are
+  // only ever stored whole), and so does a whole-body push_body for it.
+  public type BodyChunks = {
+    hash : Blob; // internal LE order, 32 bytes
+    height : Nat;
+    firstTxIndex : Nat;
+    coinbase : Blob; // raw witness-stripped coinbase from the first chunk
+    verifier : ChunksForward.Verifier;
+  };
+
+  public type BodyChunkOk = {
+    height : Nat;
+    // Txids of this block accepted so far: the offset of the next chunk, or
+    // the block's transaction count once `complete`.
+    offset : Nat;
+    complete : Bool; // the last chunk (empty proof) has been accepted
+    first_tx_index : Nat;
+  };
+
+  // Where a chunk starts. The first chunk carries the block's raw
+  // witness-stripped coinbase and so starts at offset 0; every later chunk
+  // carries its offset (> 0) instead, which must be the txid tip's.
+  public type ChunkStart = { #coinbase_tx : Blob; #offset : Nat };
+
+  // Where the next txid upload goes: the block at `height` (the body tip,
+  // = bodiesNextHeight), from transaction `offset` within it (0 unless a
+  // chunked upload is in progress).
+  public type TxidTip = { height : Nat; offset : Nat };
+
   // The whole chain state. Declared top-level in the actor (the two tries as
   // their own `let`s, then bundled here). `var` fields are the only mutable
   // scalars; every other field is mutated in place through its own module.
@@ -188,6 +225,9 @@ module {
     var coinbaseBackfillCursor : Nat;
     var tipWork : Nat; // cumulative work of the canonical tip
     var bodiesNextHeight : Nat; // canonical bodies known for [0, this)
+    // A chunked upload of the body at `bodiesNextHeight`, if one is in
+    // progress. See BodyChunks.
+    var bodyChunks : ?BodyChunks;
     // Timestamps of the canonical tip and its ancestors, newest first, at
     // most MTP_WINDOW (11) entries — the median-time-past context. Kept in
     // sync on every canonical append / reorg so the per-push MTP check never
@@ -268,6 +308,7 @@ module {
     var coinbaseBackfillCursor = 0;
     var tipWork = 0;
     var bodiesNextHeight = 0;
+    var bodyChunks = null;
     var recentTimes = [];
     var workMemo = { bits = 0 : Nat32; target = 0; work = 0 };
     var initialized = false;
@@ -738,6 +779,14 @@ module {
       // with the block into the fork store, then truncate the trie to the
       // common ancestor.
       beforeRollback = func(commonHeight : Nat) {
+        // A chunked upload in progress is for the block at bodiesNextHeight.
+        // If that block is displaced, drop its accepted txids: fork bodies
+        // are only ever stored whole. (When it isn't, bodiesNextHeight <=
+        // commonHeight and nothing below touches the trie either.)
+        switch (self.bodyChunks) {
+          case (?p) if (p.height > commonHeight) discardBodyChunks(self);
+          case _ {};
+        };
         if (self.bodiesNextHeight > commonHeight + 1) {
           let truncPoint = switch (Headers.get(self.headerTrie, commonHeight + 1)) {
             case (?(_, v)) HeaderValue.firstTxIndexOf(v);
@@ -755,7 +804,7 @@ module {
                 case (?(_, v)) HeaderValue.firstTxIndexOf(v);
                 case null Runtime.trap("maybeReorg: missing displaced body block");
               };
-            } else self.txTrie.size();
+            } else completeTxEnd(self);
             // Pull the demoted canonical coinbase (if stored) onto the
             // heap fork body so it survives the reorg and travels with
             // the block into the fork store. Heights at/above the cursor
@@ -1141,6 +1190,28 @@ module {
     );
   };
 
+  // End of the txids that belong to COMPLETE canonical bodies: the trie's
+  // size, minus the txids of a chunked upload in progress (which sit at the
+  // tail, from its firstTxIndex on).
+  func completeTxEnd(self : State) : Nat {
+    switch (self.bodyChunks) {
+      case (?p) p.firstTxIndex;
+      case null self.txTrie.size();
+    };
+  };
+
+  // Drop a chunked upload in progress together with the txids it has put
+  // into the trie.
+  func discardBodyChunks(self : State) {
+    switch (self.bodyChunks) {
+      case (?p) {
+        self.txTrie.truncate(p.firstTxIndex);
+        self.bodyChunks := null;
+      };
+      case null {};
+    };
+  };
+
   // Append one block's body (its `[Blob]` of txids) to the tail of the
   // canonical txid trie, setting its F. The two BIP30 single-tx blocks are
   // stored compressed (F set, no txids — see isCompressedBodyHeight); any
@@ -1190,7 +1261,7 @@ module {
     let f = switch (Headers.get(self.headerTrie, height)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
     let next = if (height + 1 < self.bodiesNextHeight) {
       switch (Headers.get(self.headerTrie, height + 1)) { case (?(_, v)) HeaderValue.firstTxIndexOf(v); case null return 0 };
-    } else self.txTrie.size();
+    } else completeTxEnd(self);
     next - f : Nat;
   };
 
@@ -1300,6 +1371,9 @@ module {
           debug_show self.bodiesNextHeight # ", got " # debug_show b.height
         );
       };
+      // A chunked upload of this block in progress is superseded by the
+      // whole, verified body: drop its txids and index the body from F.
+      discardBodyChunks(self);
       appendCanonicalBody(self, b.height, b.value, txids);
       // Gated canonical coinbase storage: only append + record the
       // end-offset when the backfill cursor has reached this height.
@@ -1395,6 +1469,212 @@ module {
       switch (self.forks.get(b.hash)) {
         case (?_) {};
         case null return #err("fork block missing from store");
+      };
+    };
+    #ok(());
+  };
+
+  // ---------------------------------------------------------------------
+  // Chunked block bodies (push_body_chunk).
+  //
+  // A canonical body may also arrive in chunks, in order, each verified on
+  // arrival against the header's Merkle root with the uploader's proof for
+  // the leaves still to come: Example 10 of the sha2 package
+  // (BitcoinChunksForward.mo), with the proofs of BitcoinChunkProof.mo. The
+  // first chunk carries the raw coinbase, which pins txids[0] to a real
+  // transaction and with it the depth of the tree; later chunks carry none.
+  // A chunk with an empty proof is the last one, and only then is the
+  // block's transaction count known. The whole body as one chunk with an
+  // empty proof is allowed.
+  //
+  // Accepted txids go into the txid trie right away; `txidTip` says where
+  // the next chunk starts. Only the canonical block at the body tip
+  // (bodiesNextHeight) can be uploaded this way; fork bodies use push_body.
+  // ---------------------------------------------------------------------
+
+  // Deepest tree the chunk verifier has room for: 2^20 transactions, far
+  // above any Bitcoin block (about 17K transactions at most fit in 4M weight
+  // units). Costs 2 * 20 + 3 hashers of 16 Nat16 each while an upload is in
+  // progress.
+  let CHUNK_MAX_DEPTH : Nat = 20;
+
+  public func txidTip(self : State) : TxidTip {
+    {
+      height = self.bodiesNextHeight;
+      offset = switch (self.bodyChunks) {
+        case (?p) p.verifier.count.toNat();
+        case null 0;
+      };
+    };
+  };
+
+  // The checks shared by pushBodyChunk and its inspect mirror, up to (not
+  // including) the Merkle verification: block, height, start and coinbase
+  // binding. Returns the block and the upload in progress, if any (none
+  // means this is a valid-looking first chunk). The offset check is what
+  // lets concurrent uploaders lose a race cheaply: a chunk that does not
+  // start at the txid tip is rejected before anything is hashed.
+  func checkBodyChunk(self : State, blockHashInternal : Blob, start : ChunkStart, txids : [Blob]) : Result.Result<(StoredBlock, ?BodyChunks), Text> {
+    if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
+    if (txids.size() == 0) return #err("empty chunk");
+    switch (start) {
+      case (#offset 0) return #err("the chunk at offset 0 is the first one and carries the coinbase: use #coinbase_tx");
+      case _ {};
+    };
+    let b = switch (byHashInternal(self, blockHashInternal)) {
+      case (?b) b;
+      case null return #err("unknown block header hash");
+    };
+    if (not b.isCanonical) {
+      return #err("chunked upload is for canonical blocks only; use push_body for fork blocks");
+    };
+    if (b.height < self.bodiesNextHeight) {
+      return #err("body already complete at height " # debug_show b.height);
+    };
+    if (b.height > self.bodiesNextHeight) {
+      return #err(
+        "ancestor bodies unknown: expected canonical body for height " #
+        debug_show self.bodiesNextHeight # ", got " # debug_show b.height
+      );
+    };
+    func mismatch(offset : Nat, tip : Nat) : Result.Result<(StoredBlock, ?BodyChunks), Text> = #err(
+      "offset " # debug_show offset # " does not match the txid tip: height " #
+      debug_show b.height # ", offset " # debug_show tip
+    );
+    switch (self.bodyChunks, start) {
+      case (?p, #offset o) {
+        let tip = p.verifier.count.toNat();
+        if (o != tip) return mismatch(o, tip);
+        // Invariant: an upload in progress is for the canonical block at
+        // bodiesNextHeight, which is `b`.
+        if (p.hash != b.hash) Runtime.trap("pushBodyChunk: upload in progress is for another block");
+        #ok((b, ?p));
+      };
+      case (?p, #coinbase_tx _) mismatch(0, p.verifier.count.toNat());
+      case (null, #offset o) mismatch(o, 0);
+      case (null, #coinbase_tx cb) {
+        // Depth-of-tree binding, as in pushBody: a coinbase longer than 64
+        // bytes whose dSHA is txids[0] makes leaf 0 a real transaction,
+        // which fixes the depth of the tree and the level of every leaf.
+        if (cb.size() <= 64) return #err("coinbase_tx must be > 64 bytes (depth-of-tree binding)");
+        let d = Sha256.new(#sha256);
+        d.writeBlob(cb);
+        if (d.sumDouble() != txids[0]) return #err("coinbase_tx hash does not match first txid");
+        #ok((b, null));
+      };
+    };
+  };
+
+  // Accept the next chunk of the canonical body at the body tip: the txids
+  // from the txid tip's offset on, named by `start` (the coinbase for the
+  // first chunk, the offset for later ones). `proof` is
+  // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
+  // m) for a chunk ending at leaf m); empty for the last chunk. A rejected
+  // chunk leaves the upload as it was.
+  public func pushBodyChunk(
+    self : State,
+    blockHashInternal : Blob,
+    start : ChunkStart,
+    txids : [Blob],
+    proof : [Blob],
+  ) : Result.Result<BodyChunkOk, Text> {
+    let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
+      case (#ok x) x;
+      case (#err e) return #err(e);
+    };
+    let p : BodyChunks = switch (inProgress) {
+      case (?p) p;
+      case null {
+        let cb = switch (start) {
+          case (#coinbase_tx cb) cb;
+          case (#offset _) Runtime.trap("pushBodyChunk: first chunk without coinbase");
+        };
+        {
+          hash = b.hash;
+          height = b.height;
+          firstTxIndex = self.txTrie.size();
+          coinbase = cb;
+          verifier = ChunksForward.new(HeaderValue.merkleOf(b.value), CHUNK_MAX_DEPTH);
+        };
+      };
+    };
+    let isFirst = p.verifier.count == 0;
+    // Check the chunk against the header's root. A rejected chunk leaves the
+    // verifier as it was (Example 10 copies its peaks back), and a rejected
+    // first chunk's fresh verifier is simply dropped.
+    if (not p.verifier.verifyChunk(txids, proof)) {
+      return #err("chunk does not verify against the block's merkle root with this proof");
+    };
+    if (isFirst) {
+      // Record F in the header value and start the upload.
+      Headers.put(self.headerTrie, b.height, HeaderValue.withFirstTxIndex(b.value, p.firstTxIndex));
+      self.bodyChunks := ?p;
+    };
+    // Index the chunk's txids right away, behind those already accepted.
+    // The two BIP30 single-tx blocks stay compressed, as in
+    // appendCanonicalBody; a cross-block duplicate txid traps there too.
+    if (not isCompressedBodyHeight(b.height)) {
+      let hv = encodeHeight(b.height);
+      for (t in txids.values()) ignore self.txTrie.add(t, hv);
+      if (self.txTrie.size() != p.firstTxIndex + p.verifier.count.toNat()) {
+        Runtime.trap("pushBodyChunk: unexpected duplicate txid at height " # debug_show b.height);
+      };
+    };
+    let complete = p.verifier.complete();
+    if (complete) {
+      // Same gated coinbase storage as pushBody.
+      if (b.height == self.coinbaseBackfillCursor) {
+        storeCanonicalCoinbase(self, b.height, p.coinbase);
+      };
+      self.bodiesNextHeight += 1;
+      self.bodyChunks := null;
+    };
+    #ok({
+      height = b.height;
+      offset = p.verifier.count.toNat();
+      complete;
+      first_tx_index = p.firstTxIndex;
+    });
+  };
+
+  // Inspect mirror of pushBodyChunk: every check before the Merkle
+  // verification, which is skipped as for push_body (a whole block in one
+  // chunk would go over the 200M inspect budget). For a chunk that claims to
+  // be the last (empty proof) it adds the mutated-body check (CVE-2012-2459)
+  // over the complete list, the loop of BitcoinMutation.mutated with the
+  // earlier chunks' txids read back from the trie (at most log2(n) reads).
+  // The real call rejects the same lists with Example 10's equal-sibling
+  // checks, or, for a list that repeats a txid elsewhere, on the root.
+  public func validatePushBodyChunk(
+    self : State,
+    blockHashInternal : Blob,
+    start : ChunkStart,
+    txids : [Blob],
+    proof : [Blob],
+  ) : Result.Result<(), Text> {
+    let (_, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
+      case (#ok x) x;
+      case (#err e) return #err(e);
+    };
+    if (proof.size() == 0) {
+      let (m, f) = switch (inProgress) {
+        case (?p) (p.verifier.count.toNat(), p.firstTxIndex);
+        case null (0, 0);
+      };
+      // The txid at position i of the block.
+      func at(i : Nat) : Blob {
+        if (i >= m) return txids[i - m];
+        switch (self.txTrie.get(f + i)) {
+          case (?(k, _)) k;
+          case null Runtime.trap("validatePushBodyChunk: missing txid " # debug_show (f + i));
+        };
+      };
+      let n = m + txids.size();
+      let last = at(n - 1 : Nat);
+      var back = 1;
+      while (back < n) {
+        if (at(n - 1 - back : Nat) == last) return #err("mutated transaction list (CVE-2012-2459)");
+        back *= 2;
       };
     };
     #ok(());
