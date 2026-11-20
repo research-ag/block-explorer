@@ -43,6 +43,7 @@ import Set "mo:core/Set";
 
 import Prim "mo:⛔";
 
+import Hasher "mo:sha2/Hasher/Sha256";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
@@ -228,6 +229,10 @@ module {
     // A chunked upload of the body at `bodiesNextHeight`, if one is in
     // progress. See BodyChunks.
     var bodyChunks : ?BodyChunks;
+    // The hashers of the chunk verifier, allocated once and used by the
+    // upload of block after block (ChunksForward.withHashers); at most one
+    // upload is in progress at a time. See newChunkHashers.
+    chunkHashers : [var Hasher.Hasher];
     // Timestamps of the canonical tip and its ancestors, newest first, at
     // most MTP_WINDOW (11) entries — the median-time-past context. Kept in
     // sync on every canonical append / reorg so the per-push MTP check never
@@ -309,6 +314,7 @@ module {
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var bodyChunks = null;
+    chunkHashers = newChunkHashers();
     var recentTimes = [];
     var workMemo = { bits = 0 : Nat32; target = 0; work = 0 };
     var initialized = false;
@@ -1498,6 +1504,9 @@ module {
   // progress.
   let CHUNK_MAX_DEPTH : Nat = 20;
 
+  // The pool of State.chunkHashers: CHUNK_MAX_DEPTH + 2 hashers (22).
+  public func newChunkHashers() : [var Hasher.Hasher] = ChunksForward.hashers(CHUNK_MAX_DEPTH);
+
   public func txidTip(self : State) : TxidTip {
     {
       height = self.bodiesNextHeight;
@@ -1569,8 +1578,9 @@ module {
   // from the txid tip's offset on, named by `start` (the coinbase for the
   // first chunk, the offset for later ones). `proof` is
   // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
-  // m) for a chunk ending at leaf m); empty for the last chunk. A rejected
-  // chunk leaves the upload as it was.
+  // m) for a chunk ending at leaf m); empty for the last chunk. A chunk that
+  // fails a check before the verification returns #err; one that does not
+  // verify TRAPS (see verifyBodyChunk). Either way the upload stays as it was.
   // Wrapper without the measurement side-channel (tests and anywhere else);
   // `pushBodyChunkWithObserver` with `onVerifyInsns = null`.
   public func pushBodyChunk(
@@ -1584,8 +1594,10 @@ module {
   // `onVerifyInsns` is an optional observer that gets the Wasm instruction
   // delta across `verifyChunk` (the chunk's Merkle work: hashing its leaves
   // and closing the tree with the proof; with an empty proof a full root
-  // check, the counterpart of pushBody's `onMerkleInsns`). Called whether
-  // the chunk verifies or not, but not on the checks that return before it.
+  // check, the counterpart of pushBody's `onMerkleInsns`). Not called on the
+  // checks that return before it; for a chunk that does not verify it is
+  // called, but the trap that follows rolls the gauge update back with the
+  // rest, so in effect only verified chunks are measured.
   public func pushBodyChunkWithObserver(
     self : State,
     blockHashInternal : Blob,
@@ -1641,8 +1653,13 @@ module {
   // It writes nothing: no stable structure and no field of State. It returns
   // the upload the chunk belongs to (for the first chunk a new one, not yet
   // stored) and whether the chunk is its first. Its verifier is the one
-  // thing that changes: a chunk that verifies advances it, a rejected one
-  // leaves it as it was (Example 10 copies its peaks back).
+  // thing that changes: a chunk that verifies advances it.
+  //
+  // A chunk that does not verify TRAPS: our Example 10 keeps no backup of the
+  // peaks, so the verifier is left half-updated, and the trap rolls that back
+  // with the rest of the call (in inspect: rejects the message). The checks
+  // of checkBodyChunk, which come before the verifier is touched, return
+  // #err as before.
   //
   // `onVerifyInsns` gets the instruction delta across verifyChunk (see
   // pushBodyChunkWithObserver). The performance counter is read only with an
@@ -1671,7 +1688,8 @@ module {
           height = b.height;
           firstTxIndex = self.txTrie.size();
           coinbase = cb;
-          verifier = ChunksForward.new(HeaderValue.merkleOf(b.value), CHUNK_MAX_DEPTH);
+          // On the pool: no upload is in progress, so nothing else uses it.
+          verifier = ChunksForward.withHashers(HeaderValue.merkleOf(b.value), self.chunkHashers);
         };
       };
     };
@@ -1686,7 +1704,7 @@ module {
       };
     };
     if (not verified) {
-      return #err("chunk does not verify against the block's merkle root with this proof");
+      Runtime.trap("pushBodyChunk: chunk does not verify against the block's merkle root with this proof");
     };
     #ok((b, p, isFirst));
   };

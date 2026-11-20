@@ -961,8 +961,11 @@ suite(
     );
 
     test(
-      "offset, coinbase and proof errors leave the upload unchanged",
+      "offset and coinbase errors return #err and leave the upload unchanged",
       func() {
+        // A chunk that does not verify traps (it cannot be undone without a
+        // backup of the peaks), which a test cannot catch: those rejections
+        // are tested on the verifier itself, packages/btc/test/ChunksForward.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         let first = slice(b.txids, 0, 3);
@@ -973,8 +976,6 @@ suite(
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), [], p3), "empty chunk");
         assert errHas(c.pushBodyChunk(txid(99), #coinbase_tx(b.coinbaseTx), first, p3), "unknown block");
-        // The proof for another boundary does not verify.
-        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, ChunkProof.proof(b.txids, 4)), "does not verify");
         assert tipIs(c, 1, 0);
         assert c.totalIndexedTxids() == 1;
 
@@ -984,13 +985,10 @@ suite(
         // A lost race: the same first chunk again, or a chunk for an old offset.
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3), "does not match the txid tip");
         assert errHas(c.pushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
-        // Wrong leaves at the right offset, and a wrong proof.
-        assert errHas(c.pushBodyChunk(h, #offset(3), [txid(40), txid(41)], p5), "does not verify");
-        assert errHas(c.pushBodyChunk(h, #offset(3), next, p3), "does not verify");
         assert tipIs(c, 1, 3);
         assert c.totalIndexedTxids() == 4;
 
-        // The verifier was restored after each rejection: the real chunks go on.
+        // After the rejections the real chunks go on.
         switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
         switch (chunk(c, h, b, 5, 7)) { case (#ok ok) assert ok.complete; case _ assert false };
         assert errHas(chunk(c, h, b, 0, 7), "already complete");
@@ -1017,12 +1015,13 @@ suite(
     );
 
     test(
-      "inspect checks coinbase, chunk and proof against the root",
+      "inspect runs the call's checks without its writes",
       func() {
         // The check verifies on the upload's own verifier, so on the IC it
         // runs only in inspect, whose state changes are discarded. Here a
         // passing check of a later chunk advances the verifier, so it is the
-        // last call on its chain; failing checks leave the verifier as it was.
+        // last call on its chain. A chunk that does not verify traps, here as
+        // in the call; see packages/btc/test/ChunksForward for those.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         // A whole body at once, empty proof.
@@ -1033,24 +1032,17 @@ suite(
         // First chunk: the coinbase, then the chunk with its proof. Each check
         // uses a fresh verifier and stores nothing.
         assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
-        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, ChunkProof.proof(b.txids, 4)), "does not verify");
-        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, []), "does not verify");
-        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), [b.txids[0], txid(40), b.txids[2]], p3), "does not verify");
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(1), first, p3), "does not match the txid tip");
         assert inspectOk(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3));
         assert tipIs(c, 1, 0);
         assert c.totalIndexedTxids() == 1;
 
-        // A later chunk is verified against the upload's tree so far.
+        // Later chunks are verified against the upload's tree so far.
         switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
         let next = slice(b.txids, 3, 5);
         let p5 = ChunkProof.proof(b.txids, 5);
-        assert inspectErr(c.validatePushBodyChunk(h, #offset(3), [txid(40), txid(41)], p5), "does not verify");
-        assert inspectErr(c.validatePushBodyChunk(h, #offset(3), next, p3), "does not verify");
-        assert tipIs(c, 1, 3);
-        // The real call still accepts the chunk after the failed checks.
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
         switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
-        // The last chunk must end at the last leaf.
-        assert inspectErr(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 6), []), "does not verify");
         assert inspectOk(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 7), []));
 
         // A middle chunk with a non-empty proof passes, on a second chain.
@@ -1061,26 +1053,30 @@ suite(
     );
 
     test(
-      "a mutated last chunk is rejected by the verifier and by inspect",
+      "one hasher pool serves the chunked uploads of consecutive blocks",
       func() {
-        // Real [cb, t2, t3]; mutated [cb, t2, t3, t3] has the same root.
-        let b = body(1, [txid(2), txid(3)]);
-        let (c, h) = chainWithBlock1(b);
-        let mutated : [Blob] = [b.txids[0], b.txids[1], b.txids[2], b.txids[2]];
-        // Whole mutated list at once: the equal siblings t3, t3 fail the
-        // verification, in inspect as in the call.
-        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, []), "does not verify");
-        assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, []), "does not verify");
-
-        // In chunks: the first two are a genuine prefix (same proof as the
-        // real block), the duplicate tail comes in the last chunk.
-        switch (chunk(c, h, b, 0, 2)) { case (#ok ok) assert ok.offset == 2; case _ assert false };
-        let tail : [Blob] = [b.txids[2], b.txids[2]];
-        assert inspectErr(c.validatePushBodyChunk(h, #offset(2), tail, []), "does not verify");
-        assert errHas(c.pushBodyChunk(h, #offset(2), tail, []), "does not verify");
-        assert tipIs(c, 1, 2);
-        // The real last chunk is accepted.
-        switch (chunk(c, h, b, 2, 3)) { case (#ok ok) assert ok.complete and ok.offset == 3; case _ assert false };
+        let b1 = body7();
+        let (c, h1) = chainWithBlock1(b1);
+        switch (chunk(c, h1, b1, 0, 4)) { case (#ok _) {}; case _ assert false };
+        switch (chunk(c, h1, b1, 4, 7)) { case (#ok ok) assert ok.complete; case _ assert false };
+        // Block 2 starts on the same pool, which block 1 left dirty.
+        let b2 = body(30, [txid(31), txid(32), txid(33), txid(34)]);
+        let h2 = hashOf(mkHeaderM(h1, EASY_BITS, 3, 3, b2.root));
+        ignore push(c, mkHeaderM(h1, EASY_BITS, 3, 3, b2.root));
+        switch (chunk(c, h2, b2, 0, 2)) { case (#ok ok) assert ok.offset == 2 and not ok.complete; case _ assert false };
+        switch (chunk(c, h2, b2, 2, 5)) { case (#ok ok) assert ok.complete; case _ assert false };
+        assert tipIs(c, 3, 0);
+        assert c.txCountAt(1) == ?7 and c.txCountAt(2) == ?5;
+        assert c.blockTxids(h2, 0, 10) == b2.txids;
+        // And block 3 as a whole in one chunk.
+        let b3 = body(40, [txid(41)]);
+        let hdr3 = mkHeaderM(h2, EASY_BITS, 4, 4, b3.root);
+        ignore push(c, hdr3);
+        switch (c.pushBodyChunk(hashOf(hdr3), #coinbase_tx(b3.coinbaseTx), b3.txids, [])) {
+          case (#ok ok) assert ok.complete and ok.offset == 2;
+          case _ assert false;
+        };
+        assert c.chunkHashers.size() == 22;
       },
     );
 

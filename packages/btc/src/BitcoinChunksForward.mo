@@ -5,6 +5,12 @@
 /// uploader's proof and comparing with the root. One self-contained file: it
 /// imports no other example.
 ///
+/// ADAPTED from the sha2 package's Example 10 for a caller that TRAPS on a
+/// rejected chunk (see "A rejected chunk" below): the backup of the peaks and
+/// the undo are removed. And a verifier can be put on a pool of hashers that
+/// the caller keeps across blocks (`hashers`, `withHashers`). Everything else
+/// is as in the example.
+///
 /// === The tree ===
 ///
 /// The binary counter of Example 5 (`BitcoinMerkle.mo`): slot k holds the
@@ -86,11 +92,12 @@
 ///
 /// === A rejected chunk ===
 ///
-/// The leaves are added to the tree before the check can fail. To leave the
-/// verifier unchanged by a bad chunk, the peaks are copied aside first and
-/// copied back on failure (a handful of 32-byte states per chunk). A canister
-/// that TRAPS on a bad chunk needs no such copy: the trap rolls the call's
-/// changes back.
+/// The leaves are added to the tree before the check can fail, so a bad chunk
+/// leaves the verifier HALF-UPDATED, and the caller must not use it again:
+/// it TRAPS, which rolls the call's changes back, the verifier's included (or
+/// it drops the verifier). The example instead copies the peaks aside before
+/// each chunk and back on failure, to leave the verifier unchanged; that copy
+/// and its second pool of hashers are what this adaptation removes.
 ///
 /// === What this does NOT establish ===
 ///
@@ -118,8 +125,6 @@ module {
     /// The tree over the leaves accepted so far: slot k is the peak of height
     /// k, the last slot is the spare.
     hasher : [var Hasher.Hasher];
-    /// Room to copy the peaks aside while a chunk is being checked.
-    backup : [var Hasher.Hasher];
     /// The number of leaves accepted so far; its 1-bits are the peaks.
     var count : Nat64;
     /// Whether the last chunk has been accepted.
@@ -128,14 +133,30 @@ module {
 
   /// A verifier for the block with Merkle root `root` (32 bytes, internal byte
   /// order), for blocks of at most 2^maxDepth transactions. Allocates
-  /// `2 * maxDepth + 3` hashers: the slots 0 to maxDepth, the spare, and room
-  /// to copy the slots aside.
-  public func new(root : Blob, maxDepth : Nat) : Verifier {
-    assert root.size() == 32 and maxDepth <= 62;
+  /// `maxDepth + 2` hashers: the slots 0 to maxDepth and the spare.
+  public func new(root : Blob, maxDepth : Nat) : Verifier = withHashers(root, hashers(maxDepth));
+
+  /// A pool of hashers for verifiers of blocks of at most 2^maxDepth
+  /// transactions: `maxDepth + 2` of them, the slots 0 to maxDepth and the
+  /// spare. ADDED in this adaptation, with `withHashers`.
+  public func hashers(maxDepth : Nat) : [var Hasher.Hasher] {
+    assert maxDepth <= 62;
+    VarArray.tabulate<Hasher.Hasher>(maxDepth + 2, func(_) { Hasher.new() });
+  };
+
+  /// A verifier for the block with Merkle root `root` on an existing pool of
+  /// hashers (see `hashers`), so that one pool can serve block after block
+  /// without allocating. Whatever the pool holds does not matter: a leaf is
+  /// loaded into the spare before it is used, and a slot is only read while
+  /// the count has a 1-bit there, that is after a node has come to rest in
+  /// it. The pool must not be in use by another verifier at the same time:
+  /// the verifier swaps the pool's hashers around as it goes. ADDED in this
+  /// adaptation.
+  public func withHashers(root : Blob, hasher : [var Hasher.Hasher]) : Verifier {
+    assert root.size() == 32 and hasher.size() >= 2 and hasher.size() <= 64;
     {
       root;
-      hasher = VarArray.tabulate<Hasher.Hasher>(maxDepth + 2, func(_) { Hasher.new() });
-      backup = VarArray.tabulate<Hasher.Hasher>(maxDepth + 1, func(_) { Hasher.new() });
+      hasher;
       var count = 0;
       var done = false;
     };
@@ -228,45 +249,24 @@ module {
     k <= maxDepth and acc.equalsBlob32(self.root);
   };
 
-  // Copy the peaks that a tree of `count` leaves holds from one pool to the
-  // other: the slots at the 1-bits of the count.
-  func copyPeaks(from : [var Hasher.Hasher], to : [var Hasher.Hasher], count : Nat64) {
-    var bits = count;
-    while (bits != 0) {
-      let k = Nat64.bitcountTrailingZero(bits).toNat();
-      to[k].loadState(from[k]);
-      bits &= bits - 1; // on to the next peak
-    };
-  };
-
   /// Verify the next chunk of txids (32 bytes each, internal byte order) with
   /// the uploader's proof `next` for the leaves after the chunk (see
   /// `BitcoinChunkProof.mo`), and accept it if it checks out: `true` and the
-  /// verifier advances; otherwise `false` and the verifier is unchanged. An
-  /// empty `next` claims that the chunk is the last one. Allocation-free.
+  /// verifier advances. Otherwise `false`, and the verifier is HALF-UPDATED
+  /// and must not be used again (the caller traps; see "A rejected chunk").
+  /// An empty `next` claims that the chunk is the last one. Allocation-free.
   public func verifyChunk(self : Verifier, txids : [Blob], next : [Blob]) : Bool {
     if (self.done or txids.size() == 0 or not wellFormed(txids) or not wellFormed(next)) return false;
-    // To be able to undo: the peaks and the count.
-    let count = self.count;
-    copyPeaks(self.hasher, self.backup, count);
     // 1. Add the chunk.
-    var ok = true;
     var j = 0;
-    label adding while (j < txids.size()) {
-      if (not self.add(txids[j])) {
-        ok := false;
-        break adding;
-      };
+    while (j < txids.size()) {
+      if (not self.add(txids[j])) return false;
       j += 1;
     };
     // 2. and 3. Close the tree with the proof and compare with the root.
-    if (ok and self.closes(next)) {
-      // 4. Keep the grown tree.
-      self.done := next.size() == 0;
-      return true;
-    };
-    copyPeaks(self.backup, self.hasher, count);
-    self.count := count;
-    false;
+    if (not self.closes(next)) return false;
+    // 4. Keep the grown tree.
+    self.done := next.size() == 0;
+    true;
   };
 };
