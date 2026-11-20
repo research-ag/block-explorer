@@ -337,22 +337,22 @@ actor BlockExplorer {
   };
 
   // Chunked upload of the canonical body at the txid tip (see txid_tip):
-  // the block's txids from `offset` on, in order, each chunk verified on
-  // arrival against the header's Merkle root with `proof`, the proof for the
-  // leaves after the chunk (Example 10 of the sha2 package; empty for the
-  // last chunk). The first chunk (offset 0) carries the raw witness-stripped
-  // coinbase, later chunks none. A whole body in one chunk with an empty
+  // the block's txids in order, each chunk verified on arrival against the
+  // header's Merkle root with `proof`, the proof for the leaves after the
+  // chunk (Example 10 of the sha2 package; empty for the last chunk).
+  // `start` is #coinbase_tx (the raw witness-stripped coinbase) for the
+  // first chunk, which starts at offset 0, and #offset (> 0, the txid tip's
+  // offset) for every later chunk. A whole body in one chunk with an empty
   // proof is fine. Accepted txids are indexed right away; the body tip
   // advances when the last chunk is accepted. Canonical blocks only; fork
   // bodies go through push_body. See Chain.pushBodyChunk.
   public func push_body_chunk(
     block_hash_internal : Blob,
-    offset : Nat,
-    coinbase_tx : ?Blob,
+    start : Chain.ChunkStart,
     txids : [Blob],
     proof : [Blob],
   ) : async Result.Result<Chain.BodyChunkOk, Text> {
-    chain.pushBodyChunk(block_hash_internal, offset, coinbase_tx, txids, proof);
+    chain.pushBodyChunk(block_hash_internal, start, txids, proof);
   };
 
   // Batched upload; processes entries in order, stopping at the first
@@ -596,8 +596,8 @@ actor BlockExplorer {
   //                                    large blocks).
   //   push_bodies                    — validate the first (hash, txids, cb).
   //   push_body_chunk                — Chain.validatePushBodyChunk: block,
-  //                                    offset == txid tip, coinbase on the
-  //                                    first chunk only (dSHA == txids[0]),
+  //                                    start == txid tip (#coinbase_tx with
+  //                                    dSHA == txids[0], or #offset),
   //                                    and for the last chunk (empty proof)
   //                                    the mutated-body check. No Merkle
   //                                    verification, as for push_body.
@@ -633,7 +633,7 @@ actor BlockExplorer {
       #lookup_txid : () -> (txid : Blob);
       #push_bodies : () -> (batch : [(Blob, [Blob], Blob)]);
       #push_body : () -> (block_hash_internal : Blob, txids : [Blob], coinbase_tx : Blob);
-      #push_body_chunk : () -> (block_hash_internal : Blob, offset : Nat, coinbase_tx : ?Blob, txids : [Blob], proof : [Blob]);
+      #push_body_chunk : () -> (block_hash_internal : Blob, start : Chain.ChunkStart, txids : [Blob], proof : [Blob]);
       #push_coinbases_backfill : () -> (start_height : Nat, coinbases : [Blob]);
       #push_fork_coinbase : () -> (block_hash_internal : Blob, coinbase : Blob);
       #push_header : () -> (raw_header : Blob);
@@ -676,8 +676,8 @@ actor BlockExplorer {
         isOk(chain.validatePushBody(hash, txids, cb));
       };
       case (#push_body_chunk fetch) {
-        let (hash, offset, cb, txids, proof) = fetch();
-        isOk(chain.validatePushBodyChunk(hash, offset, cb, txids, proof));
+        let (hash, start, txids, proof) = fetch();
+        isOk(chain.validatePushBodyChunk(hash, start, txids, proof));
       };
       case (#push_bodies fetch) {
         let batch = fetch();

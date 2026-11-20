@@ -188,6 +188,11 @@ module {
     first_tx_index : Nat;
   };
 
+  // Where a chunk starts. The first chunk carries the block's raw
+  // witness-stripped coinbase and so starts at offset 0; every later chunk
+  // carries its offset (> 0) instead, which must be the txid tip's.
+  public type ChunkStart = { #coinbase_tx : Blob; #offset : Nat };
+
   // Where the next txid upload goes: the block at `height` (the body tip,
   // = bodiesNextHeight), from transaction `offset` within it (0 unless a
   // chunked upload is in progress).
@@ -1504,14 +1509,18 @@ module {
   };
 
   // The checks shared by pushBodyChunk and its inspect mirror, up to (not
-  // including) the Merkle verification: block, height, offset, upload state
-  // and coinbase binding. Returns the block and the upload in progress, if
-  // any (none means this is a valid-looking first chunk). The offset check
-  // is what lets concurrent uploaders lose a race cheaply: a chunk that does
-  // not start at the txid tip is rejected before anything is hashed.
-  func checkBodyChunk(self : State, blockHashInternal : Blob, offset : Nat, coinbaseTx : ?Blob, txids : [Blob]) : Result.Result<(StoredBlock, ?BodyChunks), Text> {
+  // including) the Merkle verification: block, height, start and coinbase
+  // binding. Returns the block and the upload in progress, if any (none
+  // means this is a valid-looking first chunk). The offset check is what
+  // lets concurrent uploaders lose a race cheaply: a chunk that does not
+  // start at the txid tip is rejected before anything is hashed.
+  func checkBodyChunk(self : State, blockHashInternal : Blob, start : ChunkStart, txids : [Blob]) : Result.Result<(StoredBlock, ?BodyChunks), Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     if (txids.size() == 0) return #err("empty chunk");
+    switch (start) {
+      case (#offset 0) return #err("the chunk at offset 0 is the first one and carries the coinbase: use #coinbase_tx");
+      case _ {};
+    };
     let b = switch (byHashInternal(self, blockHashInternal)) {
       case (?b) b;
       case null return #err("unknown block header hash");
@@ -1528,27 +1537,22 @@ module {
         debug_show self.bodiesNextHeight # ", got " # debug_show b.height
       );
     };
-    let tipOffset = switch (self.bodyChunks) {
-      case (?p) p.verifier.count.toNat();
-      case null 0;
-    };
-    if (offset != tipOffset) {
-      return #err(
-        "offset " # debug_show offset # " does not match the txid tip: height " #
-        debug_show b.height # ", offset " # debug_show tipOffset
-      );
-    };
-    // From here offset == tipOffset: 0 for a first chunk, else the upload's.
-    switch (self.bodyChunks, coinbaseTx) {
-      case (null, null) #err("the first chunk (offset 0) must carry the coinbase");
-      case (?_, ?_) #err("only the first chunk (offset 0) carries the coinbase");
-      case (?p, null) {
+    func mismatch(offset : Nat, tip : Nat) : Result.Result<(StoredBlock, ?BodyChunks), Text> = #err(
+      "offset " # debug_show offset # " does not match the txid tip: height " #
+      debug_show b.height # ", offset " # debug_show tip
+    );
+    switch (self.bodyChunks, start) {
+      case (?p, #offset o) {
+        let tip = p.verifier.count.toNat();
+        if (o != tip) return mismatch(o, tip);
         // Invariant: an upload in progress is for the canonical block at
         // bodiesNextHeight, which is `b`.
         if (p.hash != b.hash) Runtime.trap("pushBodyChunk: upload in progress is for another block");
         #ok((b, ?p));
       };
-      case (null, ?cb) {
+      case (?p, #coinbase_tx _) mismatch(0, p.verifier.count.toNat());
+      case (null, #offset o) mismatch(o, 0);
+      case (null, #coinbase_tx cb) {
         // Depth-of-tree binding, as in pushBody: a coinbase longer than 64
         // bytes whose dSHA is txids[0] makes leaf 0 a real transaction,
         // which fixes the depth of the tree and the level of every leaf.
@@ -1562,29 +1566,28 @@ module {
   };
 
   // Accept the next chunk of the canonical body at the body tip: the txids
-  // from position `offset` of the block on, which must be the txid tip's
-  // offset (0 for the first chunk, which carries the coinbase). `proof` is
+  // from the txid tip's offset on, named by `start` (the coinbase for the
+  // first chunk, the offset for later ones). `proof` is
   // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
   // m) for a chunk ending at leaf m); empty for the last chunk. A rejected
   // chunk leaves the upload as it was.
   public func pushBodyChunk(
     self : State,
     blockHashInternal : Blob,
-    offset : Nat,
-    coinbaseTx : ?Blob,
+    start : ChunkStart,
     txids : [Blob],
     proof : [Blob],
   ) : Result.Result<BodyChunkOk, Text> {
-    let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, offset, coinbaseTx, txids)) {
+    let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
       case (#ok x) x;
       case (#err e) return #err(e);
     };
     let p : BodyChunks = switch (inProgress) {
       case (?p) p;
       case null {
-        let cb = switch (coinbaseTx) {
-          case (?cb) cb;
-          case null Runtime.trap("pushBodyChunk: first chunk without coinbase");
+        let cb = switch (start) {
+          case (#coinbase_tx cb) cb;
+          case (#offset _) Runtime.trap("pushBodyChunk: first chunk without coinbase");
         };
         {
           hash = b.hash;
@@ -1645,12 +1648,11 @@ module {
   public func validatePushBodyChunk(
     self : State,
     blockHashInternal : Blob,
-    offset : Nat,
-    coinbaseTx : ?Blob,
+    start : ChunkStart,
     txids : [Blob],
     proof : [Blob],
   ) : Result.Result<(), Text> {
-    let (_, inProgress) = switch (checkBodyChunk(self, blockHashInternal, offset, coinbaseTx, txids)) {
+    let (_, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
       case (#ok x) x;
       case (#err e) return #err(e);
     };
