@@ -609,12 +609,18 @@ actor BlockExplorer {
   //                                    Merkle root (over the 200M budget on
   //                                    large blocks).
   //   push_bodies                    — validate the first (hash, txids, cb).
-  //   push_body_chunk                — Chain.validatePushBodyChunk: block,
-  //                                    start == txid tip (#coinbase_tx with
-  //                                    dSHA == txids[0], or #offset),
-  //                                    and for the last chunk (empty proof)
-  //                                    the mutated-body check. No Merkle
-  //                                    verification, as for push_body.
+  //   push_body_chunk                — Chain.validatePushBodyChunk: the
+  //                                    call's own verification code
+  //                                    (Chain.verifyBodyChunk) without its
+  //                                    writes: block, start == txid tip
+  //                                    (#coinbase_tx with dSHA == txids[0],
+  //                                    or #offset), and the chunk and proof
+  //                                    against the Merkle root (Example 10,
+  //                                    equal-sibling checks included, so
+  //                                    mutated bodies too). Unlike push_body
+  //                                    this fits: ~140M for a 5000-txid
+  //                                    chunk; chunks over ~7000 txids exceed
+  //                                    the budget and are rejected.
   //   push_coinbases_backfill        — Chain.validatePushCoinbasesBackfillFirst.
   //   push_fork_coinbase             — Chain.validatePushForkCoinbase.
   //   set_cycles_per_call            — controller-only (match real check).

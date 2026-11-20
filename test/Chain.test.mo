@@ -876,6 +876,14 @@ func errHas(r : Result.Result<Chain.BodyChunkOk, Text>, needle : Text) : Bool {
   switch r { case (#err e) Text.contains(e, #text needle); case _ false };
 };
 
+// The inspect check of a chunk (validatePushBodyChunk): ok, or an error with `needle`.
+func inspectOk(r : Result.Result<(), Text>) : Bool {
+  switch r { case (#ok _) true; case _ false };
+};
+func inspectErr(r : Result.Result<(), Text>, needle : Text) : Bool {
+  switch r { case (#err e) Text.contains(e, #text needle); case _ false };
+};
+
 func tipIs(c : Chain.State, height : Nat, offset : Nat) : Bool {
   let t = c.txidTip();
   t.height == height and t.offset == offset;
@@ -1009,31 +1017,69 @@ suite(
     );
 
     test(
+      "inspect checks coinbase, chunk and proof against the root",
+      func() {
+        // The check verifies on the upload's own verifier, so on the IC it
+        // runs only in inspect, whose state changes are discarded. Here a
+        // passing check of a later chunk advances the verifier, so it is the
+        // last call on its chain; failing checks leave the verifier as it was.
+        let b = body7();
+        let (c, h) = chainWithBlock1(b);
+        // A whole body at once, empty proof.
+        assert inspectOk(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), b.txids, []));
+
+        let first = slice(b.txids, 0, 3);
+        let p3 = ChunkProof.proof(b.txids, 3);
+        // First chunk: the coinbase, then the chunk with its proof. Each check
+        // uses a fresh verifier and stores nothing.
+        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
+        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, ChunkProof.proof(b.txids, 4)), "does not verify");
+        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, []), "does not verify");
+        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), [b.txids[0], txid(40), b.txids[2]], p3), "does not verify");
+        assert inspectOk(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3));
+        assert tipIs(c, 1, 0);
+        assert c.totalIndexedTxids() == 1;
+
+        // A later chunk is verified against the upload's tree so far.
+        switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
+        let next = slice(b.txids, 3, 5);
+        let p5 = ChunkProof.proof(b.txids, 5);
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(3), [txid(40), txid(41)], p5), "does not verify");
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(3), next, p3), "does not verify");
+        assert tipIs(c, 1, 3);
+        // The real call still accepts the chunk after the failed checks.
+        switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
+        // The last chunk must end at the last leaf.
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 6), []), "does not verify");
+        assert inspectOk(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 7), []));
+
+        // A middle chunk with a non-empty proof passes, on a second chain.
+        let (c2, h2) = chainWithBlock1(b);
+        switch (chunk(c2, h2, b, 0, 3)) { case (#ok _) {}; case _ assert false };
+        assert inspectOk(c2.validatePushBodyChunk(h2, #offset(3), next, p5));
+      },
+    );
+
+    test(
       "a mutated last chunk is rejected by the verifier and by inspect",
       func() {
         // Real [cb, t2, t3]; mutated [cb, t2, t3, t3] has the same root.
         let b = body(1, [txid(2), txid(3)]);
         let (c, h) = chainWithBlock1(b);
         let mutated : [Blob] = [b.txids[0], b.txids[1], b.txids[2], b.txids[2]];
-        // Whole mutated list at once: inspect flags it from the txids alone.
-        switch (c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, [])) {
-          case (#err e) assert Text.contains(e, #text "mutated");
-          case _ assert false;
-        };
+        // Whole mutated list at once: the equal siblings t3, t3 fail the
+        // verification, in inspect as in the call.
+        assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, []), "does not verify");
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), mutated, []), "does not verify");
 
         // In chunks: the first two are a genuine prefix (same proof as the
         // real block), the duplicate tail comes in the last chunk.
         switch (chunk(c, h, b, 0, 2)) { case (#ok ok) assert ok.offset == 2; case _ assert false };
         let tail : [Blob] = [b.txids[2], b.txids[2]];
-        switch (c.validatePushBodyChunk(h, #offset(2), tail, [])) {
-          case (#err e) assert Text.contains(e, #text "mutated");
-          case _ assert false;
-        };
+        assert inspectErr(c.validatePushBodyChunk(h, #offset(2), tail, []), "does not verify");
         assert errHas(c.pushBodyChunk(h, #offset(2), tail, []), "does not verify");
         assert tipIs(c, 1, 2);
-        // The real last chunk passes both.
-        switch (c.validatePushBodyChunk(h, #offset(2), [b.txids[2]], [])) { case (#ok _) {}; case _ assert false };
+        // The real last chunk is accepted.
         switch (chunk(c, h, b, 2, 3)) { case (#ok ok) assert ok.complete and ok.offset == 3; case _ assert false };
       },
     );
