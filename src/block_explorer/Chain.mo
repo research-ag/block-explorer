@@ -43,6 +43,7 @@ import Set "mo:core/Set";
 
 import Prim "mo:⛔";
 
+import Hasher "mo:sha2/Hasher/Sha256";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
@@ -228,6 +229,10 @@ module {
     // A chunked upload of the body at `bodiesNextHeight`, if one is in
     // progress. See BodyChunks.
     var bodyChunks : ?BodyChunks;
+    // The hashers of the chunk verifier, allocated once and used by the
+    // upload of block after block (ChunksForward.withHashers); at most one
+    // upload is in progress at a time. See newChunkHashers.
+    chunkHashers : [var Hasher.Hasher];
     // Timestamps of the canonical tip and its ancestors, newest first, at
     // most MTP_WINDOW (11) entries — the median-time-past context. Kept in
     // sync on every canonical append / reorg so the per-push MTP check never
@@ -309,6 +314,7 @@ module {
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var bodyChunks = null;
+    chunkHashers = newChunkHashers();
     var recentTimes = [];
     var workMemo = { bits = 0 : Nat32; target = 0; work = 0 };
     var initialized = false;
@@ -1498,6 +1504,9 @@ module {
   // progress.
   let CHUNK_MAX_DEPTH : Nat = 20;
 
+  // The pool of State.chunkHashers: CHUNK_MAX_DEPTH + 2 hashers (22).
+  public func newChunkHashers() : [var Hasher.Hasher] = ChunksForward.hashers(CHUNK_MAX_DEPTH);
+
   public func txidTip(self : State) : TxidTip {
     {
       height = self.bodiesNextHeight;
@@ -1569,8 +1578,9 @@ module {
   // from the txid tip's offset on, named by `start` (the coinbase for the
   // first chunk, the offset for later ones). `proof` is
   // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
-  // m) for a chunk ending at leaf m); empty for the last chunk. A rejected
-  // chunk leaves the upload as it was.
+  // m) for a chunk ending at leaf m); empty for the last chunk. A chunk that
+  // fails a check before the verification returns #err; one that does not
+  // verify TRAPS (see verifyBodyChunk). Either way the upload stays as it was.
   // Wrapper without the measurement side-channel (tests and anywhere else);
   // `pushBodyChunkWithObserver` with `onVerifyInsns = null`.
   public func pushBodyChunk(
@@ -1584,8 +1594,10 @@ module {
   // `onVerifyInsns` is an optional observer that gets the Wasm instruction
   // delta across `verifyChunk` (the chunk's Merkle work: hashing its leaves
   // and closing the tree with the proof; with an empty proof a full root
-  // check, the counterpart of pushBody's `onMerkleInsns`). Called whether
-  // the chunk verifies or not, but not on the checks that return before it.
+  // check, the counterpart of pushBody's `onMerkleInsns`). Not called on the
+  // checks that return before it; for a chunk that does not verify it is
+  // called, but the trap that follows rolls the gauge update back with the
+  // rest, so in effect only verified chunks are measured.
   public func pushBodyChunkWithObserver(
     self : State,
     blockHashInternal : Blob,
@@ -1594,43 +1606,11 @@ module {
     proof : [Blob],
     onVerifyInsns : ?((Nat64) -> ()),
   ) : Result.Result<BodyChunkOk, Text> {
-    let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
+    let (b, p, isFirst) = switch (verifyBodyChunk(self, blockHashInternal, start, txids, proof, onVerifyInsns)) {
       case (#ok x) x;
       case (#err e) return #err(e);
     };
-    let p : BodyChunks = switch (inProgress) {
-      case (?p) p;
-      case null {
-        let cb = switch (start) {
-          case (#coinbase_tx cb) cb;
-          case (#offset _) Runtime.trap("pushBodyChunk: first chunk without coinbase");
-        };
-        {
-          hash = b.hash;
-          height = b.height;
-          firstTxIndex = self.txTrie.size();
-          coinbase = cb;
-          verifier = ChunksForward.new(HeaderValue.merkleOf(b.value), CHUNK_MAX_DEPTH);
-        };
-      };
-    };
-    let isFirst = p.verifier.count == 0;
-    // Check the chunk against the header's root. A rejected chunk leaves the
-    // verifier as it was (Example 10 copies its peaks back), and a rejected
-    // first chunk's fresh verifier is simply dropped. The performance counter
-    // is read only with an observer: it traps in wasi test mode.
-    let verified = switch (onVerifyInsns) {
-      case null p.verifier.verifyChunk(txids, proof);
-      case (?f) {
-        let v0 = Prim.performanceCounter(0);
-        let ok = p.verifier.verifyChunk(txids, proof);
-        f(Prim.performanceCounter(0) - v0);
-        ok;
-      };
-    };
-    if (not verified) {
-      return #err("chunk does not verify against the block's merkle root with this proof");
-    };
+    // Verified: from here on only the writes.
     if (isFirst) {
       // Record F in the header value and start the upload.
       Headers.put(self.headerTrie, b.height, HeaderValue.withFirstTxIndex(b.value, p.firstTxIndex));
@@ -1663,14 +1643,88 @@ module {
     });
   };
 
-  // Inspect mirror of pushBodyChunk: every check before the Merkle
-  // verification, which is skipped as for push_body (a whole block in one
-  // chunk would go over the 200M inspect budget). For a chunk that claims to
-  // be the last (empty proof) it adds the mutated-body check (CVE-2012-2459)
-  // over the complete list, the loop of BitcoinMutation.mutated with the
-  // earlier chunks' txids read back from the trie (at most log2(n) reads).
-  // The real call rejects the same lists with Example 10's equal-sibling
-  // checks, or, for a list that repeats a txid elsewhere, on the root.
+  // The verification of a chunk, the one code path for pushBodyChunk and its
+  // inspect mirror: checkBodyChunk (the block, the start against the txid tip
+  // and, for the first chunk, the coinbase: dSHA == txids[0], > 64 bytes),
+  // then the chunk and its proof against the header's root with Example 10,
+  // its equal-sibling checks included (which also reject a mutated block,
+  // CVE-2012-2459, where the duplicated tail meets its original).
+  //
+  // It writes nothing: no stable structure and no field of State. It returns
+  // the upload the chunk belongs to (for the first chunk a new one, not yet
+  // stored) and whether the chunk is its first. Its verifier is the one
+  // thing that changes: a chunk that verifies advances it.
+  //
+  // A chunk that does not verify TRAPS: our Example 10 keeps no backup of the
+  // peaks, so the verifier is left half-updated, and the trap rolls that back
+  // with the rest of the call (in inspect: rejects the message). The checks
+  // of checkBodyChunk, which come before the verifier is touched, return
+  // #err as before.
+  //
+  // `onVerifyInsns` gets the instruction delta across verifyChunk (see
+  // pushBodyChunkWithObserver). The performance counter is read only with an
+  // observer: it traps in wasi test mode.
+  func verifyBodyChunk(
+    self : State,
+    blockHashInternal : Blob,
+    start : ChunkStart,
+    txids : [Blob],
+    proof : [Blob],
+    onVerifyInsns : ?((Nat64) -> ()),
+  ) : Result.Result<(StoredBlock, BodyChunks, Bool), Text> {
+    let (b, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
+      case (#ok x) x;
+      case (#err e) return #err(e);
+    };
+    let p : BodyChunks = switch (inProgress) {
+      case (?p) p;
+      case null {
+        let cb = switch (start) {
+          case (#coinbase_tx cb) cb;
+          case (#offset _) Runtime.trap("pushBodyChunk: first chunk without coinbase");
+        };
+        {
+          hash = b.hash;
+          height = b.height;
+          firstTxIndex = self.txTrie.size();
+          coinbase = cb;
+          // On the pool: no upload is in progress, so nothing else uses it.
+          verifier = ChunksForward.withHashers(HeaderValue.merkleOf(b.value), self.chunkHashers);
+        };
+      };
+    };
+    let isFirst = p.verifier.count == 0;
+    let verified = switch (onVerifyInsns) {
+      case null p.verifier.verifyChunk(txids, proof);
+      case (?f) {
+        let v0 = Prim.performanceCounter(0);
+        let ok = p.verifier.verifyChunk(txids, proof);
+        f(Prim.performanceCounter(0) - v0);
+        ok;
+      };
+    };
+    if (not verified) {
+      Runtime.trap("pushBodyChunk: chunk does not verify against the block's merkle root with this proof");
+    };
+    #ok((b, p, isFirst));
+  };
+
+  // Inspect mirror of pushBodyChunk: verifyBodyChunk, the same verification
+  // the call runs, without the writes that follow it there. One check of the
+  // call is part of those writes and so is not mirrored: the trap on a txid
+  // that is already indexed (a cross-block duplicate), which the trie only
+  // reports when the txid is added.
+  //
+  // A chunk that verifies advances the upload's verifier (see
+  // verifyBodyChunk). In inspect that is discarded with all its state
+  // changes; called outside inspect (the tests), a passing check must not be
+  // followed by pushBodyChunk on the same state.
+  //
+  // Cost: about 25.5K instructions per txid for the verification (measured
+  // on mainnet, push_body_chunk_insns_verify), plus about 1.9K for decoding
+  // the arguments: a 5000-txid chunk takes about 140M of inspect's 200M, and
+  // a chunk of more than about 7000 txids runs out of the budget and is
+  // rejected at ingress.
   public func validatePushBodyChunk(
     self : State,
     blockHashInternal : Blob,
@@ -1678,32 +1732,10 @@ module {
     txids : [Blob],
     proof : [Blob],
   ) : Result.Result<(), Text> {
-    let (_, inProgress) = switch (checkBodyChunk(self, blockHashInternal, start, txids)) {
-      case (#ok x) x;
-      case (#err e) return #err(e);
+    switch (verifyBodyChunk(self, blockHashInternal, start, txids, proof, null)) {
+      case (#ok _) #ok(());
+      case (#err e) #err(e);
     };
-    if (proof.size() == 0) {
-      let (m, f) = switch (inProgress) {
-        case (?p) (p.verifier.count.toNat(), p.firstTxIndex);
-        case null (0, 0);
-      };
-      // The txid at position i of the block.
-      func at(i : Nat) : Blob {
-        if (i >= m) return txids[i - m];
-        switch (self.txTrie.get(f + i)) {
-          case (?(k, _)) k;
-          case null Runtime.trap("validatePushBodyChunk: missing txid " # debug_show (f + i));
-        };
-      };
-      let n = m + txids.size();
-      let last = at(n - 1 : Nat);
-      var back = 1;
-      while (back < n) {
-        if (at(n - 1 - back : Nat) == last) return #err("mutated transaction list (CVE-2012-2459)");
-        back *= 2;
-      };
-    };
-    #ok(());
   };
 
   // --- Coinbase storage helpers ---------------------------------------
