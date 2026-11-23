@@ -6,22 +6,27 @@ every deploy (the git history of this directory is the deploy log).
 
 | field | value |
 |---|---|
-| commit | `b9019905ee17e98e5fc734a91ab6d0977959cef8` (`b901990`, PR #14) |
+| commit | `32827e4f1dd332a370203b9f3b8e703e8d2ff428` (`32827e4`, PR #15) |
 | date | 2026-11-23 |
 | canister upgraded | block_explorer only (header_fetcher and frontend unchanged) |
-| module hash | `0x4132d2fb2be7e1995bab4694e7ff53727e0a37a671dd760b4f8537f21bf07052` |
+| module hash | `0x805832a10af1ae9f2c61b4c018b609817ab8c83f00ad8fd6b67eb411db1203a9` |
 | moc | 2.2.4 (core 2.7.0) |
 | moc flags | `--max-stable-pages 2097152` (128 GiB) — block_explorer only |
 | block_explorer | `5alk6-kyaaa-aaaag-ay2sq-cai` |
 | header_fetcher | `5hkmk-haaaa-aaaag-ay2sa-cai` |
 | frontend (assets) | `5jibc-4qaaa-aaaag-ay2ta-cai` |
 
-> Stable layout is **unchanged** from the previous deploy (`7e21ac0`, the
-> same day, module hash `0x717dc835…661a`): `block_explorer.most` is
-> byte-identical, no migration. That deploy ran a one-off migration
-> (`Migration.mo`, removed since): `chunkHashers` became
-> `chunkTree : Peaks.Peaks`, and the verifier of a chunked upload in
-> progress became a `Chunks.Verifier` on that tree.
+> This deploy ran a one-off migration (`Migration.mo`, with
+> `(with migration = Migration.run)` in `main.mo`): enumeration 0.3 changed
+> its tree's node layout, so the tree of `chain.uploaders.enum` was
+> converted from `?({#R; #B}, Tree, Nat, Tree)` to `?(Tree, Nat32, Tree)`.
+> The key array passed through, so every uploader kept its id. The
+> `block_explorer.most` here still lists the migration's input type
+> (`in chain : OldState`); it drops out once the migration is removed.
+>
+> The previous deploy (`b901990`, module hash `0x4132d2fb…7052`) had no
+> migration. The one before (`7e21ac0`) ran the mmr migration:
+> `chunkHashers` became `chunkTree : Peaks.Peaks`.
 
 ## Dependency versions baked into the stable layout
 
@@ -33,6 +38,9 @@ every deploy (the git history of this directory is the deploy log).
   verifier of an upload in progress a `Chunks.Verifier`. mmr declares these
   shapes part of its interface and lists a change to one as "Breaking (stored
   state)" in its CHANGELOG: check that before bumping it.
+- `enumeration` 0.3.1: `uploaders.enum` persists as its `BlobEnumeration`.
+  0.3.0 changed the tree's node layout (listed as "Breaking (stable type)"
+  in its CHANGELOG) and needed a migration: check that before bumping it.
 - `sha2` 0.3.3: its `Hasher` (`[var Nat16]` of length 16) sits inside
   `Peaks.Peaks`, so its representation is part of the stable layout too.
 - `heaviest-chain` (`./packages/heaviest-chain`): `forks` persists as its

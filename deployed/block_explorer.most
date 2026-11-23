@@ -1,7 +1,7 @@
-// Version: 1.0.0
-type BlobEnum__494823798 = BlobEnumeration__373145820;
-type BlobEnumeration__373145820 =
-  {var array : [var Blob]; var size_ : Nat; var tree : Tree__1044591825};
+// Version: 3.0.0
+type BlobEnum__494823798 = BlobEnumeration__57647759;
+type BlobEnumeration__57647759 =
+  {var array : [var Blob]; var size_ : Nat; var tree : Tree__772734212};
 type BodyChunks__525190424 =
   {
     coinbase : Blob;
@@ -61,6 +61,35 @@ type Nat__565224867 = Nat__920180692;
 type Nat__920180692 = Nat;
 type Node__1010487028<K, V> =
   {#internal : Internal__1060388275<K, V>; #leaf : Leaf__8515789<K, V>};
+type OldBlobEnumeration__792225459 =
+  {var array : [var Blob]; var size_ : Nat; var tree : OldTree__773653649};
+type OldState__174340003 =
+  {
+    var bodiesNextHeight : Nat;
+    var bodyChunks : ?BodyChunks__525190424;
+    chunkTree : Peaks__270657632;
+    var coinbaseBackfillCursor : Nat;
+    coinbasesRegion : Store__98599885;
+    var coinbasesRegionSize : Nat64;
+    forks : ForkStore__323451345<ForkBlock__550065393>;
+    headerTrie : Enumeration__286404848;
+    var initialized : Bool;
+    var recentTimes : [Nat32];
+    reorgLog : List__837846721<ReorgEvent__808211227>;
+    var tipWork : Nat;
+    txTrie : Enumeration__286404848;
+    uploaders : OldUploaders__624911721;
+    var workMemo : WorkMemo__1019139925
+  };
+type OldTree__773653649 =
+  ?({#B; #R}, OldTree__773653649, Nat, OldTree__773653649);
+type OldUploaders__624911721 =
+  {
+    var anonymousCount : Nat;
+    blocks : List__837846721<List__837846721<Blob>>;
+    enum : OldBlobEnumeration__792225459;
+    ofHash : Map__175655829<Blob, Nat>
+  };
 type Peaks__270657632 =
   {var count : Nat64; double : Bool; hasher : [var Hasher__900105027]};
 type Region__387902757 = Region;
@@ -113,7 +142,7 @@ type StableTrie__775205806 =
   };
 type State__681818436 = [var Nat16];
 type Store__98599885 = Region__626854913;
-type Tree__1044591825 = ?({#B; #R}, Tree__1044591825, Nat, Tree__1044591825);
+type Tree__772734212 = ?(Tree__772734212, Nat32, Tree__772734212);
 type Uploaders__952700464 =
   {
     var anonymousCount : Nat;
@@ -132,7 +161,10 @@ type Verifier__78634957 =
     tree : Peaks__270657632
   };
 type WorkMemo__1019139925 = {bits : Nat32; target : Nat; work : Nat};
-actor {
+actor ({
+  in chain : OldState__174340003;
+  stable var cyclesPerCall : Nat
+}, {
   stable chain :
     {
       var bodiesNextHeight : Nat;
@@ -152,4 +184,4 @@ actor {
       var workMemo : WorkMemo__1019139925
     };
   stable var cyclesPerCall : Nat
-};
+});
