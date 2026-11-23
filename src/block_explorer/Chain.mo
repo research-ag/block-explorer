@@ -166,7 +166,7 @@ module {
 
   // A canonical block body arriving in chunks (push_body_chunk), verified
   // chunk by chunk with mmr's Chunks, on State.chunkTree and without a
-  // backup (Chunks.onTree). At most one exists, and it is always for the
+  // backup (Bitcoin.verifierOn). At most one exists, and it is always for the
   // canonical block at `bodiesNextHeight`. The accepted txids are already in
   // `txTrie`, from `firstTxIndex` on (and F is written into the block's
   // HeaderValue on the first chunk); `bodiesNextHeight` advances, and the
@@ -231,7 +231,7 @@ module {
     // progress. See BodyChunks.
     var bodyChunks : ?BodyChunks;
     // The tree of the chunk verifier, allocated once and used by the
-    // upload of block after block (Chunks.onTree); at most one upload is
+    // upload of block after block (Bitcoin.verifierOn); at most one upload is
     // in progress at a time. See newChunkTree.
     chunkTree : Peaks.Peaks;
     // Timestamps of the canonical tip and its ancestors, newest first, at
@@ -1488,7 +1488,7 @@ module {
   // A canonical body may also arrive in chunks, in order, each verified on
   // arrival against the header's Merkle root with the uploader's proof for
   // the leaves still to come: mmr's Chunks, on one tree kept across blocks
-  // and without a backup (Chunks.onTree), with the proofs of mmr's
+  // and without a backup (Bitcoin.verifierOn), with the proofs of mmr's
   // Prove.rightPeaks. The
   // first chunk carries the raw coinbase, which pins txids[0] to a real
   // transaction and with it the depth of the tree; later chunks carry none.
@@ -1693,9 +1693,9 @@ module {
           firstTxIndex = self.txTrie.size();
           coinbase = cb;
           // On the tree: no upload is in progress, so nothing else uses
-          // it. Bitcoin's tree: an odd last node paired with itself (#copy),
-          // equal siblings rejected (checked).
-          verifier = Chunks.onTree(HeaderValue.merkleOf(b.value), self.chunkTree, null, #copy, true);
+          // it. Bitcoin's rules: double SHA-256, an odd last node paired
+          // with itself, equal siblings rejected.
+          verifier = Bitcoin.verifierOn(HeaderValue.merkleOf(b.value), self.chunkTree);
         };
       };
     };

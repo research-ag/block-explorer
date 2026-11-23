@@ -1,11 +1,10 @@
 // Tests for the chunk verifier of push_body_chunk as the explorer sets it up:
-// mmr's Chunks on one tree kept across blocks, without a backup
-// (Chunks.onTree(root, tree, null, #copy, true)). Valid chunkings verify and
-// complete; a wrong proof, a wrong leaf, a premature last chunk and mutated
-// blocks (CVE-2012-2459) are rejected; a chunk rejected after its leaves went
-// in breaks the verifier, which is why the canister traps on it; a chunk
-// refused before that leaves the verifier usable. Proofs come from mmr's
-// Prove.rightPeaks.
+// mmr's Bitcoin.verifierOn, one tree kept across blocks, no backup. Valid
+// chunkings verify and complete; a wrong proof, a wrong leaf, a premature
+// last chunk and mutated blocks (CVE-2012-2459) are rejected; a chunk
+// rejected after its leaves went in breaks the verifier, which is why the
+// canister traps on it; a chunk refused before that leaves the verifier
+// usable. Proofs come from mmr's Prove.rightPeaks.
 
 import { test; suite } "mo:test";
 import Array "mo:core/Array";
@@ -35,11 +34,11 @@ func slice(a : [Blob], lo : Nat, hi : Nat) : [Blob] = Array.tabulate<Blob>(hi - 
 func proofFor(t : [Blob], m : Nat) : [Blob] = Prove.rightPeaks(Bitcoin.levels(t), m);
 
 // The explorer's verifier for the block with root `root`, on `tree`.
-func onTree(root : Blob, tree : Peaks.Peaks) : Chunks.Verifier = Chunks.onTree(root, tree, null, #copy, true);
+func verifierOn(root : Blob, tree : Peaks.Peaks) : Chunks.Verifier = Bitcoin.verifierOn(root, tree);
 
 func newTree() : Peaks.Peaks = Peaks.withDepth(MAX_DEPTH, true);
 
-func fresh(root : Blob) : Chunks.Verifier = onTree(root, newTree());
+func fresh(root : Blob) : Chunks.Verifier = verifierOn(root, newTree());
 
 // A verifier for the real list `t`, with the chunks [0, b1), [b1, b2), ...
 // accepted. True if they all verified.
@@ -54,7 +53,7 @@ func verifierAfter(t : [Blob], bounds : [Nat]) : (Chunks.Verifier, Bool) {
 };
 
 suite(
-  "Chunks (onTree, no backup)",
+  "Chunks (Bitcoin.verifierOn, no backup)",
   func() {
 
     test(
@@ -76,7 +75,7 @@ suite(
         let tree = newTree();
         // Block A (13 txids) in chunks of 4.
         let a = txids(13);
-        let va = onTree(Bitcoin.merkleRoot(a), tree);
+        let va = verifierOn(Bitcoin.merkleRoot(a), tree);
         var lo = 0;
         for (hi in [4, 8, 12, 13].values()) {
           assert va.verifyChunk(slice(a, lo, hi), proofFor(a, hi));
@@ -85,20 +84,20 @@ suite(
         assert va.complete();
         // Block B: a rejected chunk leaves the tree half-updated ...
         let b = Array.tabulate<Blob>(9, func(i) = txid(100 + i));
-        let bad = onTree(Bitcoin.merkleRoot(b), tree);
+        let bad = verifierOn(Bitcoin.merkleRoot(b), tree);
         assert bad.verifyChunk(slice(b, 0, 3), proofFor(b, 3));
         assert not bad.verifyChunk(slice(b, 3, 6), proofFor(b, 3));
         assert bad.broken();
         // ... and a new verifier on the same tree still verifies B.
-        let vb = onTree(Bitcoin.merkleRoot(b), tree);
+        let vb = verifierOn(Bitcoin.merkleRoot(b), tree);
         assert vb.count() == 0;
         assert vb.verifyChunk(slice(b, 0, 5), proofFor(b, 5));
         assert vb.verifyChunk(slice(b, 5, 9), []);
         assert vb.complete();
         // Block C (a single txid) in one chunk, and A again.
         let c = [txid(200)];
-        assert onTree(Bitcoin.merkleRoot(c), tree).verifyChunk(c, []);
-        assert onTree(Bitcoin.merkleRoot(a), tree).verifyChunk(a, []);
+        assert verifierOn(Bitcoin.merkleRoot(c), tree).verifyChunk(c, []);
+        assert verifierOn(Bitcoin.merkleRoot(a), tree).verifyChunk(a, []);
       },
     );
 
