@@ -57,7 +57,7 @@ suite(
             if (i == 79) bs[i] ^ 0xff else bs[i];
           },
         );
-        let mblob = Blob.fromArray(mutated);
+        let mblob = mutated.toBlob();
         let p = switch (Header.parseHeader(mblob)) {
           case (?p) p;
           case null { assert false; return };
@@ -71,7 +71,7 @@ suite(
       "nBits = 0 is rejected",
       func() {
         // Hash itself doesn't matter; target=0 path triggers immediately.
-        let zeros = Blob.fromArray(Array.tabulate<Nat8>(32, func(_) = 0));
+        let zeros = Array.tabulate<Nat8>(32, func(_) = 0).toBlob();
         assert not isOk(Header.checkPoW(zeros, 0));
       },
     );
@@ -88,7 +88,7 @@ suite(
     func leToNat(h : Blob) : Nat {
       var acc : Nat = 0;
       var i = h.size();
-      while (i > 0) { i -= 1; acc := acc * 256 + Nat8.toNat(h[i]) };
+      while (i > 0) { i -= 1; acc := acc * 256 + h[i].toNat() };
       acc;
     };
     func refCheck(h : Blob, bits : Nat32) : Bool {
@@ -99,8 +99,8 @@ suite(
     };
     func mkHash(bytes : [(Nat, Nat8)]) : Blob {
       let mut = VarArray.repeat<Nat8>(0, 32);
-      for ((i, v) in bytes.vals()) { mut[i] := v };
-      Blob.fromVarArray(mut);
+      for ((i, v) in bytes.values()) { mut[i] := v };
+      mut.toBlob();
     };
     func agree(h : Blob, bits : Nat32) {
       let got = switch (Header.checkPoW(h, bits)) {

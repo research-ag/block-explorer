@@ -73,12 +73,12 @@ actor BlockExplorer {
   // Per-call Wasm instruction counters on push_body. Snapshot the ic0
   // performanceCounter(0) at three points — method entry (approximates the
   // Candid-decode cost of the `(blob, vec blob, blob)` argument), across
-  // the Merkle.root(txids) call inside chain.pushBody (handed in as a
+  // the Bitcoin.merkleRoot(txids) call inside chain.pushBody (handed in as a
   // callback-friendly ?Gauge; the inner function updates it with the delta
   // across the merkle recompute), and at method exit (total message
   // instructions). Over time this gives us the real distribution of each
   // cost: in particular how close push_body comes to the 40B update cap
-  // and whether Merkle.root alone would still fit in the 200M inspect
+  // and whether Bitcoin.merkleRoot alone would still fit in the 200M inspect
   // budget on today's traffic (the sha2 bench put it at ~158M for a
   // 6467-tx block).
   transient let pushBodyInsnsEntry = tracker.newGauge("push_body_insns_entry", [], []);
@@ -325,7 +325,7 @@ actor BlockExplorer {
   };
 
   // Closure that `Chain.pushBody` calls with the Wasm instruction delta
-  // across the Merkle.root(txids) step. Lives here so Chain.mo doesn't
+  // across the Bitcoin.merkleRoot(txids) step. Lives here so Chain.mo doesn't
   // need to know about promtracker. On the duplicate / early-rejection
   // paths that never reach the merkle recompute, Chain won't call this,
   // so the gauge only tracks real recomputation costs.
@@ -345,7 +345,7 @@ actor BlockExplorer {
   // Chunked upload of the canonical body at the txid tip (see txid_tip):
   // the block's txids in order, each chunk verified on arrival against the
   // header's Merkle root with `proof`, the proof for the leaves after the
-  // chunk (Example 10 of the sha2 package; empty for the last chunk).
+  // chunk (mmr's Prove.rightPeaks; empty for the last chunk).
   // `start` is #coinbase_tx (the raw witness-stripped coinbase) for the
   // first chunk, which starts at offset 0, and #offset (> 0, the txid tip's
   // offset) for every later chunk. A whole body in one chunk with an empty
@@ -615,7 +615,7 @@ actor BlockExplorer {
   //                                    writes: block, start == txid tip
   //                                    (#coinbase_tx with dSHA == txids[0],
   //                                    or #offset), and the chunk and proof
-  //                                    against the Merkle root (Example 10,
+  //                                    against the Merkle root (Chunks,
   //                                    equal-sibling checks included, so
   //                                    mutated bodies too). Unlike push_body
   //                                    this fits: ~140M for a 5000-txid

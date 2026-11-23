@@ -26,7 +26,7 @@ suite(
           0x1b0404cb : Nat32,
           0x180696bf : Nat32,
         ];
-        for (b in bits.vals()) {
+        for (b in bits.values()) {
           let t = Header.nBitsToTarget(b);
           let b2 = Header.targetToNBits(t);
           assert b == b2;

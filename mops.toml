@@ -1,6 +1,6 @@
 [toolchain]
-moc = "2.0.0"
-wasmtime = "36.0.9"
+moc = "2.2.4"
+wasmtime = "51.0.0"
 wasm-opt = "133"
 
 # Binaryen's wasm-opt pass applied by `mops build` after candid metadata
@@ -20,9 +20,12 @@ main = "src/block_explorer/main.mo"
 args = ["--max-stable-pages", "2097152"]
 
 [dependencies]
-core = "2.6.2"
+core = "2.7.0"
 sha2 = "0.3.3"
-promtracker = "1.0.1"
+# Merkle mountain ranges (Bitcoin tree, chunk verification). Not on mops yet:
+# the initial-package branch, pinned to a commit.
+mmr = "https://github.com/research-ag/mmr#initial-package@8cbebae7c5d89c7849e827212bc6e6b6a5da533f"
+promtracker = "1.0.2"
 stable-trie = "0.2.0"
 enumeration = "0.2.2"
 btc = "./packages/btc"

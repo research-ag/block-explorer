@@ -146,7 +146,7 @@ let raws : [Blob] = do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   measure("push (full, validated)", raws.size(), func(i) {
-    switch (Chain.push(c, SHA, raws[i], NOW, UPLOADER)) {
+    switch (c.push(SHA, raws[i], NOW, UPLOADER)) {
       case (#ok _) {};
       case (#err m) Prim.trap("push failed at " # debug_show i # ": " # m);
     };
@@ -157,7 +157,7 @@ do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   measure("pushUnchecked        ", raws.size(), func(i) {
-    switch (Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER)) {
+    switch (c.pushUnchecked(SHA, raws[i], NOW, UPLOADER)) {
       case (#ok _) {};
       case (#err m) Prim.trap("pushUnchecked failed: " # m);
     };
@@ -191,10 +191,10 @@ measure("HeaderValue.encode   ", 1000, func(_) {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   var i = 0;
-  while (i < raws.size()) { ignore Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER); i += 1 };
-  measure("tipBlock (storedCanonAt)", 1000, func(_) { ignore Chain.tipBlock(c) });
-  measure("mediantimeOf(tip) [lastNTimestamps 11]", 1000, func(_) { ignore Chain.mediantimeOf(c, Chain.tipBlock(c)) });
-  measure("byHashInternal(known)", 1000, func(_) { ignore Chain.byHashInternal(c, hash0) });
+  while (i < raws.size()) { ignore c.pushUnchecked(SHA, raws[i], NOW, UPLOADER); i += 1 };
+  measure("tipBlock (storedCanonAt)", 1000, func(_) { ignore c.tipBlock() });
+  measure("mediantimeOf(tip) [lastNTimestamps 11]", 1000, func(_) { ignore c.mediantimeOf(c.tipBlock()) });
+  measure("byHashInternal(known)", 1000, func(_) { ignore c.byHashInternal(hash0) });
   measure("validateAgainst      ", 1000, func(_) {
     ignore Header.validateAgainst(raws[1], Header.bitsOf(raws[1]), parsed0.prev_hash, 0, NOW);
   });
@@ -204,7 +204,7 @@ do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   var i = 0;
-  while (i < raws.size()) { ignore Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER); i += 1 };
+  while (i < raws.size()) { ignore c.pushUnchecked(SHA, raws[i], NOW, UPLOADER); i += 1 };
   // a realistic 76-byte value blob: encode with a real-sized cumWork (~2^95)
   let parsed1 = switch (Header.parseHeader(raws[0])) { case (?p) p; case null Prim.trap("p") };
   let v = HeaderValue.encode({
@@ -250,7 +250,7 @@ do {
 
   let ups = Uploaders_.empty();
   let P = Principal.fromText("5yxw4-okdhg-twoqv-qjshi-uammo-kn5yg-guwus-r3u4m-codgm-3lle6-oae");
-  measure("Uploaders.record         ", 1000, func(i) { Uploaders_.record(ups, keys[i], P) });
+  measure("Uploaders.record         ", 1000, func(i) { ups.record(keys[i], P) });
 
   measure("bytesToHexBE (PushOk hex)", 1000, func(_) { ignore Header.bytesToHex(Header.reverse32(hash0)) });
 };
@@ -277,11 +277,11 @@ do {
 do {
   let c = Chain.fromRootHex(ROOT_HEX, 28);
   var i = 0;
-  while (i < raws.size()) { ignore Chain.pushUnchecked(c, SHA, raws[i], NOW, UPLOADER); i += 1 };
+  while (i < raws.size()) { ignore c.pushUnchecked(SHA, raws[i], NOW, UPLOADER); i += 1 };
   var k = 0;
   while (k < raws.size()) {
     let h = Header.headerHashBlob(SHA, raws[k]);
-    switch (Chain.byHashInternal(c, h)) {
+    switch (c.byHashInternal(h)) {
       case (?b) assert Chain.rawHeaderOf(b) == raws[k];
       case null Prim.trap("missing block");
     };
@@ -302,16 +302,16 @@ do {
   // (RAWS in this file start at 300001, so read genesis-chain headers from fixtures:
   //  reuse Header.GENESIS_HEADER_HEX chain via pushUnchecked of real headers is not
   //  available here — instead assert on the genesis-only chain plus synthetic checks.)
-  switch (Chain.rehashChain(c, SHA, 0, 0)) {
+  switch (c.rehashChain(SHA, 0, 0)) {
     case (?h) assert h == Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
     case null assert false;
   };
   // Single-block sub-range seeded from the stored parent: block 0 alone.
-  switch (Chain.rehashChain(c, SHA, 0, 0)) {
+  switch (c.rehashChain(SHA, 0, 0)) {
     case (?h) assert h == Header.headerHashBlob(SHA, Header.hexToBlob(Header.GENESIS_HEADER_HEX));
     case null assert false;
   };
-  assert Chain.rehashChain(c, SHA, 0, 1) == null; // beyond tip
-  assert Chain.rehashChain(c, SHA, 1, 0) == null; // start > n
+  assert c.rehashChain(SHA, 0, 1) == null; // beyond tip
+  assert c.rehashChain(SHA, 1, 0) == null; // start > n
   ignore i; ignore N;
 };

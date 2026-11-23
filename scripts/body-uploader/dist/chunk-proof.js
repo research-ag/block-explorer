@@ -1,18 +1,18 @@
 /**
  * Proofs for the canister's chunked body upload (push_body_chunk), which
- * verifies each chunk with Example 10 of the sha2 package
- * (BitcoinChunksForward.mo).
+ * verifies each chunk with mmr's Chunks (mo:mmr/Chunks), on one tree kept
+ * across blocks and without a backup (Bitcoin.verifierOn). Proofs of more than 20
+ * peaks are refused; a block's tree is at most 15 levels deep.
  *
  * A chunk that ends at leaf m (the leaves 0 .. m-1 are then in) comes with the
  * proof for m: the right siblings of leaf m-1's ancestors in Bitcoin's Merkle
  * tree, as far as they contain at least one real leaf, lowest first. That is
- * what BitcoinChunkProof.proof(txids, m) computes by building the tree from
- * the right (Example 8); here it is read off the tree's levels, which the
- * uploader builds once per block. The proof for m = n (the last chunk) is
- * empty.
+ * what mmr's Prove.rightPeaks(levels, m) computes; here, as there, it is read
+ * off the tree's levels, which the uploader builds once per block. The proof
+ * for m = n (the last chunk) is empty.
  *
- * `closes` repeats the canister's check off-chain (BitcoinChunksForward
- * `closes`, equal-sibling rejections included), so a bad proof is caught
+ * `closes` repeats the canister's check off-chain (mmr's Peaks.close with
+ * Bitcoin's rule, equal-sibling rejections included), so a bad proof is caught
  * before it costs an update call.
  *
  * Everything is in Bitcoin's INTERNAL byte order (raw double-SHA-256 output).
@@ -66,7 +66,7 @@ export function rootOf(levels) {
  * ancestor of leaf m-1 has index i = (m-1) >> k; when i is even it is a left
  * child, and its right sibling, index i+1, goes into the proof if the level
  * has it, i.e. if it contains a real leaf. (Beyond that Bitcoin's rule pairs
- * the node with itself, and Example 10 does that without a proof peak; a
+ * the node with itself, and the canister does that without a proof peak; a
  * proof that contained such a peak would be rejected as an equal sibling.)
  */
 export function proofFor(levels, m) {
@@ -83,7 +83,7 @@ export function proofFor(levels, m) {
 }
 /**
  * The canister's check, off-chain: close the tree over the first m leaves with
- * `proof` and compare with the root, as BitcoinChunksForward `closes` does.
+ * `proof` and compare with the root, as the canister does (mmr's Peaks.close).
  * The tree's peaks are the nodes at the 1-bits of m: at level k, index
  * (m >> k) - 1. Starting from the lowest peak and going up, the node in hand
  * meets a peak of the tree on its left where m has a 1-bit, else the next

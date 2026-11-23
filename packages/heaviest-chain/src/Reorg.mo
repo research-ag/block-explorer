@@ -87,11 +87,11 @@ module {
     var curId = newTipId;
     var commonHeight : Nat = 0;
     label findCommon loop {
-      let b = switch (ForkStore.get(forks, curId)) {
+      let b = switch (forks.get(curId)) {
         case (?x) x;
         case null Runtime.trap("maybeReorg: branch block missing from fork store");
       };
-      List.add(branch, b);
+      branch.add(b);
       let h = acc.height(b);
       // The branch block's parent is canonical iff the canonical entry at
       // its known height matches — an index read, not a search.
@@ -115,24 +115,24 @@ module {
     // 3. Roll back the canonical tip into the fork store, one block at a time.
     while (canon.tipHeight() > commonHeight) {
       let d = canon.demoteTip();
-      ForkStore.add(forks, acc.id(d), acc.height(d), d);
+      forks.add(acc.id(d), acc.height(d), d);
     };
 
     hooks.afterRollback();
 
     // 4. Append the new branch (ancestor-first) into the canonical chain.
-    var k = List.size(branch);
+    var k = branch.size();
     while (k > 0) {
       k -= 1;
-      let b = switch (List.get(branch, k)) {
+      let b = switch (branch.get(k)) {
         case (?x) x;
         case null Runtime.trap("maybeReorg: branch index out of range");
       };
-      ForkStore.remove(forks, acc.id(b), acc.height(b));
+      forks.remove(acc.id(b), acc.height(b));
       canon.append(b);
     };
 
-    ?{ commonHeight; displaced; promoted = List.size(branch) };
+    ?{ commonHeight; displaced; promoted = branch.size() };
   };
 
 };

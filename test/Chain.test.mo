@@ -21,13 +21,14 @@ import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Text "mo:core/Text";
 import VarArray "mo:core/VarArray";
+import Nat "mo:core/Nat";
 
 import Sha256 "mo:sha2/Sha256";
 
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
-import Merkle "mo:btc/Merkle";
-import ChunkProof "mo:btc/BitcoinChunkProof";
+import Bitcoin "mo:mmr/Bitcoin";
+import Prove "mo:mmr/Prove";
 import HeaderValue "../src/block_explorer/HeaderValue";
 
 // --- Test harness ---------------------------------------------------------
@@ -54,10 +55,10 @@ func push(c : Chain.State, raw : Blob) : Result.Result<Chain.PushOk, Text> =
 // --- Synthetic-header builder --------------------------------------------
 
 func writeLE32(buf : [var Nat8], off : Nat, v : Nat32) {
-  buf[off] := Nat8.fromNat(Nat32.toNat(v & 0xff));
-  buf[off + 1] := Nat8.fromNat(Nat32.toNat((v >> 8) & 0xff));
-  buf[off + 2] := Nat8.fromNat(Nat32.toNat((v >> 16) & 0xff));
-  buf[off + 3] := Nat8.fromNat(Nat32.toNat((v >> 24) & 0xff));
+  buf[off] := Nat32.toNat(v & 0xff).toNat8();
+  buf[off + 1] := Nat32.toNat((v >> 8) & 0xff).toNat8();
+  buf[off + 2] := Nat32.toNat((v >> 16) & 0xff).toNat8();
+  buf[off + 3] := Nat32.toNat((v >> 24) & 0xff).toNat8();
 };
 
 func writeBlob(buf : [var Nat8], off : Nat, src : Blob) {
@@ -75,7 +76,7 @@ func mkHeader(prevHash : Blob, bits : Nat32, time : Nat32, nonce : Nat32) : Blob
   writeLE32(buf, 68, time);
   writeLE32(buf, 72, bits);
   writeLE32(buf, 76, nonce);
-  Blob.fromVarArray(buf);
+  buf.toBlob();
 };
 
 // Like mkHeader but with an explicit merkle root (offset 36), so we can
@@ -88,23 +89,13 @@ func mkHeaderM(prevHash : Blob, bits : Nat32, time : Nat32, nonce : Nat32, merkl
   writeLE32(buf, 68, time);
   writeLE32(buf, 72, bits);
   writeLE32(buf, 76, nonce);
-  Blob.fromVarArray(buf);
+  buf.toBlob();
 };
 
 func hashOf(raw : Blob) : Blob = Header.headerHashBlob(SHA, raw);
 
 // A 32-byte txid that is all `b` bytes.
-func txid(b : Nat8) : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = b));
-
-// Concatenate 32-byte txids into a flat hashes blob.
-func txids(bs : [Nat8]) : Blob {
-  Blob.fromArray(
-    Array.tabulate<Nat8>(
-      bs.size() * 32,
-      func(i) = bs[i / 32],
-    )
-  );
-};
+func txid(b : Nat8) : Blob = Array.tabulate<Nat8>(32, func _ = b).toBlob();
 
 // --- Coinbase helpers for push_body ---------------------------------------
 //
@@ -112,8 +103,8 @@ func txids(bs : [Nat8]) : Blob {
 // first txid, and the bytes must be > 64 long (the depth-of-tree pin: every
 // internal merkle node is `dSHA(exactly 64 bytes)`, so dSHA of any other
 // length cannot land on an internal-node value except by SHA-256 preimage).
-// These helpers synthesize both from a `k` seed: `cbTx(k)` is a 65-byte
-// blob, `cbTxid(k)` its double-SHA256. Different seeds for different blocks'
+// `cbTx(k)` synthesizes the bytes from a `k` seed: a 65-byte blob whose
+// double-SHA256 (`dSha`) is the txid. Different seeds for different blocks'
 // coinbases, same seed to make two blocks share a coinbase txid (BIP30).
 
 func dSha(b : Blob) : Blob {
@@ -125,10 +116,8 @@ func dSha(b : Blob) : Blob {
 // Synthetic raw coinbase payload keyed by `k`. 65 bytes (just over the
 // on-chain 64-byte floor; the exact length does not matter beyond that).
 func cbTx(k : Nat) : Blob {
-  Blob.fromArray(Array.tabulate<Nat8>(65, func(i) = Nat8.fromNat((k * 7 + i * 13) % 256)));
+  Array.tabulate<Nat8>(65, func(i) = Nat.toNat8((k * 7 + i * 13) % 256)).toBlob();
 };
-
-func cbTxid(k : Nat) : Blob = dSha(cbTx(k));
 
 // Build a block body: coinbase txid at position 0 (derived from seed `k`)
 // then the given `others` at positions 1..n-1. Returns the push_body call's
@@ -151,7 +140,7 @@ func body(k : Nat, others : [Blob]) : Body {
     coinbaseTx = cb;
     coinbaseTxid = cbid;
     txids = txids;
-    root = Merkle.root(txids);
+    root = Bitcoin.merkleRoot(txids);
   };
 };
 
@@ -232,7 +221,7 @@ suite(
           let raw = mkHeader(prev, EASY_BITS, 1_700_000_000 + i, i);
           switch (push(c, raw)) {
             case (#ok ok) {
-              assert ok.height == Nat32.toNat(i);
+              assert ok.height == i.toNat();
               assert ok.is_canonical;
               assert ok.reorg_depth == 0;
             };
@@ -320,7 +309,7 @@ suite(
         ignore push(c, mkHeader(hashOf(a1), EASY_BITS, 1_700_000_003, 222)); // c2
         let fs = c.forks();
         assert fs.size() == 2;
-        for (f in fs.vals()) {
+        for (f in fs.values()) {
           assert f.tip_height == 2 and f.length == 1 and f.branch_height == 1;
         };
         assert c.allAt(2).size() == 3;
@@ -382,7 +371,7 @@ suite(
 
         // exactly one canonical block at height 3
         var canon = 0;
-        for (b in c.allAt(3).vals()) if (Chain.isOnCanonical(b)) canon += 1;
+        for (b in c.allAt(3).values()) if (Chain.isOnCanonical(b)) canon += 1;
         assert canon == 1;
 
         // Reorg log records the event.
@@ -476,7 +465,7 @@ suite(
         let stats = c.uploaderStats();
         var anonCount = 0;
         var mineCount = 0;
-        for ((p, n) in stats.vals()) {
+        for ((p, n) in stats.values()) {
           if (p == ANON) anonCount := n;
           if (p == UPLOADER) mineCount := n;
         };
@@ -565,7 +554,7 @@ suite(
         // B and C are now the fork tips (each one block off the ancestor).
         let fs = c.forks();
         assert fs.size() == 2;
-        for (f in fs.vals()) assert f.tip_height == 1 and f.length == 1 and f.branch_height == 0;
+        for (f in fs.values()) assert f.tip_height == 1 and f.length == 1 and f.branch_height == 0;
 
         // Reorg log records the switch.
         let log = c.reorgs();
@@ -749,7 +738,7 @@ suite(
         // Unknown header (any coinbase_tx is fine — the lookup fails first).
         // Unknown header: coinbase bytes don't matter, lookup fails first.
         // Use a > 64-byte stub so the length pin doesn't fire ahead of it.
-        let stub65 = Blob.fromArray(Array.tabulate<Nat8>(65, func _ = 0));
+        let stub65 = Array.tabulate<Nat8>(65, func _ = 0).toBlob();
         switch (c.pushBody(txid(99), [txid(99)], stub65)) { case (#err _) {}; case _ assert false };
         // Correct body indexes it.
         switch (c.pushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) { case (#ok ok) assert ok.canonical_indexed and not ok.duplicate; case _ assert false };
@@ -773,9 +762,9 @@ suite(
 
         // Pair two 32-byte Blobs into one 64-byte Blob.
         func cat64(a : Blob, b : Blob) : Blob {
-          Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i - 32]));
+          Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i - 32]).toBlob();
         };
-        // Attack: upload the TWO level-1 node hashes as "leaves". Merkle.root
+        // Attack: upload the TWO level-1 node hashes as "leaves". The root
         // over two level-1 nodes DOES equal the real merkle root (collapsing
         // from level 1 produces the same root). To satisfy the "coinbase
         // hashes to txids[0]" check the attacker would need bytes whose dSHA
@@ -788,34 +777,32 @@ suite(
         // 64-byte concatenation of txids 0 and 1 — rejected by the length pin.
         let attackCoinbase = cat64(b1.txids[0], b1.txids[1]);
         switch (c.pushBody(hashOf(h1), fakeTxids, attackCoinbase)) {
-          case (#err e) assert Text.contains(e, #text "> 64 bytes");
+          case (#err e) assert e.contains(#text "> 64 bytes");
           case _ assert false;
         };
 
         // Attack variant: pad the "coinbase" to 65 bytes to clear the length
         // check. Now dSHA no longer hits level1Left — the coinbase-hash check
         // rejects it before the merkle recompute even runs.
-        let paddedAttack = Blob.fromArray(
-          Array.tabulate<Nat8>(65, func(i) = if (i < 64) attackCoinbase[i] else 0)
-        );
+        let paddedAttack = Array.tabulate<Nat8>(65, func(i) = if (i < 64) attackCoinbase[i] else 0).toBlob();
         switch (c.pushBody(hashOf(h1), fakeTxids, paddedAttack)) {
-          case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
+          case (#err e) assert e.contains(#text "coinbase_tx hash does not match");
           case _ assert false;
         };
 
         // Coinbase that doesn't hash to txids[0] — honest-length (> 64) but
         // mismatched bytes.
-        let wrongCb = Blob.fromArray(Array.tabulate<Nat8>(80, func(i) = Nat8.fromNat(i)));
+        let wrongCb = Array.tabulate<Nat8>(80, func(i) = i.toNat8()).toBlob();
         switch (c.pushBody(hashOf(h1), b1.txids, wrongCb)) {
-          case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
+          case (#err e) assert e.contains(#text "coinbase_tx hash does not match");
           case _ assert false;
         };
 
         // Short coinbase (<=64 bytes) is rejected by the length pin even if
         // its dSHA would otherwise match something.
-        let shortCb = Blob.fromArray(Array.tabulate<Nat8>(64, func(_) = 0));
+        let shortCb = Array.tabulate<Nat8>(64, func(_) = 0).toBlob();
         switch (c.pushBody(hashOf(h1), b1.txids, shortCb)) {
-          case (#err e) assert Text.contains(e, #text "> 64 bytes");
+          case (#err e) assert e.contains(#text "> 64 bytes");
           case _ assert false;
         };
 
@@ -837,14 +824,14 @@ suite(
         // Real 3-tx body [cb, t2, t3]; the mutated [cb, t2, t3, t3] has the
         // same Merkle root (CVE-2012-2459) and a valid coinbase binding, so
         // only the mutation check stops it. pushBody traps on it inside
-        // Merkle.root, which a test cannot observe; inspect returns #err.
+        // Bitcoin.merkleRoot, which a test cannot observe; inspect returns #err.
         let b1 = body(1, [txid(2), txid(3)]);
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b1.root);
         ignore push(c, h1);
         let mutatedTxids : [Blob] = [b1.txids[0], b1.txids[1], b1.txids[2], b1.txids[2]];
 
         switch (c.validatePushBody(hashOf(h1), mutatedTxids, b1.coinbaseTx)) {
-          case (#err e) assert Text.contains(e, #text "mutated");
+          case (#err e) assert e.contains(#text "mutated");
           case _ assert false;
         };
         switch (c.validatePushBody(hashOf(h1), b1.txids, b1.coinbaseTx)) {
@@ -853,7 +840,7 @@ suite(
         };
         // Coinbase binding is still checked first.
         switch (c.validatePushBody(hashOf(h1), mutatedTxids, cbTx(7))) {
-          case (#err e) assert Text.contains(e, #text "coinbase_tx hash does not match");
+          case (#err e) assert e.contains(#text "coinbase_tx hash does not match");
           case _ assert false;
         };
       },
@@ -861,19 +848,23 @@ suite(
   },
 );
 
-// --- Chunked body uploads (push_body_chunk, Example 10) --------------------
+// --- Chunked body uploads (push_body_chunk, mmr Chunks) --------------------
 
 func slice(a : [Blob], lo : Nat, hi : Nat) : [Blob] = Array.tabulate<Blob>(hi - lo : Nat, func(i) = a[lo + i]);
+
+// The proof for a chunk of `txids` that ends at leaf m: the peaks to the
+// right of leaf m - 1, lowest first (empty for m = n).
+func proofFor(txids : [Blob], m : Nat) : [Blob] = Prove.rightPeaks(Bitcoin.levels(txids), m);
 
 // Upload a chunk [lo, hi) of `b` with the proof for the leaves after it; the
 // coinbase goes with the chunk at offset 0.
 func chunk(c : Chain.State, hash : Blob, b : Body, lo : Nat, hi : Nat) : Result.Result<Chain.BodyChunkOk, Text> {
   let start : Chain.ChunkStart = if (lo == 0) #coinbase_tx(b.coinbaseTx) else #offset(lo);
-  c.pushBodyChunk(hash, start, slice(b.txids, lo, hi), ChunkProof.proof(b.txids, hi));
+  c.pushBodyChunk(hash, start, slice(b.txids, lo, hi), proofFor(b.txids, hi));
 };
 
 func errHas(r : Result.Result<Chain.BodyChunkOk, Text>, needle : Text) : Bool {
-  switch r { case (#err e) Text.contains(e, #text needle); case _ false };
+  switch r { case (#err e) e.contains(#text needle); case _ false };
 };
 
 // The inspect check of a chunk (validatePushBodyChunk): ok, or an error with `needle`.
@@ -881,7 +872,7 @@ func inspectOk(r : Result.Result<(), Text>) : Bool {
   switch r { case (#ok _) true; case _ false };
 };
 func inspectErr(r : Result.Result<(), Text>, needle : Text) : Bool {
-  switch r { case (#err e) Text.contains(e, #text needle); case _ false };
+  switch r { case (#err e) e.contains(#text needle); case _ false };
 };
 
 func tipIs(c : Chain.State, height : Nat, offset : Nat) : Bool {
@@ -965,11 +956,11 @@ suite(
       func() {
         // A chunk that does not verify traps (it cannot be undone without a
         // backup of the peaks), which a test cannot catch: those rejections
-        // are tested on the verifier itself, packages/btc/test/ChunksForward.
+        // are tested on the verifier itself, test/Chunks.test.mo.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         let first = slice(b.txids, 0, 3);
-        let p3 = ChunkProof.proof(b.txids, 3);
+        let p3 = proofFor(b.txids, 3);
 
         assert errHas(c.pushBodyChunk(h, #offset(0), first, p3), "use #coinbase_tx");
         assert errHas(c.pushBodyChunk(h, #offset(1), first, p3), "does not match the txid tip");
@@ -981,7 +972,7 @@ suite(
 
         switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
         let next = slice(b.txids, 3, 5);
-        let p5 = ChunkProof.proof(b.txids, 5);
+        let p5 = proofFor(b.txids, 5);
         // A lost race: the same first chunk again, or a chunk for an old offset.
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3), "does not match the txid tip");
         assert errHas(c.pushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
@@ -1021,14 +1012,14 @@ suite(
         // runs only in inspect, whose state changes are discarded. Here a
         // passing check of a later chunk advances the verifier, so it is the
         // last call on its chain. A chunk that does not verify traps, here as
-        // in the call; see packages/btc/test/ChunksForward for those.
+        // in the call; see test/Chunks.test.mo for those.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         // A whole body at once, empty proof.
         assert inspectOk(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), b.txids, []));
 
         let first = slice(b.txids, 0, 3);
-        let p3 = ChunkProof.proof(b.txids, 3);
+        let p3 = proofFor(b.txids, 3);
         // First chunk: the coinbase, then the chunk with its proof. Each check
         // uses a fresh verifier and stores nothing.
         assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
@@ -1040,7 +1031,7 @@ suite(
         // Later chunks are verified against the upload's tree so far.
         switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
         let next = slice(b.txids, 3, 5);
-        let p5 = ChunkProof.proof(b.txids, 5);
+        let p5 = proofFor(b.txids, 5);
         assert inspectErr(c.validatePushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
         switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
         assert inspectOk(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 7), []));
@@ -1076,7 +1067,7 @@ suite(
           case (#ok ok) assert ok.complete and ok.offset == 2;
           case _ assert false;
         };
-        assert c.chunkHashers.size() == 22;
+        assert c.chunkTree.hasher.size() == 22;
       },
     );
 
@@ -1122,7 +1113,7 @@ suite(
         assert c.forkBodyCount() == 0;
         assert c.txCountAt(0) == ?1;
         // An old chunk of the displaced block is now for a fork block.
-        assert errHas(c.pushBodyChunk(h, #offset(3), slice(b.txids, 3, 5), ChunkProof.proof(b.txids, 5)), "canonical blocks only");
+        assert errHas(c.pushBodyChunk(h, #offset(3), slice(b.txids, 3, 5), proofFor(b.txids, 5)), "canonical blocks only");
 
         // The new block 1 uploads from scratch.
         switch (chunk(c, hashOf(x1), bB, 0, 3)) {

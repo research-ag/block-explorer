@@ -17,7 +17,7 @@ suite(
           "deadbeef",
           "0123456789abcdef",
         ];
-        for (s in samples.vals()) {
+        for (s in samples.values()) {
           let blob = Header.hexToBlob(s);
           let back = Header.bytesToHex(blob);
           assert back == s;

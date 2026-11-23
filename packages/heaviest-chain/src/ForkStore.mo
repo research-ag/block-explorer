@@ -27,7 +27,7 @@ module {
 
   // Fork-block ids at `height` (siblings), or [].
   public func at<B>(self : ForkStore<B>, height : Nat) : [Blob] {
-    switch (Map.get<Nat, [Blob]>(self.byHeight, Nat.compare, height)) {
+    switch (self.byHeight.get<Nat, [Blob]>(Nat.compare, height)) {
       case (?xs) xs;
       case null [];
     };
@@ -35,48 +35,48 @@ module {
 
   // Insert a brand-new fork block (updates both maps).
   public func add<B>(self : ForkStore<B>, id : Blob, height : Nat, b : B) {
-    Map.add<Blob, B>(self.byId, Blob.compare, id, b);
+    self.byId.add<Blob, B>(Blob.compare, id, b);
     let cur = at(self, height);
     let next = Array.tabulate<Blob>(
       cur.size() + 1,
       func(i) = if (i < cur.size()) cur[i] else id,
     );
-    Map.add<Nat, [Blob]>(self.byHeight, Nat.compare, height, next);
+    self.byHeight.add<Nat, [Blob]>(Nat.compare, height, next);
   };
 
   // Overwrite an EXISTING fork block in place (same id/height) — e.g. to
   // attach a payload. Only the byId entry changes.
   public func update<B>(self : ForkStore<B>, id : Blob, b : B) {
-    Map.add<Blob, B>(self.byId, Blob.compare, id, b);
+    self.byId.add<Blob, B>(Blob.compare, id, b);
   };
 
   // Remove a fork block (updates both maps).
   public func remove<B>(self : ForkStore<B>, id : Blob, height : Nat) {
-    Map.remove<Blob, B>(self.byId, Blob.compare, id);
-    switch (Map.get<Nat, [Blob]>(self.byHeight, Nat.compare, height)) {
+    self.byId.remove<Blob, B>(Blob.compare, id);
+    switch (self.byHeight.get<Nat, [Blob]>(Nat.compare, height)) {
       case null {};
       case (?xs) {
-        let kept = Array.filter<Blob>(xs, func(x) = x != id);
+        let kept = xs.filter<Blob>(func(x) = x != id);
         if (kept.size() == 0) {
-          Map.remove<Nat, [Blob]>(self.byHeight, Nat.compare, height);
+          self.byHeight.remove<Nat, [Blob]>(Nat.compare, height);
         } else {
-          Map.add<Nat, [Blob]>(self.byHeight, Nat.compare, height, kept);
+          self.byHeight.add<Nat, [Blob]>(Nat.compare, height, kept);
         };
       };
     };
   };
 
   public func get<B>(self : ForkStore<B>, id : Blob) : ?B =
-    Map.get<Blob, B>(self.byId, Blob.compare, id);
+    self.byId.get<Blob, B>(Blob.compare, id);
 
   public func contains<B>(self : ForkStore<B>, id : Blob) : Bool =
-    Map.containsKey<Blob, B>(self.byId, Blob.compare, id);
+    self.byId.containsKey<Blob, B>(Blob.compare, id);
 
   // Number of fork blocks tracked.
-  public func size<B>(self : ForkStore<B>) : Nat = Map.size(self.byId);
+  public func size<B>(self : ForkStore<B>) : Nat = self.byId.size();
 
   // Iterate all (id, block) pairs.
   public func entries<B>(self : ForkStore<B>) : Iter.Iter<(Blob, B)> =
-    Map.entries(self.byId);
+    self.byId.entries();
 
 };

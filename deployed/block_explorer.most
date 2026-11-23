@@ -8,10 +8,13 @@ type BodyChunks__525190424 =
     firstTxIndex : Nat;
     hash : Blob;
     height : Nat;
-    verifier : Verifier__490165045
+    verifier : Verifier__78634957
   };
-type Data__44217153<K, V> = {var count : Nat__227979830; kvs : [var ?(K, V)]};
+type Data__1061330525<K, V> =
+  {var count : Nat__565224867; kvs : [var ?(K, V)]};
 type Enumeration__286404848 = StableTrie__1059179783;
+type Fill__175409016 =
+  {#copy; #skip; #zeros : {depth : ?Nat; table : [Blob]}};
 type ForkBlock__550065393 =
   {
     bits : Nat32;
@@ -29,11 +32,11 @@ type ForkBlock__550065393 =
 type ForkBody__1064556805 =
   {coinbase : ?Blob; firstTxIndex : Nat; txids : [Blob]};
 type ForkStore__323451345<B> =
-  {byHeight : Map__230067015<Nat, [Blob]>; byId : Map__230067015<Blob, B>};
+  {byHeight : Map__175655829<Nat, [Blob]>; byId : Map__175655829<Blob, B>};
 type Hasher__900105027 = State__681818436;
-type Internal__283199666<K, V> =
-  {children : [var ?Node__204828119<K, V>]; data : Data__44217153<K, V>};
-type Leaf__598469445<K, V> = {data : Data__44217153<K, V>};
+type Internal__1060388275<K, V> =
+  {children : [var ?Node__1010487028<K, V>]; data : Data__1061330525<K, V>};
+type Leaf__8515789<K, V> = {data : Data__1061330525<K, V>};
 type LinkedList__818741339 =
   {
     var count : Nat;
@@ -43,23 +46,25 @@ type LinkedList__818741339 =
     offset_base : Nat64;
     pointer_size : Nat
   };
-type List__355132335<T> =
+type List__837846721<T> = List__931548990<T>;
+type List__931548990<T> =
   {
-    var blockIndex : Nat__227979830;
+    var blockIndex : Nat__565224867;
     var blocks : [var [var ?T]];
-    var elementIndex : Nat__227979830
+    var elementIndex : Nat__565224867
   };
-type List__836382695<T> = List__355132335<T>;
-type Map__230067015<K, V> = Map__405889023<K, V>;
-type Map__405889023<K, V> = Map__603270868<K, V>;
-type Map__603270868<K, V> =
-  {var root : Node__204828119<K, V>; var size : Nat__227979830};
-type Nat__227979830 = Nat__920180692;
+type Map__175655829<K, V> = Map__975833162<K, V>;
+type Map__925935234<K, V> =
+  {var root : Node__1010487028<K, V>; var size : Nat__565224867};
+type Map__975833162<K, V> = Map__925935234<K, V>;
+type Nat__565224867 = Nat__920180692;
 type Nat__920180692 = Nat;
-type Node__204828119<K, V> =
-  {#internal : Internal__283199666<K, V>; #leaf : Leaf__598469445<K, V>};
+type Node__1010487028<K, V> =
+  {#internal : Internal__1060388275<K, V>; #leaf : Leaf__8515789<K, V>};
+type Peaks__270657632 =
+  {var count : Nat64; double : Bool; hasher : [var Hasher__900105027]};
 type Region__387902757 = Region;
-type Region__616970443 = Region__387902757;
+type Region__626854913 = Region__387902757;
 type ReorgEvent__808211227 =
   {
     common_height : Nat;
@@ -85,7 +90,7 @@ type StableTrie__775205806 =
     var leaf_count : Nat64;
     leaf_size : Nat64;
     var leaves_freeSpace : Nat64;
-    var leaves_region : Region__616970443;
+    var leaves_region : Region__626854913;
     loadMask : Nat64;
     max_address : Nat64;
     max_chain_depth : Nat64;
@@ -93,7 +98,7 @@ type StableTrie__775205806 =
     node_size : Nat64;
     node_size_ : Nat;
     var nodes_freeSpace : Nat64;
-    var nodes_region : Region__616970443;
+    var nodes_region : Region__626854913;
     offset_base : Nat64;
     padding : Nat64;
     pointer_size : Nat;
@@ -107,21 +112,24 @@ type StableTrie__775205806 =
     zero_leaf : Blob
   };
 type State__681818436 = [var Nat16];
-type Store__98599885 = Region__616970443;
+type Store__98599885 = Region__626854913;
 type Tree__1044591825 = ?({#B; #R}, Tree__1044591825, Nat, Tree__1044591825);
 type Uploaders__952700464 =
   {
     var anonymousCount : Nat;
-    blocks : List__836382695<List__836382695<Blob>>;
+    blocks : List__837846721<List__837846721<Blob>>;
     enum : BlobEnum__494823798;
-    ofHash : Map__230067015<Blob, Nat>
+    ofHash : Map__175655829<Blob, Nat>
   };
-type Verifier__490165045 =
+type Verifier__78634957 =
   {
-    var count : Nat64;
+    backup : ?Peaks__270657632;
+    checked : Bool;
     var done : Bool;
-    hasher : [var Hasher__900105027];
-    root : Blob
+    var failed : Bool;
+    fill : Fill__175409016;
+    root : Blob;
+    tree : Peaks__270657632
   };
 type WorkMemo__1019139925 = {bits : Nat32; target : Nat; work : Nat};
 actor {
@@ -129,7 +137,7 @@ actor {
     {
       var bodiesNextHeight : Nat;
       var bodyChunks : ?BodyChunks__525190424;
-      chunkHashers : [var Hasher__900105027];
+      chunkTree : Peaks__270657632;
       var coinbaseBackfillCursor : Nat;
       coinbasesRegion : Store__98599885;
       var coinbasesRegionSize : Nat64;
@@ -137,7 +145,7 @@ actor {
       headerTrie : Enumeration__286404848;
       var initialized : Bool;
       var recentTimes : [Nat32];
-      reorgLog : List__836382695<ReorgEvent__808211227>;
+      reorgLog : List__837846721<ReorgEvent__808211227>;
       var tipWork : Nat;
       txTrie : Enumeration__286404848;
       uploaders : Uploaders__952700464;

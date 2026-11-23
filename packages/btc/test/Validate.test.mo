@@ -76,7 +76,7 @@ suite(
     test(
       "mutated nonce fails proof-of-work",
       func() {
-        let bs = Blob.toArray(Header.hexToBlob(F.H_5));
+        let bs = Header.hexToBlob(F.H_5).toArray();
         let mutated = Array.tabulate<Nat8>(
           80,
           func(i) {
@@ -86,7 +86,7 @@ suite(
         let prevP = parsedAt(F.H_4);
         let prevHash = Header.headerHashBlob(SHA, Header.hexToBlob(F.H_4));
         let r = Header.validateAgainst(
-          Blob.fromArray(mutated),
+          mutated.toBlob(),
           prevP.bits,
           prevHash,
           0,
@@ -100,7 +100,7 @@ suite(
       "wrong prev_hash fails continuity",
       func() {
         let prevP = parsedAt(F.H_4);
-        let bogusHash = Blob.fromArray(Array.tabulate<Nat8>(32, func(_) = 0xaa));
+        let bogusHash = Array.tabulate<Nat8>(32, func(_) = 0xaa).toBlob();
         let r = Header.validateAgainst(
           Header.hexToBlob(F.H_5),
           prevP.bits,

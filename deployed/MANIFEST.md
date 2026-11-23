@@ -6,30 +6,37 @@ every deploy (the git history of this directory is the deploy log).
 
 | field | value |
 |---|---|
-| commit | `571ddf7f27ef8ac795100651affa7df8ad50f8cd` (`571ddf7`) |
-| date | 2026-06-15 |
-| moc | 1.7.0 |
+| commit | `b9019905ee17e98e5fc734a91ab6d0977959cef8` (`b901990`, PR #14) |
+| date | 2026-11-23 |
+| canister upgraded | block_explorer only (header_fetcher and frontend unchanged) |
+| module hash | `0x4132d2fb2be7e1995bab4694e7ff53727e0a37a671dd760b4f8537f21bf07052` |
+| moc | 2.2.4 (core 2.7.0) |
 | moc flags | `--max-stable-pages 2097152` (128 GiB) — block_explorer only |
 | block_explorer | `5alk6-kyaaa-aaaag-ay2sq-cai` |
 | header_fetcher | `5hkmk-haaaa-aaaag-ay2sa-cai` |
 | frontend (assets) | `5jibc-4qaaa-aaaag-ay2ta-cai` |
 
-> Stable layout is **unchanged** from the previous deploy (`a1bc103`): both
-> `.most` files are byte-identical. The only difference is the
-> `--max-stable-pages` flag (a runtime growth cap, not a stable type), which
-> raised the txid trie's ceiling from 4 GiB to 128 GiB.
+> Stable layout is **unchanged** from the previous deploy (`7e21ac0`, the
+> same day, module hash `0x717dc835…661a`): `block_explorer.most` is
+> byte-identical, no migration. That deploy ran a one-off migration
+> (`Migration.mo`, removed since): `chunkHashers` became
+> `chunkTree : Peaks.Peaks`, and the verifier of a chunked upload in
+> progress became a `Chunks.Verifier` on that tree.
 
 ## Dependency versions baked into the stable layout
 
-- `sha2` — vendored fork `./packages/sha2` (0.2.1 + reset-fix + word-level
-  primitives). `sha` is `transient`, so this does NOT affect stable memory.
-- **`stable-trie` — `#main`, resolved to v0.1.4. ⚠️ FLOATING.** This is the one
-  that matters: the two tries (`headerTrie`, `txTrie`) persist *as* this
-  package's stable type. `#main` is a moving ref with NO pinned commit in
-  mops.lock — a previous deploy ran an older stable-trie, and bumping to 0.1.4
-  changed the trie's on-disk layout, which is what caused the
-  `Memory-incompatible program upgrade` trap before this snapshot. **Pin
-  stable-trie to a fixed commit and bump it only with a migration plan.**
+- `stable-trie` 0.2.0: the two tries (`headerTrie`, `txTrie`) persist *as*
+  this package's stable type. An earlier bump of it changed the trie's
+  on-disk layout and caused a `Memory-incompatible program upgrade` trap.
+  Bump it only with a migration plan.
+- `mmr` (GitHub, pinned commit): `chunkTree` is a `Peaks.Peaks` and the
+  verifier of an upload in progress a `Chunks.Verifier`. mmr declares these
+  shapes part of its interface and lists a change to one as "Breaking (stored
+  state)" in its CHANGELOG: check that before bumping it.
+- `sha2` 0.3.3: its `Hasher` (`[var Nat16]` of length 16) sits inside
+  `Peaks.Peaks`, so its representation is part of the stable layout too.
+- `heaviest-chain` (`./packages/heaviest-chain`): `forks` persists as its
+  `ForkStore`.
 
 ## Files
 
