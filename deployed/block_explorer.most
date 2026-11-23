@@ -1,7 +1,7 @@
 // Version: 1.0.0
-type BlobEnum__494823798 = BlobEnumeration__373145820;
-type BlobEnumeration__373145820 =
-  {var array : [var Blob]; var size_ : Nat; var tree : Tree__1044591825};
+type BlobEnum__494823798 = BlobEnumeration__57647759;
+type BlobEnumeration__57647759 =
+  {var array : [var Blob]; var size_ : Nat; var tree : Tree__772734212};
 type BodyChunks__525190424 =
   {
     coinbase : Blob;
@@ -113,7 +113,7 @@ type StableTrie__775205806 =
   };
 type State__681818436 = [var Nat16];
 type Store__98599885 = Region__626854913;
-type Tree__1044591825 = ?({#B; #R}, Tree__1044591825, Nat, Tree__1044591825);
+type Tree__772734212 = ?(Tree__772734212, Nat32, Tree__772734212);
 type Uploaders__952700464 =
   {
     var anonymousCount : Nat;

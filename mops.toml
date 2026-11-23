@@ -27,7 +27,7 @@ sha2 = "0.3.3"
 mmr = "https://github.com/research-ag/mmr#initial-package@8cbebae7c5d89c7849e827212bc6e6b6a5da533f"
 promtracker = "1.0.2"
 stable-trie = "0.2.0"
-enumeration = "0.2.2"
+enumeration = "0.3.1"
 btc = "./packages/btc"
 heaviest-chain = "./packages/heaviest-chain"
 
