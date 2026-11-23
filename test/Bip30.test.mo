@@ -4,7 +4,6 @@
 // (91722/91880 and 91812/91842) and asserts counts, listings, attribution
 // (matches Esplora on both pairs) and trap-free locations. Slow (~18 s) —
 // the 92k-block build dominates.
-import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Debug "mo:core/Debug";
 import Nat8 "mo:core/Nat8";
@@ -12,6 +11,7 @@ import Nat32 "mo:core/Nat32";
 import Principal "mo:core/Principal";
 import Sha256 "mo:sha2/Sha256";
 import VarArray "mo:core/VarArray";
+import Nat "mo:core/Nat";
 
 import Header "mo:btc/Header";
 import Bitcoin "mo:mmr/Bitcoin";
@@ -24,10 +24,10 @@ let UP = Principal.fromText("aaaaa-aa");
 let EASY : Nat32 = 0x207fffff;
 
 func writeLE32(buf : [var Nat8], off : Nat, v : Nat32) {
-  buf[off] := Nat8.fromNat(Nat32.toNat(v & 0xff));
-  buf[off+1] := Nat8.fromNat(Nat32.toNat((v >> 8) & 0xff));
-  buf[off+2] := Nat8.fromNat(Nat32.toNat((v >> 16) & 0xff));
-  buf[off+3] := Nat8.fromNat(Nat32.toNat((v >> 24) & 0xff));
+  buf[off] := Nat32.toNat(v & 0xff).toNat8();
+  buf[off+1] := Nat32.toNat((v >> 8) & 0xff).toNat8();
+  buf[off+2] := Nat32.toNat((v >> 16) & 0xff).toNat8();
+  buf[off+3] := Nat32.toNat((v >> 24) & 0xff).toNat8();
 };
 func mkHeader(prev : Blob, time : Nat32, merkle : Blob) : Blob {
   let buf = VarArray.repeat<Nat8>(0, 80);
@@ -37,7 +37,7 @@ func mkHeader(prev : Blob, time : Nat32, merkle : Blob) : Blob {
   writeLE32(buf, 68, time);
   writeLE32(buf, 72, EASY);
   writeLE32(buf, 76, 0);
-  Blob.fromVarArray(buf);
+  buf.toBlob();
 };
 // Synthetic raw-coinbase payload per height — 65 bytes to clear the
 // canister's > 64-byte depth pin. The dSHA256 of this blob is the on-the-
@@ -45,16 +45,16 @@ func mkHeader(prev : Blob, time : Nat32, merkle : Blob) : Blob {
 // thereby share a coinbase txid, which is the BIP30 duplicate-pair setup.
 func rawCoinbaseFor(h : Nat) : Blob {
   let buf = VarArray.repeat<Nat8>(0x55, 65);
-  writeLE32(buf, 0, Nat32.fromNat(h % 0x1_0000_0000));
-  writeLE32(buf, 4, Nat32.fromNat(h / 256));
-  Blob.fromVarArray(buf);
+  writeLE32(buf, 0, Nat.toNat32(h % 0x1_0000_0000));
+  writeLE32(buf, 4, Nat.toNat32(h / 256));
+  buf.toBlob();
 };
 // A regular (non-coinbase) 32-byte txid filler for second-tx-in-block slots.
 func txidFor(h : Nat) : Blob {
   let buf = VarArray.repeat<Nat8>(0xaa, 32);
-  writeLE32(buf, 0, Nat32.fromNat(h % 0x1_0000_0000));
-  writeLE32(buf, 4, Nat32.fromNat(h / 256));
-  Blob.fromVarArray(buf);
+  writeLE32(buf, 0, Nat.toNat32(h % 0x1_0000_0000));
+  writeLE32(buf, 4, Nat.toNat32(h / 256));
+  buf.toBlob();
 };
 func dSha(b : Blob) : Blob {
   let d = Sha256.new(#sha256);
@@ -78,10 +78,10 @@ let GENESIS_COINBASE : Blob = Header.hexToBlob(
 );
 
 // genesis body
-ignore Chain.pushBody(c, Chain.tipBlock(c).hash, [HeaderValue.merkleOf(Chain.tipBlock(c).value)], GENESIS_COINBASE);
+ignore c.pushBody(c.tipBlock().hash, [HeaderValue.merkleOf(c.tipBlock().value)], GENESIS_COINBASE);
 
 var h = 1;
-var prev = Chain.tipBlock(c).hash;
+var prev = c.tipBlock().hash;
 label build while (h <= 91_890) {
   // Pick the coinbase bytes and the body's txid list for this height. The
   // 2-tx heights are the real BIP30 cases where a duplicate-coinbase block
@@ -92,32 +92,32 @@ label build while (h <= 91_890) {
     else if (h == 91_880) (cbA, [A, txidFor(h)])
     else (rawCoinbaseFor(h), [dSha(rawCoinbaseFor(h))]);
   let merkle = Bitcoin.merkleRoot(txs);
-  let raw = mkHeader(prev, Nat32.fromNat(1_400_000_000 + h), merkle);
-  switch (Chain.pushUnchecked(c, SHA, raw, NOW, UP)) {
+  let raw = mkHeader(prev, Nat.toNat32(1_400_000_000 + h), merkle);
+  switch (c.pushUnchecked(SHA, raw, NOW, UP)) {
     case (#ok ok) prev := ok.hash;
     case (#err e) { Debug.print("push failed at " # debug_show h # ": " # e); assert false };
   };
-  switch (Chain.pushBody(c, prev, txs, cbTx)) {
+  switch (c.pushBody(prev, txs, cbTx)) {
     case (#ok _) {};
     case (#err e) { Debug.print("body failed at " # debug_show h # ": " # e); assert false };
   };
   h += 1;
 };
-Debug.print("chain built to " # debug_show Chain.tipHeight(c) # " bodies to " # debug_show Chain.bodiesHeight(c));
-Debug.print("counts: 91722=" # debug_show Chain.txCountAt(c, 91_722) # " 91812=" # debug_show Chain.txCountAt(c, 91_812) # " 91842=" # debug_show Chain.txCountAt(c, 91_842) # " 91880=" # debug_show Chain.txCountAt(c, 91_880));
-Debug.print("lookup A -> " # debug_show (Chain.lookupTxid(c, A)).canonical # "  (esplora: 91880)");
-Debug.print("lookup B -> " # debug_show (Chain.lookupTxid(c, B)).canonical # "  (esplora: 91812)");
-Debug.print("txLocations(A) = " # debug_show Chain.txLocations(c, A));
-Debug.print("txLocations(B) = " # debug_show Chain.txLocations(c, B));
-func hashAt(hh : Nat) : Blob { switch (Chain.canonicalAt(c, hh)) { case (?b) b.hash; case null { assert false; "" : Blob } } };
-Debug.print("blockTxids(91722) = " # debug_show Chain.blockTxids(c, hashAt(91_722), 0, 10) # " (expect [A])");
-Debug.print("blockTxids(91842) = " # debug_show Chain.blockTxids(c, hashAt(91_842), 0, 10) # " (expect [B])");
-assert Chain.blockTxids(c, hashAt(91_722), 0, 10) == [A];
-assert Chain.blockTxids(c, hashAt(91_842), 0, 10) == [B];
-assert Chain.txCountAt(c, 91_722) == ?1;
-assert Chain.txCountAt(c, 91_842) == ?1;
-assert Chain.txCountAt(c, 91_812) == ?2;
-assert Chain.txCountAt(c, 91_880) == ?2;
-assert (Chain.lookupTxid(c, A)).canonical == ?91_880;
-assert (Chain.lookupTxid(c, B)).canonical == ?91_812;
+Debug.print("chain built to " # debug_show c.tipHeight() # " bodies to " # debug_show c.bodiesHeight());
+Debug.print("counts: 91722=" # debug_show c.txCountAt(91_722) # " 91812=" # debug_show c.txCountAt(91_812) # " 91842=" # debug_show c.txCountAt(91_842) # " 91880=" # debug_show c.txCountAt(91_880));
+Debug.print("lookup A -> " # debug_show c.lookupTxid(A).canonical # "  (esplora: 91880)");
+Debug.print("lookup B -> " # debug_show c.lookupTxid(B).canonical # "  (esplora: 91812)");
+Debug.print("txLocations(A) = " # debug_show c.txLocations(A));
+Debug.print("txLocations(B) = " # debug_show c.txLocations(B));
+func hashAt(hh : Nat) : Blob { switch (c.canonicalAt(hh)) { case (?b) b.hash; case null { assert false; "" : Blob } } };
+Debug.print("blockTxids(91722) = " # debug_show c.blockTxids(hashAt(91_722), 0, 10) # " (expect [A])");
+Debug.print("blockTxids(91842) = " # debug_show c.blockTxids(hashAt(91_842), 0, 10) # " (expect [B])");
+assert c.blockTxids(hashAt(91_722), 0, 10) == [A];
+assert c.blockTxids(hashAt(91_842), 0, 10) == [B];
+assert c.txCountAt(91_722) == ?1;
+assert c.txCountAt(91_842) == ?1;
+assert c.txCountAt(91_812) == ?2;
+assert c.txCountAt(91_880) == ?2;
+assert c.lookupTxid(A).canonical == ?91_880;
+assert c.lookupTxid(B).canonical == ?91_812;
 Debug.print("ALL BIP30 ASSERTIONS PASS");

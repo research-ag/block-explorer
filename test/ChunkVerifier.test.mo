@@ -8,8 +8,7 @@
 import { test; suite } "mo:test";
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
-import Nat64 "mo:core/Nat64";
-import Nat8 "mo:core/Nat8";
+import Nat "mo:core/Nat";
 
 import Sha256 "mo:sha2/Sha256";
 
@@ -23,7 +22,7 @@ let MAX_DEPTH = 20;
 // Distinct leaves: SHA-256 of the index as 4 little-endian bytes.
 func txid(i : Nat) : Blob {
   let d = Sha256.new(#sha256);
-  d.writeBlob(Blob.fromArray([Nat8.fromNat(i % 256), Nat8.fromNat((i / 256) % 256), 0, 0]));
+  d.writeBlob(Array.toBlob([Nat.toNat8(i % 256), Nat.toNat8((i / 256) % 256), 0, 0]));
   d.sum();
 };
 
@@ -99,11 +98,11 @@ suite(
           for (size in [1, 2, 3, 4, 7, n].values()) {
             var bounds : [Nat] = [];
             var hi = size;
-            while (hi < n) { bounds := Array.concat(bounds, [hi]); hi += size };
-            bounds := Array.concat(bounds, [n]);
+            while (hi < n) { bounds := bounds.concat([hi]); hi += size };
+            bounds := bounds.concat([n]);
             let (v, ok) = verifierAfter(t, bounds);
             assert ok;
-            assert v.complete() and v.count == Nat64.fromNat(n);
+            assert v.complete() and v.count == n.toNat64();
           };
         };
       },
@@ -122,7 +121,7 @@ suite(
         // A proof with its last peak missing, and one with an extra peak.
         let p3 = proofFor(t, 3);
         assert not start().verifyChunk(first, slice(p3, 0, p3.size() - 1 : Nat));
-        assert not start().verifyChunk(first, Array.concat(p3, [txid(99)]));
+        assert not start().verifyChunk(first, p3.concat([txid(99)]));
         // A later chunk, after a valid prefix.
         let (v, ok) = verifierAfter(t, [3]);
         assert ok;
@@ -166,7 +165,7 @@ suite(
         assert not v.verifyChunk([t3[2], t3[2]], []);
         // A duplicated pair one level up: [a..f] and [a..f, e, f].
         let t6 = txids(6);
-        let m6 = Array.concat(t6, [t6[4], t6[5]]);
+        let m6 = t6.concat([t6[4], t6[5]]);
         assert not fresh(Bitcoin.merkleRoot(t6)).verifyChunk(m6, []);
         // A repeated txid elsewhere: [a, a] has no valid root to match, and
         // its equal siblings are caught first.

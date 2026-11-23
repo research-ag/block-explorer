@@ -7,13 +7,13 @@ keywords = ["bitcoin", "spv", "header", "consensus"]
 license = "MIT"
 
 [toolchain]
-moc = "2.0.0"
+moc = "2.2.4"
 wasmtime = "36.0.9"
 
 [dependencies]
-core = "2.5.0"
+core = "2.7.0"
 sha2 = "0.3.3"
 
 [dev-dependencies]
 test = "2.1.2"
-bench-helper = "0.0.3"
+bench-helper = "0.0.4"

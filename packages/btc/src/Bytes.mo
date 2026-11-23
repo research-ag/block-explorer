@@ -31,7 +31,7 @@ module {
 
   // Copy 32 bytes out of a Blob at `offset` into a fresh Blob.
   public func slice32(b : Blob, offset : Nat) : Blob {
-    Blob.fromArray(Array.tabulate<Nat8>(32, func(i) = b[offset + i]));
+    Array.tabulate<Nat8>(32, func(i) = b[offset + i]).toBlob();
   };
 
 };

@@ -7,11 +7,11 @@ keywords = ["blockchain", "reorg", "fork-choice", "chain"]
 license = "MIT"
 
 [toolchain]
-moc = "2.0.0"
+moc = "2.2.4"
 wasmtime = "36.0.9"
 
 [dependencies]
-core = "2.5.0"
+core = "2.7.0"
 
 [dev-dependencies]
 test = "2.1.2"

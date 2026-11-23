@@ -5,7 +5,7 @@ import Nat8 "mo:core/Nat8";
 
 import HeaderValue "../src/block_explorer/HeaderValue";
 
-func mkMerkle(byte : Nat8) : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = byte));
+func mkMerkle(byte : Nat8) : Blob = Array.tabulate<Nat8>(32, func _ = byte).toBlob();
 
 suite(
   "HeaderValue: round-trip encode/decode",

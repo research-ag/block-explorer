@@ -10,6 +10,7 @@ import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Nat8 "mo:core/Nat8";
 import VarArray "mo:core/VarArray";
+import Nat "mo:core/Nat";
 
 import Sha256 "mo:sha2/Sha256";
 
@@ -18,17 +19,17 @@ import Bitcoin "mo:mmr/Bitcoin";
 
 // Decode BE-hex hashes to the internal-LE `[Blob]` shape `Bitcoin.merkleRoot` consumes.
 func leTxids(beHexes : [Text]) : [Blob] =
-  Array.map<Text, Blob>(beHexes, func(h) = Header.reverse32(Header.hexToBlob(h)));
+  beHexes.map<Text, Blob>(func(h) = Header.reverse32(Header.hexToBlob(h)));
 
 // Distinct synthetic 32-byte leaf: every byte is `k`.
-func leaf(k : Nat) : Blob = Blob.fromVarArray(VarArray.repeat<Nat8>(Nat8.fromNat(k % 256), 32));
+func leaf(k : Nat) : Blob = VarArray.repeat<Nat8>(Nat.toNat8(k % 256), 32).toBlob();
 
-func leaves(ks : [Nat]) : [Blob] = Array.map<Nat, Blob>(ks, leaf);
+func leaves(ks : [Nat]) : [Blob] = ks.map<Nat, Blob>(leaf);
 
 func cat(a : Blob, b : Blob) : Blob {
   let x = a.toArray();
   let y = b.toArray();
-  Blob.fromArray(Array.tabulate<Nat8>(x.size() + y.size(), func(i) = if (i < x.size()) x[i] else y[i - x.size()]));
+  Array.tabulate<Nat8>(x.size() + y.size(), func(i) = if (i < x.size()) x[i] else y[i - x.size()]).toBlob();
 };
 
 func dSha(b : Blob) : Blob {

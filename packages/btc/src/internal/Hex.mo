@@ -49,7 +49,7 @@ module {
         haveHi := true;
       };
     };
-    Blob.fromVarArray(mut);
+    mut.toBlob();
   };
 
   // Lowercase-hex encode a byte sequence: emit ASCII into one buffer, decode
@@ -60,12 +60,12 @@ module {
   public func encode(bs : Blob) : Text {
     let mut = VarArray.repeat<Nat8>(0, bs.size() * 2);
     var i = 0;
-    for (b in bs.vals()) {
+    for (b in bs.values()) {
       mut[i] := CHARS[(b >> 4).toNat()];
       mut[i + 1] := CHARS[(b & 0x0f).toNat()];
       i += 2;
     };
-    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
+    switch (mut.toBlob().decodeUtf8()) {
       case (?t) t;
       case null Runtime.trap("Hex.encode: unreachable (pure ASCII)");
     };
@@ -84,7 +84,7 @@ module {
       x <<= 4;
       j += 1;
     };
-    switch (Text.decodeUtf8(Blob.fromVarArray(mut))) {
+    switch (mut.toBlob().decodeUtf8()) {
       case (?t) t;
       case null Runtime.trap("Hex.encodeNat32: unreachable (pure ASCII)");
     };

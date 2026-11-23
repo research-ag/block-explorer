@@ -7,6 +7,7 @@ import Nat8 "mo:core/Nat8";
 import Nat32 "mo:core/Nat32";
 import Result "mo:core/Result";
 import VarArray "mo:core/VarArray";
+import Nat "mo:core/Nat";
 
 import Prim "mo:⛔";
 
@@ -88,7 +89,7 @@ module {
       mut[i] := h[31 - i];
       i += 1;
     };
-    Blob.fromVarArray(mut);
+    mut.toBlob();
   };
 
   // ---------------------------------------------------------------------
@@ -98,7 +99,7 @@ module {
   // 256^n as a single bignum shift — a `*= 256` loop allocates a fresh,
   // growing bignum per iteration (~3.6 KB inside nBitsToTarget for typical
   // exponents).
-  func pow256(n : Nat) : Nat = Prim.shiftLeft(1, Nat32.fromNat(8 * n));
+  func pow256(n : Nat) : Nat = Prim.shiftLeft(1, Nat.toNat32(8 * n));
 
   public func nBitsToTarget(bits : Nat32) : Nat {
     let exp : Nat = (bits >> 24).toNat();
@@ -121,7 +122,7 @@ module {
       mant /= 256;
       size += 1;
     };
-    Nat32.fromNat(((size % 256) * 0x01000000) + (mant % 0x00800000));
+    Nat.toNat32(((size % 256) * 0x01000000) + (mant % 0x00800000));
   };
 
   // POW_LIMIT_TARGET = nBitsToTarget(0x1d00ffff)
@@ -227,7 +228,7 @@ module {
       i += 1;
     };
     // The 3-byte window vs the mantissa.
-    let w : Nat32 = (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 1])) << 16) | (Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 2])) << 8) | Nat32.fromNat(Nat8.toNat(headerHashLE[exp - 3]));
+    let w : Nat32 = (headerHashLE[exp - 1].toNat().toNat32() << 16) | (headerHashLE[exp - 2].toNat().toNat32() << 8) | headerHashLE[exp - 3].toNat().toNat32();
     if (w > mant) return #err("proof-of-work failed");
     if (w == mant) {
       // Exactly at the window: hash <= target only if every lower byte is 0.
@@ -252,7 +253,7 @@ module {
   };
 
   public func checkFutureDrift(parsedTime : Nat32, nowSecs : Int) : Result.Result<(), Text> {
-    if (Int.fromNat(parsedTime.toNat()) <= nowSecs + MAX_FUTURE_SECS) #ok() else #err("timestamp too far in the future");
+    if (parsedTime.toNat().toInt() <= nowSecs + MAX_FUTURE_SECS) #ok() else #err("timestamp too far in the future");
   };
 
   // Full per-header validation against a prepared context.  The caller
