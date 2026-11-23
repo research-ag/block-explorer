@@ -6,21 +6,22 @@ every deploy (the git history of this directory is the deploy log).
 
 | field | value |
 |---|---|
-| commit | `7e21ac0a6adc870657baabd6f4c583d1bb6f4742` (`7e21ac0`, PR #14) |
+| commit | `b9019905ee17e98e5fc734a91ab6d0977959cef8` (`b901990`, PR #14) |
 | date | 2026-11-23 |
 | canister upgraded | block_explorer only (header_fetcher and frontend unchanged) |
-| module hash | `0x717dc8350c90f2ac2438eaa1358af33d90553991611f66f76aadf63fb928661a` |
+| module hash | `0x4132d2fb2be7e1995bab4694e7ff53727e0a37a671dd760b4f8537f21bf07052` |
 | moc | 2.2.4 (core 2.7.0) |
 | moc flags | `--max-stable-pages 2097152` (128 GiB) — block_explorer only |
 | block_explorer | `5alk6-kyaaa-aaaag-ay2sq-cai` |
 | header_fetcher | `5hkmk-haaaa-aaaag-ay2sa-cai` |
 | frontend (assets) | `5jibc-4qaaa-aaaag-ay2ta-cai` |
 
-> This deploy ran a one-off migration (`Migration.mo`, removed in the next
-> commit): `chunkHashers` became `chunkTree : Peaks.Peaks`, and the verifier
-> of a chunked upload in progress became a `Chunks.Verifier` on that tree.
-> `block_explorer.most` is the signature after the migration, built from the
-> next commit without it (the same stable types).
+> Stable layout is **unchanged** from the previous deploy (`7e21ac0`, the
+> same day, module hash `0x717dc835…661a`): `block_explorer.most` is
+> byte-identical, no migration. That deploy ran a one-off migration
+> (`Migration.mo`, removed since): `chunkHashers` became
+> `chunkTree : Peaks.Peaks`, and the verifier of a chunked upload in
+> progress became a `Chunks.Verifier` on that tree.
 
 ## Dependency versions baked into the stable layout
 
