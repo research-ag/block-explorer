@@ -9,16 +9,15 @@
     "start": "node dist/index.js",
     "start:chunks": "node dist/chunk-uploader.js",
     "selftest": "node dist/chunk-proof.selftest.js",
-    "dev": "ts-node src/index.ts",
+    "dev": "tsc -p . && node dist/index.js",
     "codegen": "didc bind -t ts block_explorer.did | sed 's#@dfinity/#@icp-sdk/core/#g' > block_explorer.did.d.ts && didc bind -t js block_explorer.did > block_explorer.did.js"
   },
   "type": "module",
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.5.0"
+    "@types/node": "^18.19.130",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@icp-sdk/core": "^5.4.0"
+    "@icp-sdk/core": "^6.1.1"
   }
 }
