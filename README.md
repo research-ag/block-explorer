@@ -144,15 +144,41 @@ Query calls:
   counts.
 - `cycles_balance()` / `get_cycles_per_call()`.
 
-HTTP routes (via `http_request`):
+HTTP routes (via `http_request`, uncertified, on the raw domain, e.g.
+`https://5alk6-kyaaa-aaaag-ay2sq-cai.raw.icp0.io/api/blocks/tip/height`).
+The `/api/` routes follow Blockstream's Esplora API (formats, status
+codes and error texts as its electrs backend):
 
 - `GET /metrics` — Prometheus exposition.
 - `GET /api/blocks/tip/{height,hash}`
 - `GET /api/blocks` / `GET /api/blocks/:height` — 10 latest descending.
 - `GET /api/block-height/:height` → canonical hash.
 - `GET /api/block/:hash` / `:hash/header` / `:hash/status` — Esplora
-  schema, omitting tx-related fields. Full route list and "not
-  implemented" routes are in [src/block_explorer/Esplora.mo](src/block_explorer/Esplora.mo).
+  schema. `tx_count` appears once the block's body is indexed; `size`
+  and `weight` are omitted (not stored, and the header couldn't verify
+  them).
+- `GET /api/block/:hash/txids` (JSON array, block order) and
+  `/api/block/:hash/txid/:index` (text) — canonical and fork blocks
+  whose body is stored; 404 otherwise.
+- `GET /api/tx/:txid/status` — `{confirmed, block_height, block_hash,
+  block_time}` from the txid index, or `{"confirmed":false}` for a txid
+  that isn't in an indexed canonical block (as Esplora answers for one it
+  hasn't indexed).
+- `GET /api/tx/:txid/merkle-proof` (Electrum's `get_merkle`:
+  `{block_height, merkle, pos}`) and `/api/tx/:txid/merkleblock-proof`
+  (bitcoind's `gettxoutproof` hex), computed from the block's txids.
+- `GET /api/tx/:txid/hex` / `/raw` — coinbase transactions only, as
+  stored: witness-stripped, so for a coinbase with a witness commitment
+  they lack the 32-byte witness reserved value that Esplora's include.
+
+A block whose body isn't completely indexed (above the body tip, or mid
+chunked upload) has no txids yet, and its txids count as unconfirmed.
+Instructions per request on a block of 10 000 txids (16 600, about the
+most a block can hold, in parentheses): `merkle-proof` and
+`merkleblock-proof` 0.28 B (0.47 B), almost all the tree's hashing;
+`txids` 0.17 B (0.28 B); the other routes under 1 M. The query limit is
+5 B. Full route list and "not implemented" routes are in
+[src/block_explorer/Esplora.mo](src/block_explorer/Esplora.mo).
 
 ---
 
