@@ -1,6 +1,6 @@
 [toolchain]
 moc = "2.2.4"
-wasmtime = "36.0.9"
+wasmtime = "51.0.0"
 wasm-opt = "133"
 
 # Binaryen's wasm-opt pass applied by `mops build` after candid metadata
