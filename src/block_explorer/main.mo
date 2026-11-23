@@ -38,7 +38,12 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
+import Migration "Migration";
 
+// One-off: enumeration 0.3 stores its tree nodes in a new layout
+// (Chain.State.uploaders.enum). Remove with Migration.mo after the upgrade
+// has run on mainnet.
+(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
