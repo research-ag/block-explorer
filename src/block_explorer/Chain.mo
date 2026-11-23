@@ -43,18 +43,18 @@ import Set "mo:core/Set";
 
 import Prim "mo:⛔";
 
-import Hasher "mo:sha2/Hasher/Sha256";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
 import Bitcoin "mo:mmr/Bitcoin";
+import Chunks "mo:mmr/Chunks";
+import Peaks "mo:mmr/Peaks";
 
 import ForkStore "mo:heaviest-chain/ForkStore";
 import Reorg "mo:heaviest-chain/Reorg";
 
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
-import ChunkVerifier "ChunkVerifier";
 import Coinbases "Coinbases";
 import Headers "Headers";
 import Uploaders "Uploaders";
@@ -165,8 +165,8 @@ module {
   };
 
   // A canonical block body arriving in chunks (push_body_chunk), verified
-  // chunk by chunk with ChunkVerifier (the chunk verification of the mmr
-  // package, without its backup). At most one exists, and it is always for the
+  // chunk by chunk with mmr's Chunks, on State.chunkTree and without a
+  // backup (Chunks.onTree). At most one exists, and it is always for the
   // canonical block at `bodiesNextHeight`. The accepted txids are already in
   // `txTrie`, from `firstTxIndex` on (and F is written into the block's
   // HeaderValue on the first chunk); `bodiesNextHeight` advances, and the
@@ -178,7 +178,7 @@ module {
     height : Nat;
     firstTxIndex : Nat;
     coinbase : Blob; // raw witness-stripped coinbase from the first chunk
-    verifier : ChunkVerifier.Verifier;
+    verifier : Chunks.Verifier;
   };
 
   public type BodyChunkOk = {
@@ -230,10 +230,10 @@ module {
     // A chunked upload of the body at `bodiesNextHeight`, if one is in
     // progress. See BodyChunks.
     var bodyChunks : ?BodyChunks;
-    // The hashers of the chunk verifier, allocated once and used by the
-    // upload of block after block (ChunkVerifier.new); at most one
-    // upload is in progress at a time. See newChunkHashers.
-    chunkHashers : [var Hasher.Hasher];
+    // The tree of the chunk verifier, allocated once and used by the
+    // upload of block after block (Chunks.onTree); at most one upload is
+    // in progress at a time. See newChunkTree.
+    chunkTree : Peaks.Peaks;
     // Timestamps of the canonical tip and its ancestors, newest first, at
     // most MTP_WINDOW (11) entries — the median-time-past context. Kept in
     // sync on every canonical append / reorg so the per-push MTP check never
@@ -315,7 +315,7 @@ module {
     var tipWork = 0;
     var bodiesNextHeight = 0;
     var bodyChunks = null;
-    chunkHashers = newChunkHashers();
+    chunkTree = newChunkTree();
     var recentTimes = [];
     var workMemo = { bits = 0 : Nat32; target = 0; work = 0 };
     var initialized = false;
@@ -1487,8 +1487,8 @@ module {
   //
   // A canonical body may also arrive in chunks, in order, each verified on
   // arrival against the header's Merkle root with the uploader's proof for
-  // the leaves still to come: ChunkVerifier.mo (the chunk verification of
-  // the mmr package without its backup), with the proofs of mmr's
+  // the leaves still to come: mmr's Chunks, on one tree kept across blocks
+  // and without a backup (Chunks.onTree), with the proofs of mmr's
   // Prove.rightPeaks. The
   // first chunk carries the raw coinbase, which pins txids[0] to a real
   // transaction and with it the depth of the tree; later chunks carry none.
@@ -1506,14 +1506,15 @@ module {
   // units).
   let CHUNK_MAX_DEPTH : Nat = 20;
 
-  // The pool of State.chunkHashers: CHUNK_MAX_DEPTH + 2 hashers (22).
-  public func newChunkHashers() : [var Hasher.Hasher] = ChunkVerifier.pool(CHUNK_MAX_DEPTH);
+  // The tree of State.chunkTree: CHUNK_MAX_DEPTH + 2 hashers (22), double
+  // SHA-256. Its verifiers take proofs of at most CHUNK_MAX_DEPTH peaks.
+  public func newChunkTree() : Peaks.Peaks = Peaks.withDepth(CHUNK_MAX_DEPTH, true);
 
   public func txidTip(self : State) : TxidTip {
     {
       height = self.bodiesNextHeight;
       offset = switch (self.bodyChunks) {
-        case (?p) p.verifier.count.toNat();
+        case (?p) p.verifier.count().toNat();
         case null 0;
       };
     };
@@ -1554,14 +1555,14 @@ module {
     );
     switch (self.bodyChunks, start) {
       case (?p, #offset o) {
-        let tip = p.verifier.count.toNat();
+        let tip = p.verifier.count().toNat();
         if (o != tip) return mismatch(o, tip);
         // Invariant: an upload in progress is for the canonical block at
         // bodiesNextHeight, which is `b`.
         if (p.hash != b.hash) Runtime.trap("pushBodyChunk: upload in progress is for another block");
         #ok((b, ?p));
       };
-      case (?p, #coinbase_tx _) mismatch(0, p.verifier.count.toNat());
+      case (?p, #coinbase_tx _) mismatch(0, p.verifier.count().toNat());
       case (null, #offset o) mismatch(o, 0);
       case (null, #coinbase_tx cb) {
         // Depth-of-tree binding, as in pushBody: a coinbase longer than 64
@@ -1624,7 +1625,7 @@ module {
     if (not isCompressedBodyHeight(b.height)) {
       let hv = encodeHeight(b.height);
       for (t in txids.values()) ignore self.txTrie.add(t, hv);
-      if (self.txTrie.size() != p.firstTxIndex + p.verifier.count.toNat()) {
+      if (self.txTrie.size() != p.firstTxIndex + p.verifier.count().toNat()) {
         Runtime.trap("pushBodyChunk: unexpected duplicate txid at height " # debug_show b.height);
       };
     };
@@ -1639,7 +1640,7 @@ module {
     };
     #ok({
       height = b.height;
-      offset = p.verifier.count.toNat();
+      offset = p.verifier.count().toNat();
       complete;
       first_tx_index = p.firstTxIndex;
     });
@@ -1648,17 +1649,18 @@ module {
   // The verification of a chunk, the one code path for pushBodyChunk and its
   // inspect mirror: checkBodyChunk (the block, the start against the txid tip
   // and, for the first chunk, the coinbase: dSHA == txids[0], > 64 bytes),
-  // then the chunk and its proof against the header's root with ChunkVerifier,
-  // its equal-sibling checks included (which also reject a mutated block,
-  // CVE-2012-2459, where the duplicated tail meets its original).
+  // then the chunk and its proof against the header's root with
+  // Chunks.verifyChunk, its equal-sibling checks included (which also reject
+  // a mutated block, CVE-2012-2459, where the duplicated tail meets its
+  // original).
   //
   // It writes nothing: no stable structure and no field of State. It returns
   // the upload the chunk belongs to (for the first chunk a new one, not yet
   // stored) and whether the chunk is its first. Its verifier is the one
   // thing that changes: a chunk that verifies advances it.
   //
-  // A chunk that does not verify TRAPS: ChunkVerifier keeps no backup of the
-  // peaks, so the verifier is left half-updated, and the trap rolls that back
+  // A chunk that does not verify TRAPS: the verifier keeps no backup of the
+  // peaks, so it is left broken (Chunks.broken), and the trap rolls that back
   // with the rest of the call (in inspect: rejects the message). The checks
   // of checkBodyChunk, which come before the verifier is touched, return
   // #err as before.
@@ -1690,12 +1692,14 @@ module {
           height = b.height;
           firstTxIndex = self.txTrie.size();
           coinbase = cb;
-          // On the pool: no upload is in progress, so nothing else uses it.
-          verifier = ChunkVerifier.new(HeaderValue.merkleOf(b.value), self.chunkHashers);
+          // On the tree: no upload is in progress, so nothing else uses
+          // it. Bitcoin's tree: an odd last node paired with itself (#copy),
+          // equal siblings rejected (checked).
+          verifier = Chunks.onTree(HeaderValue.merkleOf(b.value), self.chunkTree, null, #copy, true);
         };
       };
     };
-    let isFirst = p.verifier.count == 0;
+    let isFirst = p.verifier.count() == 0;
     let verified = switch (onVerifyInsns) {
       case null p.verifier.verifyChunk(txids, proof);
       case (?f) {

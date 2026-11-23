@@ -24,7 +24,7 @@ core = "2.7.0"
 sha2 = "0.3.3"
 # Merkle mountain ranges (Bitcoin tree, chunk verification). Not on mops yet:
 # the initial-package branch, pinned to a commit.
-mmr = "https://github.com/research-ag/mmr#initial-package@523ace25ac83ed880d9dd68dd5de145535be39af"
+mmr = "https://github.com/research-ag/mmr#initial-package@6e247a49cf568935744cef98691237ea24b3aa4a"
 promtracker = "1.0.1"
 stable-trie = "0.2.0"
 enumeration = "0.2.2"

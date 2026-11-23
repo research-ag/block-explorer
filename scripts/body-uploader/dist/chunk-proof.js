@@ -1,7 +1,8 @@
 /**
  * Proofs for the canister's chunked body upload (push_body_chunk), which
- * verifies each chunk with ChunkVerifier.mo: the chunk verification of the
- * mmr package (mo:mmr/Peaks), without its backup.
+ * verifies each chunk with mmr's Chunks (mo:mmr/Chunks), on one tree kept
+ * across blocks and without a backup (Chunks.onTree). Proofs of more than 20
+ * peaks are refused; a block's tree is at most 15 levels deep.
  *
  * A chunk that ends at leaf m (the leaves 0 .. m-1 are then in) comes with the
  * proof for m: the right siblings of leaf m-1's ancestors in Bitcoin's Merkle

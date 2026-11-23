@@ -38,7 +38,13 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
+import Migration "Migration";
 
+// One-off: the chunk verifier becomes mmr's Chunks on a tree kept across
+// blocks (Chain.State.chunkTree, and the verifier of an upload in progress,
+// Chain.State.bodyChunks). Remove with Migration.mo after the upgrade has
+// run on mainnet.
+(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
@@ -615,7 +621,7 @@ actor BlockExplorer {
   //                                    writes: block, start == txid tip
   //                                    (#coinbase_tx with dSHA == txids[0],
   //                                    or #offset), and the chunk and proof
-  //                                    against the Merkle root (ChunkVerifier,
+  //                                    against the Merkle root (Chunks,
   //                                    equal-sibling checks included, so
   //                                    mutated bodies too). Unlike push_body
   //                                    this fits: ~140M for a 5000-txid
