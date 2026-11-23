@@ -6,27 +6,27 @@ every deploy (the git history of this directory is the deploy log).
 
 | field | value |
 |---|---|
-| commit | `32827e4f1dd332a370203b9f3b8e703e8d2ff428` (`32827e4`, PR #15) |
+| commit | `c69e7e0998e3563392ee48cbd075d3f7ba8d633f` (`c69e7e0`, PR #15) |
 | date | 2026-11-23 |
 | canister upgraded | block_explorer only (header_fetcher and frontend unchanged) |
-| module hash | `0x805832a10af1ae9f2c61b4c018b609817ab8c83f00ad8fd6b67eb411db1203a9` |
+| module hash | `0xd6b7695ef491f975cb1a13a9566c7c2f75d7a438756ddab40f7c2f30e5f14126` |
 | moc | 2.2.4 (core 2.7.0) |
 | moc flags | `--max-stable-pages 2097152` (128 GiB) — block_explorer only |
 | block_explorer | `5alk6-kyaaa-aaaag-ay2sq-cai` |
 | header_fetcher | `5hkmk-haaaa-aaaag-ay2sa-cai` |
 | frontend (assets) | `5jibc-4qaaa-aaaag-ay2ta-cai` |
 
-> This deploy ran a one-off migration (`Migration.mo`, with
-> `(with migration = Migration.run)` in `main.mo`): enumeration 0.3 changed
-> its tree's node layout, so the tree of `chain.uploaders.enum` was
-> converted from `?({#R; #B}, Tree, Nat, Tree)` to `?(Tree, Nat32, Tree)`.
-> The key array passed through, so every uploader kept its id. The
-> `block_explorer.most` here still lists the migration's input type
-> (`in chain : OldState`); it drops out once the migration is removed.
+> Stable layout is **unchanged** from the previous deploy (`32827e4`, the
+> same day, module hash `0x805832a1…03a9`). No migration ran, and
+> `block_explorer.most` differs only in no longer listing that deploy's
+> migration input (`in chain : OldState`). That deploy ran a one-off
+> migration (`Migration.mo`, removed since): enumeration 0.3 changed its
+> tree's node layout, so the tree of `chain.uploaders.enum` was converted
+> from `?({#R; #B}, Tree, Nat, Tree)` to `?(Tree, Nat32, Tree)`. The key
+> array passed through, so every uploader kept its id.
 >
-> The previous deploy (`b901990`, module hash `0x4132d2fb…7052`) had no
-> migration. The one before (`7e21ac0`) ran the mmr migration:
-> `chunkHashers` became `chunkTree : Peaks.Peaks`.
+> Earlier the same day, `7e21ac0` ran the mmr migration: `chunkHashers`
+> became `chunkTree : Peaks.Peaks`.
 
 ## Dependency versions baked into the stable layout
 
