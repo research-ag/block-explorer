@@ -25,11 +25,8 @@ import Nat "mo:core/Nat";
 
 import Sha256 "mo:sha2/Sha256";
 
-import Enum "mo:enumeration";
-
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
-import Migration "../src/block_explorer/Migration";
 import Bitcoin "mo:mmr/Bitcoin";
 import Prove "mo:mmr/Prove";
 import HeaderValue "../src/block_explorer/HeaderValue";
@@ -1124,127 +1121,6 @@ suite(
           case _ assert false;
         };
         assert tipIs(c, 2, 0);
-      },
-    );
-  },
-);
-
-// --- One-off: Migration.run. Remove with src/block_explorer/Migration.mo ---
-
-// A tree of enumeration 0.3.x in the node layout of 0.2.x.
-func oldTree(t : Enum.Tree) : Migration.OldTree = switch t {
-  case null null;
-  case (?(l, f, r)) ?((if (f & 1 == 1) #R else #B), oldTree(l), (f >> 1).toNat(), oldTree(r));
-};
-
-func sameTree(a : Enum.Tree, b : Enum.Tree) : Bool = switch (a, b) {
-  case (null, null) true;
-  case (?(al, af, ar), ?(bl, bf, br)) af == bf and sameTree(al, bl) and sameTree(ar, br);
-  case _ false;
-};
-
-// The pre-upgrade State, rebuilt from a current one: the uploader
-// enumeration's tree in the old layout, on the same key array.
-func toOld(c : Chain.State) : Migration.OldState {
-  let u = c.uploaders;
-  {
-    headerTrie = c.headerTrie;
-    txTrie = c.txTrie;
-    forks = c.forks;
-    uploaders = {
-      enum = {
-        var array = u.enum.array;
-        var size_ = u.enum.size_;
-        var tree = oldTree(u.enum.tree);
-      };
-      blocks = u.blocks;
-      ofHash = u.ofHash;
-      var anonymousCount = u.anonymousCount;
-    };
-    reorgLog = c.reorgLog;
-    coinbasesRegion = c.coinbasesRegion;
-    var coinbasesRegionSize = c.coinbasesRegionSize;
-    var coinbaseBackfillCursor = c.coinbaseBackfillCursor;
-    var tipWork = c.tipWork;
-    var bodiesNextHeight = c.bodiesNextHeight;
-    var bodyChunks = c.bodyChunks;
-    chunkTree = c.chunkTree;
-    var recentTimes = c.recentTimes;
-    var workMemo = c.workMemo;
-    var initialized = c.initialized;
-  };
-};
-
-// Uploader i (distinct, never the anonymous principal).
-func uploader(i : Nat) : Principal = Principal.fromBlob(Array.toBlob([(i % 256).toNat8(), 0xee, 0x01]));
-
-suite(
-  "Migration (one-off): enumeration 0.3 tree layout",
-  func() {
-
-    test(
-      "the tree converts node by node, and every key keeps its index",
-      func() {
-        let e = Enum.BlobEnumeration.empty();
-        for (i in Nat.range(0, 1000)) {
-          assert Enum.BlobEnumeration.add(e, Array.toBlob([(i % 256).toNat8(), (i / 256).toNat8(), 7])) == i;
-        };
-        let m = Migration.enumeration({
-          var array = e.array;
-          var size_ = e.size_;
-          var tree = oldTree(e.tree);
-        });
-        assert sameTree(m.tree, e.tree);
-        assert Enum.BlobEnumeration.size(m) == 1000;
-        for (i in Nat.range(0, 1000)) {
-          let k = Array.toBlob([(i % 256).toNat8(), (i / 256).toNat8(), 7]);
-          assert Enum.BlobEnumeration.lookup(m, k) == ?i;
-          assert Enum.BlobEnumeration.at(m, i) == k;
-        };
-        // A present key keeps its index, a new one gets the next.
-        assert Enum.BlobEnumeration.insert(m, Array.toBlob([5, 0, 7])) == (false, 5);
-        assert Enum.BlobEnumeration.insert(m, "\ff\ff\ff") == (true, 1000);
-        assert Enum.BlobEnumeration.lookup(m, "\ff\ff\ff") == ?1000;
-      },
-    );
-
-    test(
-      "uploaders keep their ids, blocks and stats, and registration goes on",
-      func() {
-        let c = newChain();
-        var prev = GENESIS_HASH;
-        var hashes : [Blob] = [];
-        for (i in Nat.range(1, 41)) {
-          let h = mkHeader(prev, EASY_BITS, i.toNat32(), i.toNat32());
-          let who = if (i % 7 == 0) ANON else uploader(i % 17);
-          ignore c.pushUnchecked(SHA, h, FUTURE_NOW, who);
-          prev := hashOf(h);
-          hashes := hashes.concat([prev]);
-        };
-        let n = Enum.BlobEnumeration.size(c.uploaders.enum);
-        let stats = c.uploaderStats();
-
-        let m = Migration.run({ chain = toOld(c) }).chain;
-        assert sameTree(m.uploaders.enum.tree, c.uploaders.enum.tree);
-        assert Enum.BlobEnumeration.size(m.uploaders.enum) == n;
-        assert m.uploaderStats() == stats;
-        for (i in Nat.range(1, 41)) {
-          let who = if (i % 7 == 0) ANON else uploader(i % 17);
-          assert m.uploaderOf(hashes[i - 1]) == who;
-        };
-        for (j in Nat.range(0, 17)) {
-          assert m.blocksByUploader(uploader(j), 0, 100) == c.blocksByUploader(uploader(j), 0, 100);
-        };
-
-        // A known uploader and a new one push on the migrated state.
-        let h41 = mkHeader(prev, EASY_BITS, 41, 41);
-        ignore m.pushUnchecked(SHA, h41, FUTURE_NOW, uploader(3));
-        let h42 = mkHeader(hashOf(h41), EASY_BITS, 42, 42);
-        ignore m.pushUnchecked(SHA, h42, FUTURE_NOW, uploader(200));
-        assert Enum.BlobEnumeration.size(m.uploaders.enum) == n + 1;
-        assert m.uploaderOf(hashOf(h41)) == uploader(3);
-        assert m.uploaderOf(hashOf(h42)) == uploader(200);
-        assert m.blocksByUploader(uploader(200), 0, 10) == [hashOf(h42)];
       },
     );
   },
