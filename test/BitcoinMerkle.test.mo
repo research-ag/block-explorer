@@ -1,7 +1,8 @@
-// Tests for Bitcoin merkle-root computation against well-known
-// mainnet vectors. All hashes here are written in BIG-endian order
-// (the way block explorers display them) and reversed to internal
-// little-endian before being passed to `Merkle.root`, which operates
+// The Bitcoin Merkle root the explorer computes with the mmr package
+// (`Bitcoin.merkleRoot`, and `Bitcoin.mutated` for CVE-2012-2459), against
+// well-known mainnet vectors. All hashes here are written in BIG-endian
+// order (the way block explorers display them) and reversed to internal
+// little-endian before being passed to `Bitcoin.merkleRoot`, which operates
 // on the on-the-wire byte order.
 
 import { test; suite } "mo:test";
@@ -12,11 +13,10 @@ import VarArray "mo:core/VarArray";
 
 import Sha256 "mo:sha2/Sha256";
 
-import BitcoinMerkle "../src/BitcoinMerkle";
-import Header "../src/Header";
-import Merkle "../src/Merkle";
+import Header "mo:btc/Header";
+import Bitcoin "mo:mmr/Bitcoin";
 
-// Decode BE-hex hashes to the internal-LE `[Blob]` shape `Merkle.root` consumes.
+// Decode BE-hex hashes to the internal-LE `[Blob]` shape `Bitcoin.merkleRoot` consumes.
 func leTxids(beHexes : [Text]) : [Blob] =
   Array.map<Text, Blob>(beHexes, func(h) = Header.reverse32(Header.hexToBlob(h)));
 
@@ -37,23 +37,24 @@ func dSha(b : Blob) : Blob {
   d.sumDouble();
 };
 
-// Root via the incremental API, which (unlike Merkle.root) does not run the
-// mutation check, so it can show that a mutated list shares the real root.
+// Root via the incremental API, which (unlike Bitcoin.merkleRoot) does not
+// run the mutation check, so it can show that a mutated list shares the real
+// root.
 func uncheckedRoot(txids : [Blob]) : Blob {
-  let mmr = BitcoinMerkle.new(txids.size(), false);
-  for (t in txids.values()) mmr.add(t);
-  mmr.root();
+  let tree = Bitcoin.new(txids.size());
+  for (t in txids.values()) tree.add(t);
+  tree.root();
 };
 
-// Run Merkle.root and compare its output (LE) to the expected
+// Run Bitcoin.merkleRoot and compare its output (LE) to the expected
 // big-endian hex.
 func rootBE(beHexes : [Text]) : Text {
-  let r = Merkle.root(leTxids(beHexes));
+  let r = Bitcoin.merkleRoot(leTxids(beHexes));
   Header.bytesToHex(Header.reverse32(r));
 };
 
 suite(
-  "Merkle.root",
+  "Bitcoin.merkleRoot",
   func() {
 
     test(
@@ -83,19 +84,19 @@ suite(
       func() {
         // Three distinct leaves A, B, C. Bitcoin pairs the odd last node
         // with itself: root = dSHA(dSHA(A||B) || dSHA(C||C)). (Identical
-        // leaves no longer work here: Merkle.root traps on them as a
+        // leaves no longer work here: Bitcoin.merkleRoot traps on them as a
         // mutated list.)
         let a = leaf(1);
         let b = leaf(2);
         let c = leaf(3);
-        assert Merkle.root([a, b, c]) == dSha(cat(dSha(cat(a, b)), dSha(cat(c, c))));
+        assert Bitcoin.merkleRoot([a, b, c]) == dSha(cat(dSha(cat(a, b)), dSha(cat(c, c))));
       },
     );
   },
 );
 
 suite(
-  "Merkle.mutated (CVE-2012-2459)",
+  "Bitcoin.mutated (CVE-2012-2459)",
   func() {
 
     test(
@@ -103,7 +104,7 @@ suite(
       func() {
         var n = 1;
         while (n <= 40) {
-          assert not Merkle.mutated(leaves(Array.tabulate<Nat>(n, func(i) = i + 1)));
+          assert not Bitcoin.mutated(leaves(Array.tabulate<Nat>(n, func(i) = i + 1)));
           n += 1;
         };
       },
@@ -112,7 +113,7 @@ suite(
     test(
       "duplicated tails share the real root and are flagged",
       func() {
-        // (real, mutated) pairs from BitcoinMutation.mo: the mutated list
+        // (real, mutated) pairs: the mutated list
         // ends with a second copy, complete or cut off, of the subtree
         // before it on some level.
         let cases : [([Nat], [Nat])] = [
@@ -123,9 +124,9 @@ suite(
         ];
         for ((real, mut) in cases.values()) {
           assert uncheckedRoot(leaves(mut)) == uncheckedRoot(leaves(real));
-          assert Merkle.root(leaves(real)) == uncheckedRoot(leaves(real));
-          assert not Merkle.mutated(leaves(real));
-          assert Merkle.mutated(leaves(mut));
+          assert Bitcoin.merkleRoot(leaves(real)) == uncheckedRoot(leaves(real));
+          assert not Bitcoin.mutated(leaves(real));
+          assert Bitcoin.mutated(leaves(mut));
         };
       },
     );

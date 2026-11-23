@@ -14,7 +14,7 @@ import Sha256 "mo:sha2/Sha256";
 import VarArray "mo:core/VarArray";
 
 import Header "mo:btc/Header";
-import Merkle "mo:btc/Merkle";
+import Bitcoin "mo:mmr/Bitcoin";
 import HeaderValue "../src/block_explorer/HeaderValue";
 import Chain "../src/block_explorer/Chain";
 
@@ -91,7 +91,7 @@ label build while (h <= 91_890) {
     else if (h == 91_842) (cbB, [B])
     else if (h == 91_880) (cbA, [A, txidFor(h)])
     else (rawCoinbaseFor(h), [dSha(rawCoinbaseFor(h))]);
-  let merkle = Merkle.root(txs);
+  let merkle = Bitcoin.merkleRoot(txs);
   let raw = mkHeader(prev, Nat32.fromNat(1_400_000_000 + h), merkle);
   switch (Chain.pushUnchecked(c, SHA, raw, NOW, UP)) {
     case (#ok ok) prev := ok.hash;

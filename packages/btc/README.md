@@ -29,16 +29,13 @@ room for full-node pieces later.
 - **Byte/hex utilities**: `hexToBlob`, `bytesToHex` (chunked, not
   per-char), `reverse32` (internal LE <-> display BE), `leBytesToNat`.
 
-### `Merkle`
-
-- `root(digest, hashes, txCount)` — Bitcoin merkle root over a flat blob of
-  32-byte txids (stride 32, internal LE order), with the
-  duplicate-last-node rule. Reuses the caller's hash engine across the
-  whole tree.
+Merkle roots are not in this package: the block explorer uses the `mmr`
+package for them (`mo:mmr/Bitcoin`: roots, the CVE-2012-2459 check, chunked
+verification).
 
 ## Public API
 
-`Header`, `Merkle`, and `Bytes` are the public surface. `Bytes` holds
+`Header` and `Bytes` are the public surface. `Bytes` holds
 generic little-endian byte helpers (`readLE32`, `writeLE32`, `slice32`) —
 public because consumers that mirror raw headers in their own storage reuse
 them. `src/internal/` (`Hex`) holds generic helpers used only by the
@@ -65,11 +62,9 @@ mops add btc
 ```motoko
 import Sha256 "mo:sha2/Sha256";
 import Header "mo:btc/Header";
-import Merkle "mo:btc/Merkle";
 
 let sha = Sha256.Digest(#sha256);            // one engine, reuse forever
 let parsed = Header.parseHeader(raw80);
 let hash = Header.headerHashBlob(sha, raw80);
 let ok = Header.validateAgainst(raw80, expectedBits, prevHash, mtp, now);
-let root = Merkle.root(sha, txidsBlob, txCount);
 ```

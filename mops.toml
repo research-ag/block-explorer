@@ -22,6 +22,9 @@ args = ["--max-stable-pages", "2097152"]
 [dependencies]
 core = "2.6.2"
 sha2 = "0.3.3"
+# Merkle mountain ranges (Bitcoin tree, chunk verification). Not on mops yet:
+# the initial-package branch, pinned to a commit.
+mmr = "https://github.com/research-ag/mmr#initial-package@523ace25ac83ed880d9dd68dd5de145535be39af"
 promtracker = "1.0.1"
 stable-trie = "0.2.0"
 enumeration = "0.2.2"

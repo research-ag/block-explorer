@@ -47,13 +47,14 @@ import Hasher "mo:sha2/Hasher/Sha256";
 import Sha256 "mo:sha2/Sha256";
 import StableTrie "mo:stable-trie/Enumeration";
 
+import Bitcoin "mo:mmr/Bitcoin";
+
 import ForkStore "mo:heaviest-chain/ForkStore";
 import Reorg "mo:heaviest-chain/Reorg";
 
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
-import Merkle "mo:btc/Merkle";
-import ChunksForward "mo:btc/BitcoinChunksForward";
+import ChunkVerifier "ChunkVerifier";
 import Coinbases "Coinbases";
 import Headers "Headers";
 import Uploaders "Uploaders";
@@ -164,8 +165,8 @@ module {
   };
 
   // A canonical block body arriving in chunks (push_body_chunk), verified
-  // chunk by chunk with Example 10 of the sha2 package
-  // (BitcoinChunksForward). At most one exists, and it is always for the
+  // chunk by chunk with ChunkVerifier (the chunk verification of the mmr
+  // package, without its backup). At most one exists, and it is always for the
   // canonical block at `bodiesNextHeight`. The accepted txids are already in
   // `txTrie`, from `firstTxIndex` on (and F is written into the block's
   // HeaderValue on the first chunk); `bodiesNextHeight` advances, and the
@@ -177,7 +178,7 @@ module {
     height : Nat;
     firstTxIndex : Nat;
     coinbase : Blob; // raw witness-stripped coinbase from the first chunk
-    verifier : ChunksForward.Verifier;
+    verifier : ChunkVerifier.Verifier;
   };
 
   public type BodyChunkOk = {
@@ -230,7 +231,7 @@ module {
     // progress. See BodyChunks.
     var bodyChunks : ?BodyChunks;
     // The hashers of the chunk verifier, allocated once and used by the
-    // upload of block after block (ChunksForward.withHashers); at most one
+    // upload of block after block (ChunkVerifier.new); at most one
     // upload is in progress at a time. See newChunkHashers.
     chunkHashers : [var Hasher.Hasher];
     // Timestamps of the canonical tip and its ancestors, newest first, at
@@ -1304,7 +1305,7 @@ module {
   ) : Result.Result<PushBodyOk, Text> = pushBodyWithObserver(self, blockHashInternal, txids, coinbaseTx, null);
 
   // `onMerkleInsns` is an optional observer that gets the Wasm instruction
-  // delta across the Merkle.root(txids) call (per-call cost, in isolation).
+  // delta across the Bitcoin.merkleRoot(txids) call (per-call cost, in isolation).
   // Called only on the real recompute path — a duplicate push, a bad coinbase
   // dSHA, or any pre-merkle error returns before the call and the observer
   // is not invoked. Lets main.mo bump a promtracker gauge without Chain.mo
@@ -1317,10 +1318,11 @@ module {
     onMerkleInsns : ?((Nat64) -> ()),
   ) : Result.Result<PushBodyOk, Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
-    // Per-element size and non-empty checks are not needed here — Merkle.root
-    // walks every leaf through `Hasher.combineBlob32`, which traps if either
-    // input is not 32 bytes, and asserts `txids.size() >= 1` before the walk.
-    // A malformed body therefore bounces inside Merkle.root with the hasher's
+    // Per-element size and non-empty checks are not needed here —
+    // Bitcoin.merkleRoot walks every leaf through `Hasher.combineBlob32` or
+    // `loadBlob32`, which trap if a leaf is not 32 bytes, and asserts
+    // `txids.size() >= 1` before the walk. A malformed body therefore
+    // bounces inside Bitcoin.merkleRoot with the hasher's
     // own trap message (less specific than our old `#err("txids[i] is X bytes
     // ...")` but same effect — the update rolls back, nothing lands).
     // Depth-of-tree binding (no inclusion proof needed). Every internal merkle
@@ -1350,7 +1352,7 @@ module {
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
     };
-    // Mutated bodies (CVE-2012-2459): Merkle.root runs `Merkle.mutated` over
+    // Mutated bodies (CVE-2012-2459): Bitcoin.merkleRoot runs `Bitcoin.mutated` over
     // the complete txid list before building the tree and TRAPS on a flagged
     // list, e.g. `[cb, t1, t2, t2]` for the real `[cb, t1, t2]`, which has the
     // same root. The trap rolls back the whole call (in push_bodies: every
@@ -1360,10 +1362,10 @@ module {
     // the counter traps in wasi test mode ("cannot get performance_counter
     // when running locally"), so the measurement path has to be gated.
     let got = switch (onMerkleInsns) {
-      case null Merkle.root(txids);
+      case null Bitcoin.merkleRoot(txids);
       case (?f) {
         let m0 = Prim.performanceCounter(0);
-        let r = Merkle.root(txids);
+        let r = Bitcoin.merkleRoot(txids);
         f(Prim.performanceCounter(0) - m0);
         r;
       };
@@ -1419,19 +1421,19 @@ module {
   // merkle-root recomputation to the real update because that work alone
   // can exceed the 200M-instruction `canister_inspect_message` limit on
   // large blocks (a ~5000-tx block needs ~160M+ instructions just for
-  // Merkle.root). A body with a bad merkle still bounces inside the
+  // Bitcoin.merkleRoot). A body with a bad merkle still bounces inside the
   // real update — this just moves that specific denial from inspect to
   // update. Everything else (sizes, hash lookup, coinbase hash match,
   // canonical/fork ordering) stays at ingress.
   //
   // KEEP IN SYNC WITH `pushBody` ABOVE — same cheap checks, same order,
   // same error strings. The one check deliberately skipped here is
-  // `Merkle.root(txids) != merkleRoot`.
+  // `Bitcoin.merkleRoot(txids) != merkleRoot`.
   public func validatePushBody(self : State, blockHashInternal : Blob, txids : [Blob], coinbaseTx : Blob) : Result.Result<(), Text> {
     if (blockHashInternal.size() != 32) return #err("block hash must be 32 bytes");
     // The per-element size check and non-empty check that `pushBody` used to
     // run are removed here too — see pushBody for the rationale (both would
-    // trap downstream in Merkle.root's combineBlob32 anyway, and this is the
+    // trap downstream in Bitcoin.merkleRoot's hasher anyway, and this is the
     // 200M-budget hot path). The downstream `txids[0]` access on the dSHA
     // line below traps on an empty txids array, which inspect translates to
     // a false-return rejection — same effect as a `#err`.
@@ -1448,13 +1450,13 @@ module {
     if (cbSha.sumDouble() != txids[0]) {
       return #err("coinbase_tx hash does not match first txid");
     };
-    // Mutated-body check (CVE-2012-2459), the one pushBody's Merkle.root runs
+    // Mutated-body check (CVE-2012-2459), the one pushBody's Bitcoin.merkleRoot runs
     // up front and traps on. At most log2(n) Blob comparisons, no hashing, so
     // it is cheap enough for the inspect budget.
-    if (Merkle.mutated(txids)) {
+    if (Bitcoin.mutated(txids)) {
       return #err("mutated transaction list (CVE-2012-2459)");
     };
-    // Merkle.root(txids) check deliberately skipped — too heavy for the
+    // Bitcoin.merkleRoot(txids) check deliberately skipped — too heavy for the
     // 200M inspect budget on blocks with more than a few thousand txs.
     if (b.isCanonical) {
       if (b.height != self.bodiesNextHeight) {
@@ -1485,8 +1487,9 @@ module {
   //
   // A canonical body may also arrive in chunks, in order, each verified on
   // arrival against the header's Merkle root with the uploader's proof for
-  // the leaves still to come: Example 10 of the sha2 package
-  // (BitcoinChunksForward.mo), with the proofs of BitcoinChunkProof.mo. The
+  // the leaves still to come: ChunkVerifier.mo (the chunk verification of
+  // the mmr package without its backup), with the proofs of mmr's
+  // Prove.rightPeaks. The
   // first chunk carries the raw coinbase, which pins txids[0] to a real
   // transaction and with it the depth of the tree; later chunks carry none.
   // A chunk with an empty proof is the last one, and only then is the
@@ -1500,12 +1503,11 @@ module {
 
   // Deepest tree the chunk verifier has room for: 2^20 transactions, far
   // above any Bitcoin block (about 17K transactions at most fit in 4M weight
-  // units). Costs 2 * 20 + 3 hashers of 16 Nat16 each while an upload is in
-  // progress.
+  // units).
   let CHUNK_MAX_DEPTH : Nat = 20;
 
   // The pool of State.chunkHashers: CHUNK_MAX_DEPTH + 2 hashers (22).
-  public func newChunkHashers() : [var Hasher.Hasher] = ChunksForward.hashers(CHUNK_MAX_DEPTH);
+  public func newChunkHashers() : [var Hasher.Hasher] = ChunkVerifier.pool(CHUNK_MAX_DEPTH);
 
   public func txidTip(self : State) : TxidTip {
     {
@@ -1577,8 +1579,8 @@ module {
   // Accept the next chunk of the canonical body at the body tip: the txids
   // from the txid tip's offset on, named by `start` (the coinbase for the
   // first chunk, the offset for later ones). `proof` is
-  // the proof for the leaves after the chunk (BitcoinChunkProof.proof(txids,
-  // m) for a chunk ending at leaf m); empty for the last chunk. A chunk that
+  // the proof for the leaves after the chunk (mmr's
+  // Prove.rightPeaks(Bitcoin.levels(txids), m) for a chunk ending at leaf m); empty for the last chunk. A chunk that
   // fails a check before the verification returns #err; one that does not
   // verify TRAPS (see verifyBodyChunk). Either way the upload stays as it was.
   // Wrapper without the measurement side-channel (tests and anywhere else);
@@ -1646,7 +1648,7 @@ module {
   // The verification of a chunk, the one code path for pushBodyChunk and its
   // inspect mirror: checkBodyChunk (the block, the start against the txid tip
   // and, for the first chunk, the coinbase: dSHA == txids[0], > 64 bytes),
-  // then the chunk and its proof against the header's root with Example 10,
+  // then the chunk and its proof against the header's root with ChunkVerifier,
   // its equal-sibling checks included (which also reject a mutated block,
   // CVE-2012-2459, where the duplicated tail meets its original).
   //
@@ -1655,7 +1657,7 @@ module {
   // stored) and whether the chunk is its first. Its verifier is the one
   // thing that changes: a chunk that verifies advances it.
   //
-  // A chunk that does not verify TRAPS: our Example 10 keeps no backup of the
+  // A chunk that does not verify TRAPS: ChunkVerifier keeps no backup of the
   // peaks, so the verifier is left half-updated, and the trap rolls that back
   // with the rest of the call (in inspect: rejects the message). The checks
   // of checkBodyChunk, which come before the verifier is touched, return
@@ -1689,7 +1691,7 @@ module {
           firstTxIndex = self.txTrie.size();
           coinbase = cb;
           // On the pool: no upload is in progress, so nothing else uses it.
-          verifier = ChunksForward.withHashers(HeaderValue.merkleOf(b.value), self.chunkHashers);
+          verifier = ChunkVerifier.new(HeaderValue.merkleOf(b.value), self.chunkHashers);
         };
       };
     };

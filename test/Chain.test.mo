@@ -26,8 +26,8 @@ import Sha256 "mo:sha2/Sha256";
 
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
-import Merkle "mo:btc/Merkle";
-import ChunkProof "mo:btc/BitcoinChunkProof";
+import Bitcoin "mo:mmr/Bitcoin";
+import Prove "mo:mmr/Prove";
 import HeaderValue "../src/block_explorer/HeaderValue";
 
 // --- Test harness ---------------------------------------------------------
@@ -151,7 +151,7 @@ func body(k : Nat, others : [Blob]) : Body {
     coinbaseTx = cb;
     coinbaseTxid = cbid;
     txids = txids;
-    root = Merkle.root(txids);
+    root = Bitcoin.merkleRoot(txids);
   };
 };
 
@@ -775,7 +775,7 @@ suite(
         func cat64(a : Blob, b : Blob) : Blob {
           Blob.fromArray(Array.tabulate<Nat8>(64, func(i) = if (i < 32) a[i] else b[i - 32]));
         };
-        // Attack: upload the TWO level-1 node hashes as "leaves". Merkle.root
+        // Attack: upload the TWO level-1 node hashes as "leaves". The root
         // over two level-1 nodes DOES equal the real merkle root (collapsing
         // from level 1 produces the same root). To satisfy the "coinbase
         // hashes to txids[0]" check the attacker would need bytes whose dSHA
@@ -837,7 +837,7 @@ suite(
         // Real 3-tx body [cb, t2, t3]; the mutated [cb, t2, t3, t3] has the
         // same Merkle root (CVE-2012-2459) and a valid coinbase binding, so
         // only the mutation check stops it. pushBody traps on it inside
-        // Merkle.root, which a test cannot observe; inspect returns #err.
+        // Bitcoin.merkleRoot, which a test cannot observe; inspect returns #err.
         let b1 = body(1, [txid(2), txid(3)]);
         let h1 = mkHeaderM(g.hash, EASY_BITS, 1, 1, b1.root);
         ignore push(c, h1);
@@ -861,15 +861,19 @@ suite(
   },
 );
 
-// --- Chunked body uploads (push_body_chunk, Example 10) --------------------
+// --- Chunked body uploads (push_body_chunk, ChunkVerifier) -----------------
 
 func slice(a : [Blob], lo : Nat, hi : Nat) : [Blob] = Array.tabulate<Blob>(hi - lo : Nat, func(i) = a[lo + i]);
+
+// The proof for a chunk of `txids` that ends at leaf m: the peaks to the
+// right of leaf m - 1, lowest first (empty for m = n).
+func proofFor(txids : [Blob], m : Nat) : [Blob] = Prove.rightPeaks(Bitcoin.levels(txids), m);
 
 // Upload a chunk [lo, hi) of `b` with the proof for the leaves after it; the
 // coinbase goes with the chunk at offset 0.
 func chunk(c : Chain.State, hash : Blob, b : Body, lo : Nat, hi : Nat) : Result.Result<Chain.BodyChunkOk, Text> {
   let start : Chain.ChunkStart = if (lo == 0) #coinbase_tx(b.coinbaseTx) else #offset(lo);
-  c.pushBodyChunk(hash, start, slice(b.txids, lo, hi), ChunkProof.proof(b.txids, hi));
+  c.pushBodyChunk(hash, start, slice(b.txids, lo, hi), proofFor(b.txids, hi));
 };
 
 func errHas(r : Result.Result<Chain.BodyChunkOk, Text>, needle : Text) : Bool {
@@ -965,11 +969,11 @@ suite(
       func() {
         // A chunk that does not verify traps (it cannot be undone without a
         // backup of the peaks), which a test cannot catch: those rejections
-        // are tested on the verifier itself, packages/btc/test/ChunksForward.
+        // are tested on the verifier itself, test/ChunkVerifier.test.mo.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         let first = slice(b.txids, 0, 3);
-        let p3 = ChunkProof.proof(b.txids, 3);
+        let p3 = proofFor(b.txids, 3);
 
         assert errHas(c.pushBodyChunk(h, #offset(0), first, p3), "use #coinbase_tx");
         assert errHas(c.pushBodyChunk(h, #offset(1), first, p3), "does not match the txid tip");
@@ -981,7 +985,7 @@ suite(
 
         switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
         let next = slice(b.txids, 3, 5);
-        let p5 = ChunkProof.proof(b.txids, 5);
+        let p5 = proofFor(b.txids, 5);
         // A lost race: the same first chunk again, or a chunk for an old offset.
         assert errHas(c.pushBodyChunk(h, #coinbase_tx(b.coinbaseTx), first, p3), "does not match the txid tip");
         assert errHas(c.pushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
@@ -1021,14 +1025,14 @@ suite(
         // runs only in inspect, whose state changes are discarded. Here a
         // passing check of a later chunk advances the verifier, so it is the
         // last call on its chain. A chunk that does not verify traps, here as
-        // in the call; see packages/btc/test/ChunksForward for those.
+        // in the call; see test/ChunkVerifier.test.mo for those.
         let b = body7();
         let (c, h) = chainWithBlock1(b);
         // A whole body at once, empty proof.
         assert inspectOk(c.validatePushBodyChunk(h, #coinbase_tx(b.coinbaseTx), b.txids, []));
 
         let first = slice(b.txids, 0, 3);
-        let p3 = ChunkProof.proof(b.txids, 3);
+        let p3 = proofFor(b.txids, 3);
         // First chunk: the coinbase, then the chunk with its proof. Each check
         // uses a fresh verifier and stores nothing.
         assert inspectErr(c.validatePushBodyChunk(h, #coinbase_tx(cbTx(9)), first, p3), "coinbase_tx hash does not match");
@@ -1040,7 +1044,7 @@ suite(
         // Later chunks are verified against the upload's tree so far.
         switch (chunk(c, h, b, 0, 3)) { case (#ok _) {}; case _ assert false };
         let next = slice(b.txids, 3, 5);
-        let p5 = ChunkProof.proof(b.txids, 5);
+        let p5 = proofFor(b.txids, 5);
         assert inspectErr(c.validatePushBodyChunk(h, #offset(2), next, p5), "does not match the txid tip");
         switch (chunk(c, h, b, 3, 5)) { case (#ok ok) assert ok.offset == 5; case _ assert false };
         assert inspectOk(c.validatePushBodyChunk(h, #offset(5), slice(b.txids, 5, 7), []));
@@ -1122,7 +1126,7 @@ suite(
         assert c.forkBodyCount() == 0;
         assert c.txCountAt(0) == ?1;
         // An old chunk of the displaced block is now for a fork block.
-        assert errHas(c.pushBodyChunk(h, #offset(3), slice(b.txids, 3, 5), ChunkProof.proof(b.txids, 5)), "canonical blocks only");
+        assert errHas(c.pushBodyChunk(h, #offset(3), slice(b.txids, 3, 5), proofFor(b.txids, 5)), "canonical blocks only");
 
         // The new block 1 uploads from scratch.
         switch (chunk(c, hashOf(x1), bB, 0, 3)) {
