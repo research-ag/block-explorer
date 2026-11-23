@@ -28,10 +28,8 @@ import Sha256 "mo:sha2/Sha256";
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
 import Bitcoin "mo:mmr/Bitcoin";
-import Chunks "mo:mmr/Chunks";
 import Prove "mo:mmr/Prove";
 import HeaderValue "../src/block_explorer/HeaderValue";
-import Migration "../src/block_explorer/Migration";
 
 // --- Test harness ---------------------------------------------------------
 
@@ -1123,109 +1121,6 @@ suite(
           case _ assert false;
         };
         assert tipIs(c, 2, 0);
-      },
-    );
-  },
-);
-
-// --- One-off: Migration.run. Remove with src/block_explorer/Migration.mo ---
-
-// The pre-upgrade State, rebuilt from a current one: an upload in progress
-// with the old verifier record on the tree's hashers, and the tree as its
-// pool of hashers.
-func toOld(c : Chain.State) : Migration.OldState {
-  let bodyChunks : ?Migration.OldBodyChunks = switch (c.bodyChunks) {
-    case null null;
-    case (?p) ?{
-      hash = p.hash;
-      height = p.height;
-      firstTxIndex = p.firstTxIndex;
-      coinbase = p.coinbase;
-      verifier = {
-        root = p.verifier.root;
-        hasher = p.verifier.tree.hasher;
-        var count = p.verifier.count();
-        var done = p.verifier.done;
-      };
-    };
-  };
-  {
-    headerTrie = c.headerTrie;
-    txTrie = c.txTrie;
-    forks = c.forks;
-    uploaders = c.uploaders;
-    reorgLog = c.reorgLog;
-    coinbasesRegion = c.coinbasesRegion;
-    var coinbasesRegionSize = c.coinbasesRegionSize;
-    var coinbaseBackfillCursor = c.coinbaseBackfillCursor;
-    var tipWork = c.tipWork;
-    var bodiesNextHeight = c.bodiesNextHeight;
-    var bodyChunks;
-    chunkHashers = c.chunkTree.hasher;
-    var recentTimes = c.recentTimes;
-    var workMemo = c.workMemo;
-    var initialized = c.initialized;
-  };
-};
-
-suite(
-  "Migration (one-off)",
-  func() {
-
-    test(
-      "an upload in progress survives the migration and completes on the stored tree",
-      func() {
-        let b = body7();
-        let (c, h) = chainWithBlock1(b);
-        switch (chunk(c, h, b, 0, 3)) {
-          case (#ok ok) assert ok.offset == 3 and not ok.complete;
-          case _ assert false;
-        };
-        let m = Migration.run({ chain = toOld(c) }).chain;
-        assert tipIs(m, 1, 3);
-        assert m.chunkTree.hasher.size() == 22 and m.chunkTree.double and m.chunkTree.count == 3;
-        switch (m.bodyChunks) {
-          case (?p) assert p.verifier.count() == 3 and not p.verifier.complete() and not p.verifier.broken();
-          case null assert false;
-        };
-        switch (chunk(m, h, b, 3, 5)) {
-          case (#ok ok) assert ok.offset == 5 and not ok.complete;
-          case _ assert false;
-        };
-        // The verifier's tree is the stored tree, not a copy.
-        assert m.chunkTree.count == 5;
-        switch (chunk(m, h, b, 5, 7)) {
-          case (#ok ok) assert ok.offset == 7 and ok.complete;
-          case _ assert false;
-        };
-        assert tipIs(m, 2, 0);
-        assert m.txCountAt(1) == ?7;
-        assert m.blockTxids(h, 0, 10) == b.txids;
-        assert m.getCanonicalCoinbase(1) == ?b.coinbaseTx;
-      },
-    );
-
-    test(
-      "without an upload in progress the pool becomes the tree, and uploads run on it",
-      func() {
-        let b = body7();
-        let (c, h) = chainWithBlock1(b);
-        let m = Migration.run({ chain = toOld(c) }).chain;
-        switch (m.bodyChunks) {
-          case null {};
-          case (?_) assert false;
-        };
-        assert m.chunkTree.hasher.size() == 22 and m.chunkTree.double and m.chunkTree.count == 0;
-        assert tipIs(m, 1, 0);
-        switch (chunk(m, h, b, 0, 4)) {
-          case (#ok ok) assert ok.offset == 4 and not ok.complete;
-          case _ assert false;
-        };
-        switch (chunk(m, h, b, 4, 7)) {
-          case (#ok ok) assert ok.offset == 7 and ok.complete;
-          case _ assert false;
-        };
-        assert m.txCountAt(1) == ?7;
       },
     );
   },

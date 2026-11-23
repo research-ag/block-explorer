@@ -38,13 +38,7 @@ import HeaderValue "HeaderValue";
 import Headers "Headers";
 import Chain "Chain";
 import Esplora "Esplora";
-import Migration "Migration";
 
-// One-off: the chunk verifier becomes mmr's Chunks on a tree kept across
-// blocks (Chain.State.chunkTree, and the verifier of an upload in progress,
-// Chain.State.bodyChunks). Remove with Migration.mo after the upgrade has
-// run on mainnet.
-(with migration = Migration.run)
 actor BlockExplorer {
 
   // ---------------------------------------------------------------------
