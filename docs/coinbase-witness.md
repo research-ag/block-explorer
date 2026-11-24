@@ -147,6 +147,31 @@ plus the cursor:
 - Slot contents are a function of the chain alone, so the Region is
   byte-identical across ingest histories, like the coinbase region.
 - Size: about 32 MB for 500 K blocks.
+- **Gaps are negligible.** A scan of mainnet up to 977 357 (2026-11-24)
+  found 1 363 post-activation blocks without a commitment, 0.28 % of
+  495 534, from 483 162 on. About 337 a year early on, fewer than 60 a
+  year recently. They leave 87 KB of zero slots, so dense packing with an
+  index isn't worth it.
+
+**Variant: store only the root.** The reserved value has no defined
+meaning yet, and it is practically always zero. All 399 witnesses in a
+random sample of 400 post-activation coinbases had zero; the 400th block
+had no witness. So:
+
+- **Upload and store:** the canister verifies the uploaded reserved value
+  with the commitment, then stores only the root, in 32-byte slots
+  (about 16 MB).
+- **No flag needed:** whether the reserved value was zero can be recovered
+  later. `SHA256d(root || 32 zero bytes) == commitment` holds exactly then,
+  since another value with the same root would need a second preimage.
+- **What `/hex` does:** it rebuilds the coinbase with zeros where that
+  check holds, and answers 404 where it fails.
+- **Same check for clients:** anyone can verify a stored root against the
+  coinbase from `get_coinbase` this way.
+- **Cost:** coinbases with a non-zero reserved value can't be served, and
+  their roots can't be checked independently. The sample bounds them below
+  about 0.75 % of blocks at 95 % confidence. An exact count needs every
+  coinbase with its witness, from a node.
 
 **Reorgs.** If the cursor is past the common ancestor, it rewinds to the
 first height above it, together with `coinbaseBackfillCursor`. Witnesses of demoted blocks are
