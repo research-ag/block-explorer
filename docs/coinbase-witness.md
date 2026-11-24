@@ -33,13 +33,9 @@ witness data must commit to it (BIP141):
   32-byte item, `witness_reserved_value`. Bitcoin Core's mining code uses
   32 zero bytes, and the value has no defined meaning yet.
 
-Bitcoin Core enforces this in `CheckWitnessMalleation`. If the block has a
-commitment, the coinbase witness must have exactly that shape. If it has
-none, or the block is below activation, no transaction in the block may
-have a witness.
-
 So the coinbase of practically every block since segwit has a witness
-section the canister doesn't store. In the full serialization that is:
+section the canister doesn't store. In the coinbase's full serialization
+that is:
 
 | Bytes | Content |
 |---|---|
@@ -47,9 +43,43 @@ section the canister doesn't store. In the full serialization that is:
 | before the locktime | `01 20 <reserved value>` |
 | total | 36 bytes |
 
+The marker and flag belong to the transaction, not the block (BIP144).
+Each transaction in a block is serialized on its own, with marker, flag
+and witness if it has a witness and without them if it doesn't. A
+transaction's txid hashes its serialization without marker, flag and
+witness; its wtxid hashes the full one.
+
 The canister can't derive these bytes either: nothing it stores pins down
 the reserved value. That's why `GET /api/tx/:txid/hex` and `/raw` answer 404
 for such coinbases rather than serving bytes that differ from Esplora's.
+
+### What makes a block a segwit block
+
+The block header has no segwit flag, and a block has no marker of its own.
+What decides it is the coinbase's outputs, read by Bitcoin Core's
+`GetWitnessCommitmentIndex` (`src/consensus/validation.h`) and
+`CheckWitnessMalleation` (`src/validation.cpp`).
+
+**From activation on,** the last coinbase output matching the pattern above
+*is* the commitment, by definition. An output can't look like a commitment
+without being one. So:
+
+- **A block with such an output** must give its coinbase exactly one
+  32-byte witness item ("bad-witness-nonce-size" otherwise). That item's
+  hash with the witness root must equal the commitment
+  ("bad-witness-merkle-match" otherwise). The coinbase therefore always has
+  a witness, even when no other transaction in the block has one.
+- **A block without one** may not contain a witness in any transaction
+  ("unexpected-witness").
+
+From activation on, then, a block has witness data exactly when its
+coinbase has a commitment-shaped output. The canister can test that on the
+stripped coinbase it already stores; `Coinbases.witnessCommitted` does,
+with the same pattern.
+
+**Before activation,** no transaction may have a witness. A
+commitment-shaped output there is an ordinary OP_RETURN output with no
+meaning. (See [Pre-activation coinbases](#pre-activation-coinbases).)
 
 ## Applications
 
@@ -64,149 +94,113 @@ Storing `witness_root` and `witness_reserved_value` per block would enable:
 
 None of these has a consumer today. Revisit this design when one appears.
 
-## Design
+## Design: a separate witness upload
 
-### Uploader
+The witness data is kept completely separate from the body:
 
-The uploaders get their data from these RPCs today:
+- the existing upload API and coinbase storage stay as they are;
+- the witness root and the reserved value are uploaded after the block's
+  coinbase is stored, through their own endpoint;
+- they're stored in their own Region.
 
-| Uploader | RPCs |
+### Canister
+
+**Endpoint.** For example:
+
+```
+push_coinbase_witnesses(start_height : nat,
+  witnesses : vec opt record { witness_root : blob; witness_reserved_value : blob })
+  -> (variant { ok : record { accepted : nat }; err : text })
+```
+
+It works like `push_coinbases_backfill`:
+
+- `start_height` must equal a witness cursor, which starts at 481 824
+  (nothing below it has a witness).
+- Each entry is checked against the canonical coinbase already stored at
+  its height, so the cursor can't pass `coinbaseBackfillCursor`.
+- Processing stops at the first failure, and the entries before it are
+  kept.
+
+**Checks for each entry:**
+
+| Stored coinbase at its height | Entry |
 |---|---|
-| body-uploader, chunk-uploader | `getblock <hash> 1` for the txids, `getrawtransaction` for the coinbase |
-| `coinbase-backfill.py` | `getblock <hash> 0` |
+| Has a commitment | Must be present, with `SHA256d(witness_root \|\| witness_reserved_value) == commitment` |
+| No commitment | Must be null: the block has no witness |
 
-No RPC returns the witness root directly. One call, `getblock <hash> 0`,
-returns the raw block with its witnesses, and everything else can be
-computed from it:
-
-- **txids:** `dSHA256` of each transaction's stripped serialization;
-- **wtxids:** `dSHA256` of each full serialization, with the coinbase's
-  replaced by zeros;
-- **`witness_root`:** the Merkle root of the wtxids, built by the same tree
-  rule as for txids;
-- **the coinbase:** in full, with its witness.
-
-(`getblock <hash> 2` lists the wtxids as each transaction's `hash`, but its
-JSON is far larger than the raw block.)
-
-The body uploaders would replace `getblock 1` plus `getrawtransaction` with
-one `getblock 0` and a parse, and would stop stripping the witness.
-
-### Canister: upload
-
-The coinbase arrives in its full serialization, with `witness_root : ?Blob`
-alongside it. The canister then:
-
-1. **Parses the coinbase.** Bytes 4..6 equal to `00 01` mark the segwit
-   serialization. That is unambiguous, because in a stripped coinbase
-   byte 4 is the input count, `01`.
-2. **Checks the witness shape.** In the segwit form, the input's witness
-   must be exactly one 32-byte item: `witness_reserved_value`.
-3. **Finds the commitment:** the last output whose script is at least
-   38 bytes long and starts `6a24aa21a9ed`.
-4. **Verifies the commitment:**
-   `SHA256d(witness_root || witness_reserved_value) == commitment`.
-5. **Runs today's checks on the stripped form.** It rebuilds the stripped
-   form (version, inputs, outputs, locktime) and checks it is longer than
-   64 bytes and that `dSHA256` equals txid 0. The depth-of-tree binding is
-   about the txid preimage, which is why the length check applies to the
-   stripped form.
-
-The canister rejects:
-
-| Case | Reason |
-|---|---|
-| A witness but no commitment output | Such a block is invalid by consensus |
-| A witness of any other shape than one 32-byte item | Invalid by consensus |
-| Any witness below height 481 824 | Invalid by consensus |
-| A commitment and a witness, with `witness_root` missing or wrong | Can't be verified |
-| `witness_root` given with a stripped coinbase that has a commitment | The reserved value is missing |
-
-**Old uploaders.** A stripped coinbase without `witness_root` is accepted
-as it is today, and nothing new is stored for it. Below 481 824, an output
-that looks like a commitment has no meaning and is ignored.
+The commitment is the last matching output, as in Bitcoin Core. Null
+entries move the cursor past blocks without a witness, so the uploader
+states that explicitly and the canister confirms it.
 
 **Everything stored stays pinned by the header.** The commitment binds the
-reserved value and the root. The commitment sits in the coinbase, which
-txid 0 binds to the header's Merkle root. A different
-(root, reserved value) pair would need a second SHA256d preimage.
+pair. The commitment sits in the stored coinbase, which txid 0 binds to the
+header's Merkle root. Another pair would need a second SHA256d preimage.
+
+**Store.** A stable Region of 64-byte slots, one per height from 481 824,
+plus the cursor:
+
+- A slot is filled for a committed block below the cursor and left zero
+  otherwise. Zero can't stand for "absent", because the reserved value is
+  normally all zeros; the cursor and the stored coinbase say which slots
+  are filled.
+- Slot contents are a function of the chain alone, so the Region is
+  byte-identical across ingest histories, like the coinbase region.
+- Size: about 32 MB for 500 K blocks.
+
+**Reorgs.** If the cursor is past the common ancestor, it rewinds to the
+first height above it, together with `coinbaseBackfillCursor`. Witnesses of demoted blocks are
+dropped rather than moved onto fork bodies, and are uploaded again if their
+block is promoted back. Fork blocks get no witness storage. This keeps
+`ForkBody` and the chunked-upload state unchanged. The new `State` fields
+(the Region and the cursor) still need a migration.
+
+**Queries.**
+
+- **A new query,** for example
+  `get_coinbase_witness(height) : opt record { witness_root : blob; witness_reserved_value : blob }`.
+- **`/hex` and `/raw`** rebuild a committed coinbase that has its witness
+  stored: version, `00 01`, the stripped bytes between version and
+  locktime, `01 20 <reserved value>`, locktime. The rebuild is exact,
+  because consensus allows the coinbase witness only that shape. Without
+  a stored witness, they answer 404 as today.
 
 **Inspect.** `canister_inspect_message` must apply the same checks, by the
 repo's rule that inspect rejects exactly what the call would.
 
-**Cost.** One parse and one SHA256d of 64 bytes per block: negligible next
-to the txid Merkle verification.
+**Cost.** For each entry: one coinbase read from the Region, a parse of its
+outputs, and one SHA256d of 64 bytes.
 
-### Candid
+### Uploader
 
-All of the following additions are backward compatible:
+The witness upload is its own process, running behind the coinbase cursor.
+It could live in `coinbase-backfill.py`, or in a new script. The existing
+uploaders don't change.
 
-- **`push_body`:** `(hash, txids, coinbase_tx, opt blob)`, with the root as
-  a trailing optional argument.
-- **`push_bodies`:** a fourth, `opt blob` element in each entry's tuple. A
-  record extended with an `opt` field still decodes old messages.
-- **`push_body_chunk`:** a trailing `opt blob`, meaningful only together
-  with `#coinbase_tx`.
-- **`push_fork_coinbase`:** `(hash, coinbase, opt blob)`.
-- **Backfill** of coinbases already stored, described under
-  [Option B](#canister-storage) below.
-- **A new query,** for example
-  `get_coinbase_witness(height) : opt record { witness_root : blob; witness_reserved_value : blob }`.
+No RPC returns the witness root directly, but one call per block gives
+everything it's computed from. Either call works:
 
-### Canister: storage
+- **`getblock <hash> 2`** returns, for each transaction, `txid`, `hash` (the
+  wtxid) and `hex` (the full serialization, with the witness). The
+  uploader parses nothing. Two caveats:
+  - The coinbase's `hash` is its real wtxid, so the uploader must replace
+    it with 32 zero bytes before computing the root.
+  - The JSON is much larger than the raw block, because every input and
+    output is decoded.
+- **`getblock <hash> 0`** returns the raw block, with witnesses. The
+  uploader splits it into transactions and computes:
+  - the txids: `dSHA256` of each serialization without the witness;
+  - the wtxids: `dSHA256` of each full serialization, with the coinbase's
+    taken as zero.
 
-There are two options.
+  `coinbase-backfill.py` already parses raw blocks this way.
 
-**A. Store the full coinbase in the region.**
+Either way:
 
-- `/hex` serves the bytes as stored, and the reserved value travels inside
-  them.
-- Each segwit-era entry grows by 36 bytes, and the root still needs its own
-  32 bytes per block elsewhere.
-- Every reader of region bytes has to skip the marker: `Coinbases.scriptSig`,
-  `Coinbases.witnessCommitted`, `get_coinbase`, and the frontend's
-  scriptSig parse.
-- **Determinism breaks.** A block's entry would depend on which uploader
-  sent its coinbase: stripped from an old one, full from a new one. Avoiding
-  that means refusing stripped coinbases that have a commitment from some
-  point on. Without that, the region loses its "byte-identical across any
-  ingest history" property.
-- Converting the roughly 500 K segwit-era entries already stored means
-  rebuilding the region from height 481 824 up, because entries are back to
-  back.
-
-**B. Keep the stripped coinbase in the region, plus 64 bytes per block in a
-separate store** (the root and the reserved value).
-
-- **Nothing existing changes:** not the region, `get_coinbase`, the
-  frontend, or fork-coinbase handling.
-- **`/hex` rebuilds the full form:** version, `00 01`, inputs, outputs,
-  `01 20 <reserved value>`, locktime. The rebuild is exact, because
-  consensus allows the coinbase witness only that shape.
-- **Size:** about 32 MB for 500 K blocks.
-
-B is the smaller change. It consists of:
-
-- **The store.** A stable Region of 64-byte slots indexed by height, with a
-  fill cursor gated like `coinbaseBackfillCursor`. A presence bit would
-  also work, but zeros can't mean "absent", since the reserved value is
-  normally all zeros.
-- **Reorgs.** The store rewinds together with the coinbase region, and the
-  demoted 64 bytes move onto the fork body, as coinbases do.
-- **State changes.** `ForkBody` and the chunked-upload state each get an
-  optional 64-byte field. That is a stable-type change, so it needs a
-  migration.
-- **Backfill.** The stripped coinbase already stored holds the commitment.
-  So for each height the uploader sends only
-  `(witness_root, witness_reserved_value)`, 64 bytes. The canister checks
-  `SHA256d(root || reserved) == commitment` and stores the pair. No
-  coinbase is resent.
-
-**A simpler upload API.** With B, the upload API could also keep
-`coinbase_tx` stripped, adding a trailing
-`opt record { witness_root : blob; witness_reserved_value : blob }` that the
-canister verifies the same way. The canister then needs no segwit parser.
-The uploaders still need `getblock 0` to compute the root.
+- `witness_root` is the Merkle root of the wtxids, built by the same tree
+  rule as for txids;
+- `witness_reserved_value` is the coinbase's single witness item;
+- a block whose coinbase has no witness gets a null entry.
 
 ### Tests
 
@@ -215,10 +209,55 @@ The uploaders still need `getblock 0` to compute the root.
 rebuild test would also need that block's witness root, computed from all
 its wtxids (from a node, or from Esplora's `/block/:hash/txs`).
 
-## Independent of this design
+## Alternatives considered
 
-Today's `/hex` rule answers 404 for any coinbase with an output shaped like
-a commitment, at any height. Below 481 824, consensus allows no witness at
-all, so the stored bytes there are always the full serialization. Checking
-the height would let `/hex` serve those coinbases. Whether any
-pre-activation coinbase has such an output hasn't been checked.
+**Uploading the witness with the body.**
+
+- The coinbase would arrive either in full with the root alongside it, or
+  stripped with an optional pair. Either way that is one optional argument.
+- The canister would check the witness shape and the commitment, then run
+  today's checks on the stripped form.
+- **Candid:** the new arguments could be added compatibly to `push_body`,
+  `push_bodies`, `push_body_chunk` and `push_fork_coinbase`.
+- **Cost:** it ties the witness to every body path. `ForkBody` and the
+  chunked-upload state would have to carry it, and old uploaders would need
+  a rule for when the argument may be missing.
+
+**Storing the full coinbase in the existing region.**
+
+- **Space:** the same bytes as the separate store, plus 4 constant bytes
+  per block (marker, flag, item count, item length).
+- **The layout has consequences:**
+  - every reader of the region bytes has to skip the marker:
+    `Coinbases.scriptSig`, `Coinbases.witnessCommitted`, `get_coinbase` and
+    the frontend's scriptSig parse;
+  - the roughly 500 K entries already stored can be converted only by
+    rebuilding the region from 481 824 up, because entries are back to
+    back;
+  - a block's entry would depend on which uploader sent its coinbase,
+    unless stripped coinbases that have a commitment are refused.
+
+## Pre-activation coinbases
+
+Today's `/hex` rule answers 404 for any coinbase with a commitment-shaped
+output, at any height. From activation on, that is exact: such a coinbase
+always has a witness. Below 481 824, the stored bytes are always the full
+serialization, so a height check would let `/hex` serve any pre-activation
+coinbase that has such an output.
+
+Such coinbases exist. On 2026-11-24 I scanned every coinbase below 481 824
+stored in the mainnet canister with the same test as
+`Coinbases.witnessCommitted`:
+
+- **13 245 have a commitment-shaped output,** from height 434 499 to
+  481 823, the last block before activation. That is about 28 % of the
+  47 325 blocks in that range.
+- **Each has exactly one such output.** In 1 792 of them the script is
+  longer than 38 bytes.
+- **They match Esplora.** For 8 sampled coinbases (heights 434 499,
+  454 977, 462 705, 463 220, 466 827, 470 692, 479 139 and 481 823),
+  Esplora's `/tx/:txid/hex` is byte for byte the stored bytes: they have no
+  witness.
+
+Miners running segwit-ready software added the commitment while segwit
+was still being signalled. Nothing checked it before activation.
