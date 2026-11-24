@@ -34,11 +34,12 @@
 //
 // Raw transactions aren't stored, except each canonical block's coinbase,
 // without its witness. `/hex` and `/raw` serve a coinbase only where that
-// is its full serialization, byte for byte Esplora's: where it has no
-// witness commitment output. A coinbase with one (every block since
-// segwit, in practice) has a witness, the 32-byte witness reserved value,
-// which no stored data pins down: 404, rather than other bytes than
-// Esplora's. A design for storing it, deferred: docs/coinbase-witness.md.
+// is its full serialization, byte for byte Esplora's: below segwit
+// activation (481 824) always, from there on where it has no witness
+// commitment output. A coinbase with one there (every block since segwit,
+// in practice) has a witness, the 32-byte witness reserved value, which no
+// stored data pins down: 404, rather than other bytes than Esplora's. A
+// design for storing it, deferred: docs/coinbase-witness.md.
 //
 // Not implemented (would require full tx / mempool / address / raw block data):
 //   /block/:hash/txs[/...], /block/:hash/raw, /tx/:txid, /tx/:txid/hex and
@@ -520,7 +521,7 @@ module {
           case (?tx) tx;
           case null return notFound("Raw transaction not stored (coinbase transactions only)");
         };
-        if (Coinbases.witnessCommitted(tx) != ?false) {
+        if (not Coinbases.isFullSerialization(l.height, tx)) {
           return notFound("Raw transaction not stored (the coinbase's witness is not stored)");
         };
         return if (route == "hex") plain(200, Header.bytesToHex(tx)) else bytes(200, "application/octet-stream", tx);

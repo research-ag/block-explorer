@@ -165,10 +165,22 @@ module {
   // witness reserved value, which isn't stored: the full serialization of
   // such a coinbase is then not known. Without one, no transaction of the
   // block may carry witness data, so the stripped bytes are the full
-  // serialization.
+  // serialization. Before segwit activation no transaction may carry
+  // witness data at all, and an output of that shape means nothing (13 245
+  // mainnet coinbases between 434 499 and 481 823 have one).
   //
   // Null if `cb` doesn't parse as a transaction with one input that ends
   // exactly at the end of the bytes. Never traps.
+
+  // First mainnet block with segwit (BIP141) active.
+  public let SEGWIT_HEIGHT : Nat = 481_824;
+
+  // Whether the stored (witness-stripped) canonical coinbase `cb` at
+  // `height` is the coinbase's full serialization: below segwit activation
+  // always; from activation on, when it has no witness commitment output.
+  public func isFullSerialization(height : Nat, cb : Blob) : Bool {
+    height < SEGWIT_HEIGHT or witnessCommitted(cb) == ?false;
+  };
 
   // A CompactSize at `off`: (value, bytes taken), or null past the end.
   func compactSize(cb : Blob, off : Nat) : ?(Nat, Nat) {

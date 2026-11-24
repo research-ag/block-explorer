@@ -169,10 +169,13 @@ codes and error texts as its electrs backend):
   (bitcoind's `gettxoutproof` hex), computed from the block's txids.
 - `GET /api/tx/:txid/hex` / `/raw` — coinbase transactions without a
   witness only, byte for byte Esplora's. The coinbase is stored
-  witness-stripped; one with a witness commitment output (every block
-  since segwit, in practice) has a witness, the 32-byte witness reserved
-  value, which isn't stored and no stored data pins down: 404 rather than
-  bytes other than Esplora's. A design for storing it, deferred:
+  witness-stripped. From segwit activation (height 481 824) on, one with
+  a witness commitment output (every block since, in practice) has a
+  witness, the 32-byte witness reserved value, which isn't stored and no
+  stored data pins down: 404 rather than bytes other than Esplora's.
+  Before activation no witness is allowed, so every coinbase is served,
+  including the 13 245 that have a commitment-shaped output anyway. A
+  design for storing the witness, deferred:
   [docs/coinbase-witness.md](docs/coinbase-witness.md).
 
 A block whose body isn't completely indexed (above the body tip, or mid
