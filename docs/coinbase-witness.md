@@ -259,5 +259,7 @@ stored in the mainnet canister with the same test as
   Esplora's `/tx/:txid/hex` is byte for byte the stored bytes: they have no
   witness.
 
-Miners running segwit-ready software added the commitment while segwit
-was still being signalled. Nothing checked it before activation.
+Presumably these came from mining software that added the commitment
+ahead of activation, when nothing checked it. (Height 434 499 is from
+October 2016, around the release of Bitcoin Core 0.13.1, the first with
+segwit for mainnet.)
