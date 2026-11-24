@@ -38,7 +38,7 @@
 // witness commitment output. A coinbase with one (every block since
 // segwit, in practice) has a witness, the 32-byte witness reserved value,
 // which no stored data pins down: 404, rather than other bytes than
-// Esplora's.
+// Esplora's. A design for storing it, deferred: docs/coinbase-witness.md.
 //
 // Not implemented (would require full tx / mempool / address / raw block data):
 //   /block/:hash/txs[/...], /block/:hash/raw, /tx/:txid, /tx/:txid/hex and

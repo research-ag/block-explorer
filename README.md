@@ -172,7 +172,8 @@ codes and error texts as its electrs backend):
   witness-stripped; one with a witness commitment output (every block
   since segwit, in practice) has a witness, the 32-byte witness reserved
   value, which isn't stored and no stored data pins down: 404 rather than
-  bytes other than Esplora's.
+  bytes other than Esplora's. A design for storing it, deferred:
+  [docs/coinbase-witness.md](docs/coinbase-witness.md).
 
 A block whose body isn't completely indexed (above the body tip, or mid
 chunked upload) has no txids yet, and its txids count as unconfirmed.
