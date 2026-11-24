@@ -154,9 +154,17 @@ plus the cursor:
   index isn't worth it.
 
 **Variant: store only the root.** The reserved value has no defined
-meaning yet, and it is practically always zero. All 399 witnesses in a
-random sample of 400 post-activation coinbases had zero; the 400th block
-had no witness. So:
+meaning yet, and it is practically always zero. Every committed
+post-activation coinbase up to 977 357 was read from a Bitcoin Core node
+(2026-11-24):
+
+- **494 135 of the 494 171 are zero.**
+- **36 are not, all with the same value:** `[P2Pool]` four times in ASCII
+  (`5b5032506f6f6c5d` × 4), so P2Pool used it as a tag.
+- **Where they fall:** heights 483 802 to 955 609, 29 of them before
+  563 000.
+
+So:
 
 - **Upload and store:** the canister verifies the uploaded reserved value
   with the commitment, then stores only the root, in 32-byte slots
@@ -168,10 +176,11 @@ had no witness. So:
   check holds, and answers 404 where it fails.
 - **Same check for clients:** anyone can verify a stored root against the
   coinbase from `get_coinbase` this way.
-- **Cost:** coinbases with a non-zero reserved value can't be served, and
-  their roots can't be checked independently. The sample bounds them below
-  about 0.75 % of blocks at 95 % confidence. An exact count needs every
-  coinbase with its witness, from a node.
+- **Cost:** the 36 P2Pool coinbases can't be served, and their roots can't
+  be checked independently.
+- **Or keep them:** since they all share one value, a constant in the code
+  would also cover them: try zero, then `[P2Pool]` × 4. Any future
+  non-zero value would still need storage or a 404.
 
 **Reorgs.** If the cursor is past the common ancestor, it rewinds to the
 first height above it, together with `coinbaseBackfillCursor`. Witnesses of demoted blocks are
