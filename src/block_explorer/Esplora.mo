@@ -22,8 +22,8 @@
 //                                            (Electrum's get_merkle)
 //   GET /api/tx/:txid/merkleblock-proof   -> text (hex of bitcoind's merkleblock,
 //                                            as `gettxoutproof`)
-//   GET /api/tx/:txid/hex                 -> text  (coinbase transactions only,
-//   GET /api/tx/:txid/raw                 -> bytes  witness-stripped)
+//   GET /api/tx/:txid/hex                 -> text  (coinbase transactions
+//   GET /api/tx/:txid/raw                 -> bytes  without a witness only)
 //
 // The tx routes see the canonical chain up to the body tip (the txid
 // index): a txid that isn't there is unconfirmed as far as these routes
@@ -33,10 +33,12 @@
 // mid-way through a chunked upload) has no txids: 404.
 //
 // Raw transactions aren't stored, except each canonical block's coinbase,
-// without its witness. For a coinbase with a witness commitment, Esplora's
-// `/hex` and `/raw` also carry the coinbase's witness (the 32-byte witness
-// reserved value), which no stored data pins down; ours are the stripped
-// serialization, whose double SHA-256 is the txid.
+// without its witness. `/hex` and `/raw` serve a coinbase only where that
+// is its full serialization, byte for byte Esplora's: where it has no
+// witness commitment output. A coinbase with one (every block since
+// segwit, in practice) has a witness, the 32-byte witness reserved value,
+// which no stored data pins down: 404, rather than other bytes than
+// Esplora's.
 //
 // Not implemented (would require full tx / mempool / address / raw block data):
 //   /block/:hash/txs[/...], /block/:hash/raw, /tx/:txid, /tx/:txid/hex and
@@ -58,6 +60,7 @@ import Bitcoin "mo:mmr/Bitcoin";
 import Prove "mo:mmr/Prove";
 
 import Chain "Chain";
+import Coinbases "Coinbases";
 import Header "mo:btc/Header";
 import HeaderValue "HeaderValue";
 
@@ -510,12 +513,17 @@ module {
 
       if (route == "hex" or route == "raw") {
         // Only coinbases (position 0) are stored, and only at heights the
-        // coinbase backfill has reached.
+        // coinbase backfill has reached; served only where the stored
+        // (witness-stripped) bytes are the whole transaction.
         let raw = if (l.position == 0) chain.getCanonicalCoinbase(l.height) else null;
-        return switch (raw) {
-          case (?tx) if (route == "hex") plain(200, Header.bytesToHex(tx)) else bytes(200, "application/octet-stream", tx);
-          case null notFound("Raw transaction not stored (coinbase transactions only)");
+        let tx = switch (raw) {
+          case (?tx) tx;
+          case null return notFound("Raw transaction not stored (coinbase transactions only)");
         };
+        if (Coinbases.witnessCommitted(tx) != ?false) {
+          return notFound("Raw transaction not stored (the coinbase's witness is not stored)");
+        };
+        return if (route == "hex") plain(200, Header.bytesToHex(tx)) else bytes(200, "application/octet-stream", tx);
       };
 
       let levels = switch (treeLevels(chain, b)) {

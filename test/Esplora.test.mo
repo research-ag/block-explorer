@@ -31,6 +31,7 @@ import Prove "mo:mmr/Prove";
 
 import Header "mo:btc/Header";
 import Chain "../src/block_explorer/Chain";
+import Coinbases "../src/block_explorer/Coinbases";
 import Esplora "../src/block_explorer/Esplora";
 import Headers "../src/block_explorer/Headers";
 import HeaderValue "../src/block_explorer/HeaderValue";
@@ -113,8 +114,22 @@ func mkHeader(prevHash : Blob, merkle : Blob, nonce : Nat32) : Blob {
 
 func hashOf(raw : Blob) : Blob = Header.headerHashBlob(SHA, raw);
 
-// A synthetic raw coinbase keyed by `k` (65 bytes: over the 64-byte floor).
-func cbTx(k : Nat) : Blob = Array.tabulate<Nat8>(65, func(i) = Nat.toNat8((k * 7 + i * 13 + 1) % 256)).toBlob();
+// A synthetic legacy coinbase keyed by `k`: one input (null prevout,
+// scriptSig the 4 bytes of `k`), one 50 BTC output (a 25-byte script),
+// locktime 0, no witness commitment. 89 bytes: over the 64-byte floor.
+func cbTx(k : Nat) : Blob {
+  let b = List.empty<Nat8>();
+  func add(bytes : [Nat8]) { for (x in bytes.values()) b.add(x) };
+  add([1, 0, 0, 0, 1]);
+  add(Array.repeat<Nat8>(0, 32));
+  add([0xff, 0xff, 0xff, 0xff, 4]);
+  add(Array.tabulate<Nat8>(4, func(i) = Nat.toNat8((k / (256 ** i)) % 256)));
+  add([0xff, 0xff, 0xff, 0xff, 1]);
+  add([0x00, 0xf2, 0x05, 0x2a, 0x01, 0x00, 0x00, 0x00, 25]);
+  add(Array.tabulate<Nat8>(25, func(i) = Nat.toNat8((k + i) % 256)));
+  add([0, 0, 0, 0]);
+  b.toArray().toBlob();
+};
 
 // A distinct synthetic txid per `k`.
 func tx(k : Nat) : Blob = dSha(Array.tabulate<Nat8>(4, func(i) = Nat.toNat8((k / (256 ** i)) % 256)).toBlob());
@@ -266,6 +281,22 @@ let B100005_PROOFS : [(Nat, Text, Text, Text)] = [
   (0, "{\"confirmed\":true,\"block_height\":100005,\"block_hash\":\"000000000000dab0130bbcc991d3d7ae6b81aa6f50a798888dfe62337458dc45\",\"block_time\":1293625703}", "{\"block_height\":100005,\"merkle\":[],\"pos\":0}", "0100000079cda856b143d9db2c1caff01d1aecc8630d30625d10e8b4b8b0000000000000b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f196367291b4d4c86041b8fa45d630100000001b50cc069d6a3e33e3ff84a5c41d9d3febe7c770fdcc96b2c3ff60abe184f19630101"),
 ];
 
+// Segwit-era blocks of one transaction, the coinbase, as Blockstream's
+// esplora serves them: 500044's coinbase has a witness commitment output
+// and so a witness (Esplora's hex carries it); 500342's has neither, so its
+// stored bytes are Esplora's hex. The stripped form of 500044's coinbase
+// (what the canister stores) is Esplora's hex without the segwit marker and
+// flag and without the witness (`01 20` and 32 zero bytes).
+let B500044_HASH = "0000000000000000001f9ba01120351182680ceba085ffabeaa532cda35f2cc7";
+let B500044_HEADER = "000000205d6977a1709f8395b75184782234e50e9964ae03708075000000000000000000cb49fe5b48188143fdaa5362e98036d05f03647e9f1a029598e7484f6e955fdb744b385a45960018c32a181a";
+let B500044_TXIDS_JSON = "[\"db5f956e4f48e79895021a9f7e64035fd03680e96253aafd438118485bfe49cb\"]";
+let B500044_ESPLORA_HEX = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff24034ca107174d696e656420627920416e74506f6f6c6e45205a384b745204000092630200ffffffff02807c814a000000001976a914eb181d60731cc7521db83a8f93beba8da692a22988ac0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf90120000000000000000000000000000000000000000000000000000000000000000000000000";
+let B500044_STRIPPED_HEX = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff24034ca107174d696e656420627920416e74506f6f6c6e45205a384b745204000092630200ffffffff02807c814a000000001976a914eb181d60731cc7521db83a8f93beba8da692a22988ac0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf900000000";
+let B500342_HASH = "0000000000000000007737d223c2e28b36b1a1d9c8f038453137e8195b0b6e26";
+let B500342_HEADER = "00000020fdb6ad2b08e66a2a11e1d6f081ca97c066444205ef221a00000000000000000008058e88c849438a3f9952366740c9698c16ddbbf227ef9745b1fe51b242a65c31243b5a45960018edbd03df";
+let B500342_TXIDS_JSON = "[\"5ca642b251feb14597ef27f2bbdd168c69c940673652993f8a4349c8888e0508\"]";
+let B500342_ESPLORA_HEX = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff5f0376a2071a2f5669614254432f4d696e6564206279206c7a6f7a313233342f2cfabe6d6da6d88f687bb14bcc0ebb42353875893e6e650aadd4f3c06645522a40c278ccb7010000000000000012d329f872eed68c722d5fafa8ed97dc000000ffffffff01807c814a000000001976a914536ffa992491508dca0354e52f32a3a7a679a53a88ac00000000";
+
 // A chain rooted at a real block (at height 0) with its body.
 func realChain(headerHex : Text, txidsJson : Text, coinbaseHex : Text) : (Chain.State, [Blob]) {
   let c = Chain.fromRootHex(headerHex, Headers.KEY_SIZE);
@@ -332,6 +363,44 @@ suite(
         let (c, txids) = realChain(B100005_HEADER, B100005_TXIDS_JSON, B100005_COINBASE);
         assert txids.size() == 1;
         checkRealBlock(c, txids, B100005_HASH, B100005_TXIDS_JSON, B100005_COINBASE, B100005_PROOFS, "100005");
+      },
+    );
+    test(
+      "segwit era: a coinbase without a witness commitment is served, one with it is not",
+      func() {
+        // 500342: no commitment, so no witness; the stored bytes are Esplora's.
+        let (c1, t1) = realChain(B500342_HEADER, B500342_TXIDS_JSON, B500342_ESPLORA_HEX);
+        let cb1 = be(t1[0]);
+        expect(c1, "/api/block/" # B500342_HASH # "/txids", 200, B500342_TXIDS_JSON);
+        expect(c1, "/api/tx/" # cb1 # "/hex", 200, B500342_ESPLORA_HEX);
+        assert get(c1, "/api/tx/" # cb1 # "/raw").body == Header.hexToBlob(B500342_ESPLORA_HEX);
+        // 500044: committed, so it has a witness the canister doesn't store.
+        let (c2, t2) = realChain(B500044_HEADER, B500044_TXIDS_JSON, B500044_STRIPPED_HEX);
+        let cb2 = be(t2[0]);
+        expect(c2, "/api/tx/" # cb2 # "/hex", 404, "Raw transaction not stored (the coinbase's witness is not stored)");
+        expect(c2, "/api/tx/" # cb2 # "/raw", 404, "Raw transaction not stored (the coinbase's witness is not stored)");
+        // The rest of its routes are unaffected.
+        expect(c2, "/api/block/" # B500044_HASH # "/txids", 200, B500044_TXIDS_JSON);
+        expect(c2, "/api/tx/" # cb2 # "/merkle-proof", 200, "{\"block_height\":0,\"merkle\":[],\"pos\":0}");
+        assert ok(c2, "/api/tx/" # cb2 # "/status").contains(#text "\"confirmed\":true");
+      },
+    );
+    test(
+      "Coinbases.witnessCommitted parses the stored coinbase",
+      func() {
+        assert Coinbases.witnessCommitted(Header.hexToBlob(B500044_STRIPPED_HEX)) == ?true;
+        assert Coinbases.witnessCommitted(Header.hexToBlob(B500342_ESPLORA_HEX)) == ?false;
+        assert Coinbases.witnessCommitted(Header.hexToBlob(B100002_COINBASE)) == ?false;
+        assert Coinbases.witnessCommitted(GENESIS_COINBASE) == ?false;
+        assert Coinbases.witnessCommitted(cbTx(7)) == ?false;
+        // Not a whole one-input transaction: null.
+        let s = Header.hexToBlob(B500044_STRIPPED_HEX);
+        assert Coinbases.witnessCommitted(Array.tabulate<Nat8>(s.size() - 1 : Nat, func(i) = s[i]).toBlob()) == null;
+        assert Coinbases.witnessCommitted(Array.tabulate<Nat8>(s.size() + 1, func(i) = if (i < s.size()) s[i] else 0).toBlob()) == null;
+        // Esplora's serialization with the witness doesn't parse as stripped.
+        assert Coinbases.witnessCommitted(Header.hexToBlob(B500044_ESPLORA_HEX)) == null;
+        assert Coinbases.witnessCommitted("") == null;
+        assert Coinbases.witnessCommitted(Array.tabulate<Nat8>(65, func(i) = Nat.toNat8((i * 13 + 1) % 256)).toBlob()) == null;
       },
     );
   },

@@ -167,9 +167,12 @@ codes and error texts as its electrs backend):
 - `GET /api/tx/:txid/merkle-proof` (Electrum's `get_merkle`:
   `{block_height, merkle, pos}`) and `/api/tx/:txid/merkleblock-proof`
   (bitcoind's `gettxoutproof` hex), computed from the block's txids.
-- `GET /api/tx/:txid/hex` / `/raw` — coinbase transactions only, as
-  stored: witness-stripped, so for a coinbase with a witness commitment
-  they lack the 32-byte witness reserved value that Esplora's include.
+- `GET /api/tx/:txid/hex` / `/raw` — coinbase transactions without a
+  witness only, byte for byte Esplora's. The coinbase is stored
+  witness-stripped; one with a witness commitment output (every block
+  since segwit, in practice) has a witness, the 32-byte witness reserved
+  value, which isn't stored and no stored data pins down: 404 rather than
+  bytes other than Esplora's.
 
 A block whose body isn't completely indexed (above the body tip, or mid
 chunked upload) has no txids yet, and its txids count as unconfirmed.
