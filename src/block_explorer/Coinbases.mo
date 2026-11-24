@@ -153,4 +153,71 @@ module {
     out.toBlob();
   };
 
+  // ---------------------------------------------------------------------
+  // Witness commitment.
+  // ---------------------------------------------------------------------
+  //
+  // Whether a raw witness-stripped coinbase has a BIP141 witness
+  // commitment output: a scriptPubKey of at least 38 bytes that starts
+  // `6a 24 aa 21 a9 ed` (OP_RETURN, push 36, the commitment header). In a
+  // block whose coinbase has one (with segwit active), consensus requires
+  // the coinbase input's witness to be exactly one 32-byte item, the
+  // witness reserved value, which isn't stored: the full serialization of
+  // such a coinbase is then not known. Without one, no transaction of the
+  // block may carry witness data, so the stripped bytes are the full
+  // serialization. Before segwit activation no transaction may carry
+  // witness data at all, and an output of that shape means nothing (13 245
+  // mainnet coinbases between 434 499 and 481 823 have one).
+  //
+  // Null if `cb` doesn't parse as a transaction with one input that ends
+  // exactly at the end of the bytes. Never traps.
+
+  // First mainnet block with segwit (BIP141) active.
+  public let SEGWIT_HEIGHT : Nat = 481_824;
+
+  // Whether the stored (witness-stripped) canonical coinbase `cb` at
+  // `height` is the coinbase's full serialization: below segwit activation
+  // always; from activation on, when it has no witness commitment output.
+  public func isFullSerialization(height : Nat, cb : Blob) : Bool {
+    height < SEGWIT_HEIGHT or witnessCommitted(cb) == ?false;
+  };
+
+  // A CompactSize at `off`: (value, bytes taken), or null past the end.
+  func compactSize(cb : Blob, off : Nat) : ?(Nat, Nat) {
+    if (off >= cb.size()) return null;
+    let b0 = cb[off];
+    let k : Nat = if (b0 < 0xfd) return ?(b0.toNat(), 1) else if (b0 == 0xfd) 2 else if (b0 == 0xfe) 4 else 8;
+    if (off + 1 + k > cb.size()) return null;
+    var v = 0;
+    var i = k;
+    while (i > 0) { i -= 1; v := v * 256 + cb[off + 1 + i].toNat() };
+    ?(v, 1 + k);
+  };
+
+  public func witnessCommitted(cb : Blob) : ?Bool {
+    let n = cb.size();
+    // version (4), one input: prevout (36), scriptSig, sequence (4)
+    let ?(inputs, s1) = compactSize(cb, 4) else return null;
+    if (inputs != 1) return null;
+    let ?(sigLen, s2) = compactSize(cb, 4 + s1 + 36) else return null;
+    var off = 4 + s1 + 36 + s2 + sigLen + 4;
+    let ?(outputs, s3) = compactSize(cb, off) else return null;
+    off += s3;
+    var committed = false;
+    var o = 0;
+    while (o < outputs) {
+      off += 8; // value
+      let ?(scriptLen, s) = compactSize(cb, off) else return null;
+      off += s;
+      if (off + scriptLen > n) return null;
+      if (
+        scriptLen >= 38 and cb[off] == 0x6a and cb[off + 1] == 0x24 and cb[off + 2] == 0xaa and cb[off + 3] == 0x21 and cb[off + 4] == 0xa9 and cb[off + 5] == 0xed
+      ) committed := true;
+      off += scriptLen;
+      o += 1;
+    };
+    if (off + 4 != n) return null; // locktime, and nothing after it
+    ?committed;
+  };
+
 };

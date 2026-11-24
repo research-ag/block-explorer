@@ -1985,12 +1985,17 @@ module {
   public func txCountOfHash(self : State, hash : Blob) : ?Nat {
     switch (byHashInternal(self, hash)) {
       case null null;
-      case (?b) {
-        if (b.isCanonical and b.height < self.bodiesNextHeight) ?trieTxCount(self, b.height) else switch (forkBodyOf(self, b.hash)) {
-          case (?body) ?body.txids.size();
-          case null null;
-        };
-      };
+      case (?b) txCountOf(self, b);
+    };
+  };
+
+  // tx_count of a stored block (canonical or fork), or null if its body is
+  // not known. A canonical block counts only once its body is complete: the
+  // block of a chunked upload in progress has none yet.
+  public func txCountOf(self : State, b : StoredBlock) : ?Nat {
+    if (b.isCanonical) txCountAt(self, b.height) else switch (forkBodyOf(self, b.hash)) {
+      case (?body) ?body.txids.size();
+      case null null;
     };
   };
 
@@ -2044,11 +2049,10 @@ module {
     null;
   };
 
-  // All locations of `txid` (internal LE): the canonical occurrence (with its
-  // global serial index and in-block position) plus each fork block holding it.
-  public func txLocations(self : State, txid : Blob) : { canonical : ?TxCanonLoc; forks : [TxForkLoc] } {
-    if (txid.size() != 32) return { canonical = null; forks = [] };
-    let canonical : ?TxCanonLoc = switch (self.txTrie.lookup(txid)) {
+  // The canonical occurrence of `txid` (internal LE, 32 bytes) per the txid
+  // trie, or null. Includes the txids of a chunked upload in progress.
+  func canonicalLocation(self : State, txid : Blob) : ?TxCanonLoc {
+    switch (self.txTrie.lookup(txid)) {
       case (?(v, idx)) {
         let height = decodeHeight(v);
         let f = switch (Headers.get(self.headerTrie, height)) { case (?(_, hv)) HeaderValue.firstTxIndexOf(hv); case null 0 };
@@ -2056,6 +2060,26 @@ module {
       };
       case null null;
     };
+  };
+
+  // The canonical occurrence of `txid` (internal LE) in a block whose body is
+  // completely indexed, or null. Unlike `txLocations`, it leaves out the
+  // txids of a chunked upload in progress (their block lists no txids and
+  // has no tx_count until its last chunk), and it does not scan the fork
+  // bodies: a trie lookup and one header read.
+  public func indexedTxLocation(self : State, txid : Blob) : ?TxCanonLoc {
+    if (txid.size() != 32) return null;
+    switch (canonicalLocation(self, txid)) {
+      case (?l) if (l.height < self.bodiesNextHeight) ?l else null;
+      case null null;
+    };
+  };
+
+  // All locations of `txid` (internal LE): the canonical occurrence (with its
+  // global serial index and in-block position) plus each fork block holding it.
+  public func txLocations(self : State, txid : Blob) : { canonical : ?TxCanonLoc; forks : [TxForkLoc] } {
+    if (txid.size() != 32) return { canonical = null; forks = [] };
+    let canonical = canonicalLocation(self, txid);
     let fks = List.empty<TxForkLoc>();
     for ((hash, fb) in self.forks.entries()) {
       switch (fb.body) {
@@ -2074,37 +2098,41 @@ module {
   public func blockTxids(self : State, hash : Blob, offset : Nat, limit : Nat) : [Blob] {
     switch (byHashInternal(self, hash)) {
       case null [];
-      case (?b) {
-        if (b.isCanonical and b.height < self.bodiesNextHeight) {
-          // A zero-width segment is a compressed single-tx block (BIP30
-          // pair member): its only txid is the header's merkle root.
-          if (segmentWidth(self, b.height) == 0) {
-            if (offset >= 1 or limit == 0) return [];
-            return [HeaderValue.merkleOf(b.value)];
-          };
-          let f = HeaderValue.firstTxIndexOf(b.value);
-          let n = trieTxCount(self, b.height);
-          if (offset >= n) return [];
-          let rem : Nat = n - offset;
-          let take = if (limit < rem) limit else rem;
-          Array.tabulate<Blob>(
-            take,
-            func(i) = switch (self.txTrie.get(f + offset + i)) {
-              case (?(k, _)) k;
-              case null Runtime.trap("blockTxids: missing txid");
-            },
-          );
-        } else switch (forkBodyOf(self, b.hash)) {
-          case (?body) {
-            let n = body.txids.size();
-            if (offset >= n) return [];
-            let rem : Nat = n - offset;
-            let take = if (limit < rem) limit else rem;
-            Array.tabulate<Blob>(take, func(i) = body.txids[offset + i]);
-          };
-          case null [];
-        };
+      case (?b) blockTxidsOf(self, b, offset, limit);
+    };
+  };
+
+  // Txids of the stored block `b` in block order, internal LE, paginated.
+  // Empty if its body isn't known (see `txCountOf`).
+  public func blockTxidsOf(self : State, b : StoredBlock, offset : Nat, limit : Nat) : [Blob] {
+    if (b.isCanonical and b.height < self.bodiesNextHeight) {
+      // A zero-width segment is a compressed single-tx block (BIP30
+      // pair member): its only txid is the header's merkle root.
+      if (segmentWidth(self, b.height) == 0) {
+        if (offset >= 1 or limit == 0) return [];
+        return [HeaderValue.merkleOf(b.value)];
       };
+      let f = HeaderValue.firstTxIndexOf(b.value);
+      let n = trieTxCount(self, b.height);
+      if (offset >= n) return [];
+      let rem : Nat = n - offset;
+      let take = if (limit < rem) limit else rem;
+      Array.tabulate<Blob>(
+        take,
+        func(i) = switch (self.txTrie.get(f + offset + i)) {
+          case (?(k, _)) k;
+          case null Runtime.trap("blockTxids: missing txid");
+        },
+      );
+    } else switch (forkBodyOf(self, b.hash)) {
+      case (?body) {
+        let n = body.txids.size();
+        if (offset >= n) return [];
+        let rem : Nat = n - offset;
+        let take = if (limit < rem) limit else rem;
+        Array.tabulate<Blob>(take, func(i) = body.txids[offset + i]);
+      };
+      case null [];
     };
   };
 
