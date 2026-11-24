@@ -239,11 +239,11 @@ its wtxids (from a node, or from Esplora's `/block/:hash/txs`).
 
 ## Pre-activation coinbases
 
-Today's `/hex` rule answers 404 for any coinbase with a commitment-shaped
-output, at any height. From activation on, that is exact: such a coinbase
-always has a witness. Below 481 824, the stored bytes are always the full
-serialization, so a height check would let `/hex` serve any pre-activation
-coinbase that has such an output.
+`/hex` and `/raw` answer 404 for a coinbase with a commitment-shaped output
+only from activation on, where such a coinbase always has a witness. Below
+481 824 the stored bytes are always the full serialization, so every
+pre-activation coinbase is served (`Coinbases.isFullSerialization`), even
+one with such an output.
 
 Such coinbases exist. On 2026-11-24 I scanned every coinbase below 481 824
 stored in the mainnet canister with the same test as
